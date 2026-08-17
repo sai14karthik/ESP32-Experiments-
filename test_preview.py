@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Live USB preview for the camera module."""
-
 import struct
 import sys
 import time
@@ -13,7 +11,7 @@ import serial
 PORT = "/dev/cu.usbmodem101"
 BAUD = 921600
 MAGIC = b"CAM0"
-OUT = Path(__file__).resolve().parent / "preview.jpg"
+# OUT = Path(__file__).resolve().parent / "preview.jpg"
 
 
 def read_exact(ser, n):
@@ -54,7 +52,7 @@ def main():
 
     print("Waiting for camera frames. Press q in the preview window to quit.")
     shown = False
-    saved = False
+    # saved = False
     while True:
         jpeg = sync_frame(ser)
         if not jpeg:
@@ -63,10 +61,10 @@ def main():
         img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
-        if not saved:
-            OUT.write_bytes(jpeg)
-            saved = True
-            print(f"Saved first frame to {OUT}")
+        # if not saved:
+        #     OUT.write_bytes(jpeg)
+        #     saved = True
+        #     print(f"Saved first frame to {OUT}")
         cv2.imshow("Camera module", img)
         shown = True
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -75,7 +73,7 @@ def main():
     ser.close()
     if shown:
         cv2.destroyAllWindows()
-    return 0 if saved else 1
+    return 0 if shown else 1
 
 
 if __name__ == "__main__":
