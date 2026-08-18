@@ -61,8 +61,7 @@ def sync_frame(ser):
 
 
 def main():
-    print(f"Opening {PORT}...")
-    print("Close Arduino Serial Monitor first if it is open.")
+    print(f"Opening {PORT}")
     ser = serial.Serial(PORT, BAUD, timeout=1)
     time.sleep(2.0)
     ser.reset_input_buffer()
@@ -73,7 +72,7 @@ def main():
     while True:
         jpeg = sync_frame(ser)
         if not jpeg:
-            print("No frame yet, retrying... (is CameraSerial.ino uploaded, and Serial Monitor closed?)")
+            print("No frame yet, retrying(is CameraSerial.ino uploaded, and Serial Monitor closed?)")
             continue
         img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
