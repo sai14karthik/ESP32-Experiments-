@@ -47,8 +47,18 @@ def sync_frame(ser):
 def main():
     print(f"Opening {PORT}...")
     ser = serial.Serial(PORT, BAUD, timeout=1)
-    time.sleep(1.5)
-    ser.reset_input_buffer()
+    time.sleep(2.5)
+    leftover = ser.read(2048)
+    if leftover:
+        text = leftover.decode("utf-8", errors="replace")
+        if "Camera init failed" in text:
+            print(text)
+            print("Camera failed to start. Re-upload CameraSerial.ino with PSRAM = OPI PSRAM.")
+            ser.close()
+            return 1
+        if b"CAM0" not in leftover:
+            print("Board said:")
+            print(text[:400])
 
     print("Waiting for camera frames. Press q in the preview window to quit.")
     shown = False
@@ -56,7 +66,7 @@ def main():
     while True:
         jpeg = sync_frame(ser)
         if not jpeg:
-            print("No frame yet, retrying...")
+            print("No frame yet, retrying... (is CameraSerial.ino uploaded, and Serial Monitor closed?)")
             continue
         img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
