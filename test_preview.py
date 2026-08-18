@@ -28,37 +28,44 @@ def sync_frame(ser):
     window = bytearray()
     deadline = time.time() + 8
     while time.time() < deadline:
-        b = ser.read(1)
-        if not b:
+        chunk = ser.read(256)
+        if not chunk:
             continue
-        window += b
-        if len(window) > 4:
-            window = window[-4:]
-        if bytes(window) == MAGIC:
-            header = read_exact(ser, 4)
-            if not header:
-                return None
-            (length,) = struct.unpack("<I", header)
-            if 1000 < length < 200_000:
-                return read_exact(ser, length)
+        window += chunk
+        while True:
+            idx = window.find(MAGIC)
+            if idx < 0:
+                window = window[-3:]
+                break
+            window = window[idx + 4 :]
+            while len(window) < 4:
+                extra = ser.read(4 - len(window))
+                if not extra:
+                    return None
+                window += extra
+            (length,) = struct.unpack("<I", window[:4])
+            window = window[4:]
+            if not (1000 < length < 200_000):
+                continue
+            payload = bytes(window[:length])
+            window = window[length:]
+            missing = length - len(payload)
+            if missing:
+                rest = read_exact(ser, missing)
+                if not rest:
+                    return None
+                payload += rest
+            if payload.startswith(b"\xff\xd8"):
+                return payload
     return None
 
 
 def main():
     print(f"Opening {PORT}...")
+    print("Close Arduino Serial Monitor first if it is open.")
     ser = serial.Serial(PORT, BAUD, timeout=1)
-    time.sleep(2.5)
-    leftover = ser.read(2048)
-    if leftover:
-        text = leftover.decode("utf-8", errors="replace")
-        if "Camera init failed" in text:
-            print(text)
-            print("Camera failed to start. Re-upload CameraSerial.ino with PSRAM = OPI PSRAM.")
-            ser.close()
-            return 1
-        if b"CAM0" not in leftover:
-            print("Board said:")
-            print(text[:400])
+    time.sleep(2.0)
+    ser.reset_input_buffer()
 
     print("Waiting for camera frames. Press q in the preview window to quit.")
     shown = False
