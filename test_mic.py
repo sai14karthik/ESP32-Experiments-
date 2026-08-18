@@ -73,7 +73,18 @@ def main():
     print(f"Opening {PORT}")
     print("Close Arduino Serial Monitor / Plotter first.")
     print("MicPlotter.ino must already be uploaded.")
-    ser = serial.Serial(PORT, BAUD, timeout=1)
+    try:
+        ser = serial.Serial()
+        ser.port = PORT
+        ser.baudrate = BAUD
+        ser.timeout = 1
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+    except serial.SerialException as e:
+        print(f"Could not open {PORT}: {e}")
+        print("Close Serial Monitor / Plotter and the other preview script.")
+        return 1
     time.sleep(2.0)
     ser.reset_input_buffer()
 

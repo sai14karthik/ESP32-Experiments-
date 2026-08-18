@@ -2,7 +2,6 @@
 import struct
 import sys
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -11,7 +10,6 @@ import serial
 PORT = "/dev/cu.usbmodem101"
 BAUD = 921600
 MAGIC = b"CAM0"
-# OUT = Path(__file__).resolve().parent / "preview.jpg"
 
 
 def read_exact(ser, n):
@@ -62,25 +60,34 @@ def sync_frame(ser):
 
 def main():
     print(f"Opening {PORT}")
-    ser = serial.Serial(PORT, BAUD, timeout=1)
+    print("Close Arduino Serial Monitor first. CameraSerial.ino must be uploaded.")
+    try:
+        ser = serial.Serial()
+        ser.port = PORT
+        ser.baudrate = BAUD
+        ser.timeout = 1
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+    except serial.SerialException as e:
+        print(f"Could not open {PORT}: {e}")
+        print("Close Serial Monitor / Plotter and the other preview script.")
+        return 1
     time.sleep(2.0)
     ser.reset_input_buffer()
 
     print("Waiting for camera frames. Press q in the preview window to quit.")
     shown = False
-    # saved = False
     while True:
         jpeg = sync_frame(ser)
         if not jpeg:
-            print("No frame yet, retrying(is CameraSerial.ino uploaded, and Serial Monitor closed?)")
+            print("No frame yet, retrying (is CameraSerial.ino uploaded, and Serial Monitor closed?)")
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
             continue
         img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
-        # if not saved:
-        #     OUT.write_bytes(jpeg)
-        #     saved = True
-        #     print(f"Saved first frame to {OUT}")
         cv2.imshow("Camera module", img)
         shown = True
         if cv2.waitKey(1) & 0xFF == ord("q"):

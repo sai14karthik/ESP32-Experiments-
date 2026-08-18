@@ -28,7 +28,7 @@ void setup() {
 void loop() {
   int16_t samples[256];
   int n = i2s.readBytes(reinterpret_cast<char *>(samples), sizeof(samples));
-  if (n <= 0) {
+  if (n < 2) {
     return;
   }
 
