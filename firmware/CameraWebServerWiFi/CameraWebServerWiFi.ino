@@ -10,8 +10,8 @@
 // ===========================
 // Enter your WiFi credentials
 // ===========================
-const char *ssid = "SpectrumSetup-EB9C";
-const char *password = "unitedvideo788";
+const char *ssid = "SaiPhone";
+const char *password = "123456789";
 
 void startCameraServer();
 void setupLedFlash();
@@ -91,7 +91,6 @@ void setup() {
   // drop down frame size for higher initial frame rate
   if (config.pixel_format == PIXFORMAT_JPEG) {
     s->set_framesize(s, FRAMESIZE_QVGA);
-    s->set_quality(s, 12);
   }
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
@@ -127,6 +126,5 @@ void setup() {
 }
 
 void loop() {
-  // Do nothing. Everything is done in another task by the web server
   delay(10000);
 }
