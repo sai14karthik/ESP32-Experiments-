@@ -157,9 +157,6 @@ static size_t jpg_encode_stream(void *arg, size_t index, const void *data, size_
 static esp_err_t capture_handler(httpd_req_t *req) {
   camera_fb_t *fb = NULL;
   esp_err_t res = ESP_OK;
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-  int64_t fr_start = esp_timer_get_time();
-#endif
 
 #if defined(LED_GPIO_NUM)
   enable_led(true);
@@ -179,33 +176,21 @@ static esp_err_t capture_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "image/jpeg");
   httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
   char ts[32];
   // Cast to uint32_t is safe until year 2106.
   snprintf(ts, 32, "%" PRIu32 ".%06" PRIu32, (uint32_t)fb->timestamp.tv_sec, (uint32_t)fb->timestamp.tv_usec);
   httpd_resp_set_hdr(req, "X-Timestamp", (const char *)ts);
 
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-  size_t fb_len = 0;
-#endif
   if (fb->format == PIXFORMAT_JPEG) {
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-    fb_len = fb->len;
-#endif
     res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
   } else {
     jpg_chunking_t jchunk = {req, 0};
     res = frame2jpg_cb(fb, 80, jpg_encode_stream, &jchunk) ? ESP_OK : ESP_FAIL;
     httpd_resp_send_chunk(req, NULL, 0);
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-    fb_len = jchunk.len;
-#endif
   }
   esp_camera_fb_return(fb);
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-  int64_t fr_end = esp_timer_get_time();
-#endif
-  log_i("JPG: %" PRIu32 "B %" PRId32 " ms", (uint32_t)fb_len, (int32_t)((fr_end - fr_start) / 1000));
   return res;
 }
 
@@ -228,6 +213,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   }
 
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_set_hdr(req, "X-Framerate", "60");
 
 #if defined(LED_GPIO_NUM)
@@ -285,12 +271,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 
     frame_time /= 1000;
 #if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-    uint32_t avg_frame_time = ra_filter_run(&ra_filter, frame_time);
+    ra_filter_run(&ra_filter, frame_time);
 #endif
-    log_i(
-      "MJPG: %" PRIu32 "B %" PRId32 "ms (%.1ffps), AVG: %" PRIu32 "ms (%.1ffps)", (uint32_t)_jpg_buf_len, (int32_t)frame_time, 1000.0 / frame_time,
-      avg_frame_time, 1000.0 / avg_frame_time
-    );
   }
 
 #if defined(LED_GPIO_NUM)
@@ -675,6 +657,8 @@ static esp_err_t index_handler(httpd_req_t *req) {
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 16;
+  config.max_open_sockets = 4;
+  config.lru_purge_enable = true;
 
   httpd_uri_t index_uri = {
     .uri = "/",
@@ -828,6 +812,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &status_uri);
     httpd_register_uri_handler(camera_httpd, &capture_uri);
     httpd_register_uri_handler(camera_httpd, &bmp_uri);
+    httpd_register_uri_handler(camera_httpd, &stream_uri);
 
     httpd_register_uri_handler(camera_httpd, &xclk_uri);
     httpd_register_uri_handler(camera_httpd, &reg_uri);

@@ -12,7 +12,7 @@ void setupLedFlash();
 
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(true);
+  Serial.setDebugOutput(false);
   Serial.println();
 
   camera_config_t config = {};
@@ -35,21 +35,19 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_UXGA;
+  config.frame_size = FRAMESIZE_QVGA;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.fb_count = 2;
 
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    if (psramFound()) {
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-    } else {
-      config.frame_size = FRAMESIZE_SVGA;
+    if (!psramFound()) {
+      config.frame_size = FRAMESIZE_QVGA;
       config.fb_location = CAMERA_FB_IN_DRAM;
+      config.fb_count = 1;
+      config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     }
   } else {
     config.frame_size = FRAMESIZE_240X240;
@@ -72,6 +70,7 @@ void setup() {
   }
   if (config.pixel_format == PIXFORMAT_JPEG) {
     s->set_framesize(s, FRAMESIZE_QVGA);
+    s->set_quality(s, 12);
   }
 
 #if defined(LED_GPIO_NUM)
