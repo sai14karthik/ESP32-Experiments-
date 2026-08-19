@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import serial
 
-PORT = "/dev/cu.usbmodem101"
+PORT = "/dev/cu.usbmodem21201"
 BAUD = 921600
 MAGIC = b"CAM0"
 
