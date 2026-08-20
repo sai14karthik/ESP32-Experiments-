@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import glob
 import struct
 import sys
 import time
@@ -7,7 +8,6 @@ import cv2
 import numpy as np
 import serial
 
-PORT = "/dev/cu.usbmodem21201"
 BAUD = 921600
 MAGIC = b"CAM0"
 
@@ -58,19 +58,30 @@ def sync_frame(ser):
     return None
 
 
+def find_port():
+    ports = sorted(glob.glob("/dev/cu.usbmodem*"))
+    if not ports:
+        print("No /dev/cu.usbmodem* — plug in the XIAO USB cable.")
+        return None
+    return ports[0]
+
+
 def main():
-    print(f"Opening {PORT}")
+    port = find_port()
+    if not port:
+        return 1
+    print(f"Opening {port}")
     print("Close Arduino Serial Monitor first. CameraSerial.ino must be uploaded.")
     try:
         ser = serial.Serial()
-        ser.port = PORT
+        ser.port = port
         ser.baudrate = BAUD
         ser.timeout = 1
         ser.dtr = False
         ser.rts = False
         ser.open()
     except serial.SerialException as e:
-        print(f"Could not open {PORT}: {e}")
+        print(f"Could not open {port}: {e}")
         print("Close Serial Monitor / Plotter and the other preview script.")
         return 1
     time.sleep(2.0)
