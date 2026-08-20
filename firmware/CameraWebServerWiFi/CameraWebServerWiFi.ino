@@ -10,8 +10,13 @@
 // ===========================
 // Enter your WiFi credentials
 // ===========================
-const char *ssid = "SaiPhone";
-const char *password = "123456789";
+
+//const char *ssid = "SaiPhone";
+//const char *password = "123456789";
+
+const char *ssid = "SpectrumSetup-EB9C";
+const char *password = "unitedvideo788";
+
 
 void startCameraServer();
 void setupLedFlash();
