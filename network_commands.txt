@@ -1,0 +1,73 @@
+# XIAO ESP32-S3 Sense — basic network commands (macOS)
+# This board: Wi-Fi MAC 44:bd:8d:eb:de:f8  (camera and mic share this MAC)
+# Port name often /dev/cu.usbmodem101 or /dev/cu.usbmodem21201 — check first.
+# Opening USB serial / esptool resets the board and drops Wi-Fi for ~15s.
+
+# ---------- 1) USB port ----------
+ls /dev/cu.usbmodem*
+
+# ---------- 2) MAC address ----------
+python3 -m esptool --port /dev/cu.usbmodem101 chip-id
+
+# In Arduino sketch after WiFi starts:
+#   Serial.println(WiFi.macAddress());
+#   Serial.println(WiFi.localIP());
+# Serial Monitor: 115200 baud. Close it before streaming or uploading.
+
+# ---------- 3) This Mac: Wi-Fi and IP ----------
+networksetup -getairportnetwork en0
+ipconfig getifaddr en0
+ifconfig en0 | grep inet
+
+# ---------- 4) Set camera IP after you read it from Serial ----------
+# Examples seen before:
+#   Home Spectrum:     192.168.1.86
+#   SaiPhone hotspot:  172.20.10.3
+#   Guest_Access:      172.16.118.209
+CAMERA_IP=172.20.10.3
+
+# ---------- 5) Reachability ----------
+ping -c 3 "$CAMERA_IP"
+arp -n "$CAMERA_IP"
+nc -G 2 -vz "$CAMERA_IP" 80
+nc -G 2 -vz "$CAMERA_IP" 81
+
+# ---------- 6) Camera web server (firmware CameraWebServerWiFi) ----------
+# Page (port 80)
+curl -sS -m 5 -D - -o /tmp/cam_index.bin -w '\nhttp:%{http_code} size:%{size_download}\n' "http://$CAMERA_IP/"
+
+# Status JSON
+curl -sS -m 5 "http://$CAMERA_IP/status"
+
+# One still JPEG
+curl -sS -m 5 -o /tmp/cam_capture.jpg "http://$CAMERA_IP/capture"
+file /tmp/cam_capture.jpg
+
+# Live MJPEG (port 81) — Ctrl+C to stop; Safari often cannot show this in the page
+curl -sS -m 3 -D - -o /tmp/cam_stream.bin "http://$CAMERA_IP:81/stream"
+file /tmp/cam_stream.bin
+
+# Open in browser (include http://)
+#   http://$CAMERA_IP/
+# Chrome on macOS: System Settings → Privacy & Security → Local Network → Google Chrome ON
+
+# ---------- 7) If ping/curl fail (No route to host / ERR_ADDRESS_UNREACHABLE) ----------
+# Same SSID is required. Hospital Guest_Access often blocks device-to-device.
+# Use SaiPhone hotspot or the camera SoftAP (CameraWebServer sketch → http://192.168.4.1).
+route -n get "$CAMERA_IP"
+networksetup -getairportnetwork en0
+ipconfig getifaddr en0
+
+# ---------- 8) Arduino USB serial log (115200). Resets the board. ----------
+# python3 -c "
+# import glob, serial, time
+# p = glob.glob('/dev/cu.usbmodem*')[0]
+# s = serial.Serial(); s.port=p; s.baudrate=115200; s.timeout=0.2
+# s.dtr=False; s.rts=False; s.open()
+# time.sleep(0.2); s.rts=True; time.sleep(0.15); s.rts=False
+# t=time.time()+40
+# while time.time()<t:
+#     d=s.read(2048)
+#     if d: print(d.decode('utf-8','replace'), end='')
+# s.close()
+# "
