@@ -286,11 +286,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     frame_time /= 1000;
 #if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
     uint32_t avg_frame_time = ra_filter_run(&ra_filter, frame_time);
+    (void)avg_frame_time;
 #endif
-    log_i(
-      "MJPG: %" PRIu32 "B %" PRId32 "ms (%.1ffps), AVG: %" PRIu32 "ms (%.1ffps)", (uint32_t)_jpg_buf_len, (int32_t)frame_time, 1000.0 / frame_time,
-      avg_frame_time, 1000.0 / avg_frame_time
-    );
   }
 
 #if defined(LED_GPIO_NUM)
