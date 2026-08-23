@@ -71,3 +71,15 @@ ipconfig getifaddr en0
 #     if d: print(d.decode('utf-8','replace'), end='')
 # s.close()
 # "
+
+
+
+source "/Users/saikarthik/.espressif/tools/activate_idf_v6.0.2.sh"
+cd "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_recv_router"
+idf.py set-target esp32c5
+idf.py -p /dev/cu.usbmodem2101 flash monitor
+
+
+source "/Users/saikarthik/.espressif/tools/activate_idf_v6.0.2.sh"
+cd "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_recv_router"
+idf.py -p /dev/cu.usbmodem2101 monitor
