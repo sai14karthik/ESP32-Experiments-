@@ -31,7 +31,13 @@ def main():
     ser.timeout = 1
     ser.dtr = False
     ser.rts = False
-    ser.open()
+    try:
+        ser.open()
+    except serial.SerialException as exc:
+        sys.exit(
+            f"{exc}\n"
+            "Port is busy. Close Arduino Serial Monitor and Serial Plotter, then run this again."
+        )
     time.sleep(2.0)
     ser.reset_input_buffer()
 
