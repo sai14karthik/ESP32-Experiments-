@@ -3,13 +3,14 @@
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 
-// One C5 + Spectrum. CSI comes from ping replies.
-// Arduino: ESP32C5 Dev Module, Flash 4MB, USB CDC On Boot Enabled, 115200.
+// Arduino port of Espressif get-started/csi_recv_router (method 1: ping AP, CSI from replies).
+// Board: ESP32C5 Dev Module, Flash 4MB, USB CDC On Boot Enabled.
+// Serial Monitor: 921600. Arduino cannot use esp_csi_gain_ctrl, so fft/agc print as 0.
 
 const char *ssid = "SpectrumSetup-EB9C";
 const char *password = "unitedvideo788";
 
-static const uint32_t kPingIntervalMs = 100;
+static const uint32_t kPingHz = 100;
 static const uint32_t kConnectTimeoutMs = 20000;
 static const uint32_t kReconnectMs = 3000;
 static const int kCsiBufMax = 512;
@@ -31,11 +32,10 @@ struct CsiRecord {
 };
 
 static uint8_t apBssid[6];
-static uint8_t staMac[6];
 static QueueHandle_t csiQueue = nullptr;
 static esp_ping_handle_t pingHandle = nullptr;
 static bool csiStarted = false;
-static uint32_t seq = 0;
+static int sCount = 0;
 static unsigned long lastReconnectMs = 0;
 static volatile uint32_t csiKept = 0;
 static volatile uint32_t csiDropped = 0;
@@ -50,19 +50,18 @@ static void onPingOk(esp_ping_handle_t, void *) {
   pingOk++;
 }
 
+// Same rule as official wifi_csi_rx_cb: keep frames whose source MAC is the AP.
+// Arduino C5 often reports 00:00:00:00:00:00; those are kept and labeled as the AP.
 static void csiRxCallback(void *ctx, wifi_csi_info_t *info) {
-  if (!info || !info->buf || info->len == 0) {
+  if (!info || !info->buf) {
     return;
   }
-  if (!info->rx_ctrl.rx_channel_estimate_info_vld) {
+  if (!info->rx_ctrl.rx_channel_estimate_info_vld || info->len == 0) {
     return;
   }
 
-  const bool fromAp = (memcmp(info->mac, apBssid, 6) == 0);
-  const bool toAp = (memcmp(info->dmac, apBssid, 6) == 0);
-  const bool toUs = (memcmp(info->dmac, staMac, 6) == 0);
-  const bool c5BlankMac = macIsZero(info->mac) && (toUs || toAp);
-  if (!fromAp && !toAp && !toUs && !c5BlankMac) {
+  const uint8_t *ap = static_cast<const uint8_t *>(ctx);
+  if (memcmp(info->mac, ap, 6) != 0 && !macIsZero(info->mac)) {
     csiOther++;
     return;
   }
@@ -74,7 +73,7 @@ static void csiRxCallback(void *ctx, wifi_csi_info_t *info) {
 
   CsiRecord rec = {};
   if (macIsZero(info->mac)) {
-    memcpy(rec.mac, apBssid, 6);
+    memcpy(rec.mac, ap, 6);
   } else {
     memcpy(rec.mac, info->mac, 6);
   }
@@ -111,8 +110,8 @@ static void csiPrintTask(void *) {
     }
 
     int p = snprintf(line, sizeof(line),
-                     "CSI_DATA,%lu,%02x:%02x:%02x:%02x:%02x:%02x,%d,%u,%d,0,0,%u,%lu,%u,%u,%u,%u,\"[",
-                     (unsigned long)seq++,
+                     "CSI_DATA,%d,%02x:%02x:%02x:%02x:%02x:%02x,%d,%u,%d,0,0,%u,%lu,%u,%u,%u,%u,\"[",
+                     sCount++,
                      rec.mac[0], rec.mac[1], rec.mac[2], rec.mac[3], rec.mac[4], rec.mac[5],
                      (int)rec.rssi, rec.rate, (int)rec.noise_floor, rec.channel,
                      (unsigned long)rec.timestamp, rec.sig_len, rec.rx_format,
@@ -130,7 +129,17 @@ static void csiPrintTask(void *) {
   }
 }
 
-static void startPing() {
+static void stopPing() {
+  if (!pingHandle) {
+    return;
+  }
+  esp_ping_stop(pingHandle);
+  esp_ping_delete_session(pingHandle);
+  pingHandle = nullptr;
+}
+
+static void wifiPingRouterStart() {
+  stopPing();
   IPAddress gw = WiFi.gatewayIP();
   ip_addr_t target;
   IP_ADDR4(&target, gw[0], gw[1], gw[2], gw[3]);
@@ -138,37 +147,38 @@ static void startPing() {
   esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
   cfg.target_addr = target;
   cfg.count = ESP_PING_COUNT_INFINITE;
-  cfg.interval_ms = kPingIntervalMs;
+  cfg.interval_ms = 1000 / kPingHz;
   cfg.data_size = 1;
 
   esp_ping_callbacks_t cbs = {};
   cbs.on_ping_success = onPingOk;
   if (esp_ping_new_session(&cfg, &cbs, &pingHandle) == ESP_OK) {
     esp_ping_start(pingHandle);
-    Serial.printf("# ping %s every %lu ms\n", gw.toString().c_str(), (unsigned long)kPingIntervalMs);
+    Serial.printf("# ping %s %lu/s\n", gw.toString().c_str(), (unsigned long)kPingHz);
   } else {
-    Serial.println("# ping failed — CSI only from beacons");
+    Serial.println("# ping failed");
   }
 }
 
-static void startCsi() {
+// Official C5 csi_config from csi_recv_router. Promiscuous is Arduino-C5 only:
+// without it the CSI callback never runs in Arduino.
+static void wifiCsiInit() {
   memcpy(apBssid, WiFi.BSSID(), 6);
-  esp_wifi_get_mac(WIFI_IF_STA, staMac);
 
   wifi_csi_config_t csi = {};
-  csi.enable = 1;
-  csi.acquire_csi_legacy = 1;
+  csi.enable = true;
+  csi.acquire_csi_legacy = true;
   csi.acquire_csi_force_lltf = 0;
-  csi.acquire_csi_ht20 = 1;
-  csi.acquire_csi_ht40 = 1;
-  csi.acquire_csi_vht = 1;
-  csi.acquire_csi_su = 1;
-  csi.acquire_csi_mu = 0;
-  csi.acquire_csi_dcm = 0;
-  csi.acquire_csi_beamformed = 0;
+  csi.acquire_csi_ht20 = true;
+  csi.acquire_csi_ht40 = true;
+  csi.acquire_csi_vht = false;
+  csi.acquire_csi_su = false;
+  csi.acquire_csi_mu = false;
+  csi.acquire_csi_dcm = false;
+  csi.acquire_csi_beamformed = false;
   csi.acquire_csi_he_stbc_mode = 2;
   csi.val_scale_cfg = 0;
-  csi.dump_ack_en = 1;
+  csi.dump_ack_en = false;
 
   wifi_promiscuous_filter_t filt = {};
   filt.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL;
@@ -178,7 +188,6 @@ static void startCsi() {
   ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csiRxCallback, apBssid));
   ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 
-  startPing();
   csiStarted = true;
   Serial.printf("# CSI %s %s ch %d\n",
                 WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(), WiFi.channel());
@@ -205,7 +214,7 @@ static bool connectWifi(uint32_t timeoutMs) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
   Serial.setDebugOutput(false);
   Serial.setTxTimeoutMs(0);
   delay(800);
@@ -219,14 +228,16 @@ void setup() {
   WiFi.setSleep(false);
 
   if (connectWifi(kConnectTimeoutMs)) {
-    startCsi();
+    wifiCsiInit();
+    wifiPingRouterStart();
   }
 }
 
 void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!csiStarted) {
-      startCsi();
+      wifiCsiInit();
+      wifiPingRouterStart();
     }
     static unsigned long lastStats = 0;
     if (millis() - lastStats >= 5000) {
@@ -239,11 +250,14 @@ void loop() {
     return;
   }
 
+  csiStarted = false;
+  stopPing();
   const unsigned long now = millis();
   if (now - lastReconnectMs >= kReconnectMs) {
     lastReconnectMs = now;
-    if (connectWifi(kConnectTimeoutMs) && !csiStarted) {
-      startCsi();
+    if (connectWifi(kConnectTimeoutMs)) {
+      wifiCsiInit();
+      wifiPingRouterStart();
     }
   }
 }

@@ -8,7 +8,7 @@ import time
 
 import serial
 
-BAUD = 115200
+BAUD = 921600
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data")
 
