@@ -6,11 +6,11 @@
 #include "board_config.h"
 #include "upload_url.h"
 
-//const char *ssid = "SaiPhone";
-//const char *password = "123456789";
+const char *ssid = "SaiPhone";
+const char *password = "123456789";
 
-const char *ssid = "SpectrumSetup-EB9C";
-const char *password = "unitedvideo788";
+//const char *ssid = "SpectrumSetup-EB9C";
+//const char *password = "unitedvideo788";
 
 static WiFiClientSecure tls;
 static HTTPClient http;

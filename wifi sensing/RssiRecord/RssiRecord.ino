@@ -59,8 +59,12 @@ void loop() {
 
 #include <WiFi.h>
 
-const char *ssid = "SpectrumSetup-EB9C";
-const char *password = "unitedvideo788";
+//const char *ssid = "SpectrumSetup-EB9C";
+//const char *password = "unitedvideo788";
+
+const char *ssid = "LabHealthSecurePSK";
+const char *password = "ZLMKAQm@UV2e9g8r7GW!";
+
 
 static const unsigned long kSampleMs = 100;
 static const unsigned long kReconnectMs = 3000;
@@ -108,11 +112,9 @@ void loop() {
 
   int rssi = WiFi.RSSI();
 
-  if (rssi < -56) {
-    Serial.println("Its covered I guess");
-  }
-else {
+ 
+
     Serial.println(rssi);
 
-}
+
 }

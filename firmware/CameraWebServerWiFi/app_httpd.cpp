@@ -22,6 +22,9 @@
 #include "sdkconfig.h"
 #include "camera_index.h"
 #include "board_config.h"
+#include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -48,6 +51,30 @@ static const char *_STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 
 httpd_handle_t stream_httpd = NULL;
 httpd_handle_t camera_httpd = NULL;
+
+// Only one MJPEG client can own the camera. Closing a tab does not always
+// close the TCP socket, so a reopen used to start a second /stream and both
+// starved the framebuffers (video worked once, then went black).
+static SemaphoreHandle_t s_stream_lock = NULL;
+static volatile uint32_t s_stream_id = 0;
+static volatile int s_stream_sock = -1;
+
+static void stream_sock_keepalive(httpd_req_t *req) {
+  int fd = httpd_req_to_sockfd(req);
+  if (fd < 0) {
+    return;
+  }
+  int yes = 1;
+  setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+#ifdef TCP_KEEPIDLE
+  int idle = 2;
+  int interval = 1;
+  int count = 2;
+  setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+  setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+  setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+#endif
+}
 
 typedef struct {
   size_t size;   //number of values used for filtering
@@ -216,45 +243,78 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   size_t _jpg_buf_len = 0;
   uint8_t *_jpg_buf = NULL;
   char *part_buf[128];
+  int capture_fails = 0;
+  const uint32_t my_id = ++s_stream_id;
+  const int my_fd = httpd_req_to_sockfd(req);
 
   static int64_t last_frame = 0;
   if (!last_frame) {
     last_frame = esp_timer_get_time();
   }
 
+  // Closing the browser often leaves /stream open. Kick that socket so this
+  // new viewer can take the camera instead of hanging on a black image.
+  if (s_stream_sock >= 0 && s_stream_sock != my_fd && stream_httpd) {
+    httpd_sess_trigger_close(stream_httpd, s_stream_sock);
+  }
+
+  if (!s_stream_lock || xSemaphoreTake(s_stream_lock, pdMS_TO_TICKS(8000)) != pdTRUE) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  if (my_id != s_stream_id) {
+    xSemaphoreGive(s_stream_lock);
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  s_stream_sock = my_fd;
+
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if (res != ESP_OK) {
+    if (s_stream_sock == my_fd) {
+      s_stream_sock = -1;
+    }
+    xSemaphoreGive(s_stream_lock);
     return res;
   }
 
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "X-Framerate", "60");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  httpd_resp_set_hdr(req, "Pragma", "no-cache");
+  stream_sock_keepalive(req);
 
 #if defined(LED_GPIO_NUM)
   isStreaming = true;
   enable_led(true);
 #endif
 
-  while (true) {
+  while (my_id == s_stream_id) {
     fb = esp_camera_fb_get();
     if (!fb) {
       log_e("Camera capture failed");
-      res = ESP_FAIL;
-    } else {
-      _timestamp.tv_sec = fb->timestamp.tv_sec;
-      _timestamp.tv_usec = fb->timestamp.tv_usec;
-      if (fb->format != PIXFORMAT_JPEG) {
-        bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
-        esp_camera_fb_return(fb);
-        fb = NULL;
-        if (!jpeg_converted) {
-          log_e("JPEG compression failed");
-          res = ESP_FAIL;
-        }
-      } else {
-        _jpg_buf_len = fb->len;
-        _jpg_buf = fb->buf;
+      if (++capture_fails > 30) {
+        res = ESP_FAIL;
+        break;
       }
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+    capture_fails = 0;
+    _timestamp.tv_sec = fb->timestamp.tv_sec;
+    _timestamp.tv_usec = fb->timestamp.tv_usec;
+    if (fb->format != PIXFORMAT_JPEG) {
+      bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
+      esp_camera_fb_return(fb);
+      fb = NULL;
+      if (!jpeg_converted) {
+        log_e("JPEG compression failed");
+        res = ESP_FAIL;
+        break;
+      }
+    } else {
+      _jpg_buf_len = fb->len;
+      _jpg_buf = fb->buf;
     }
     if (res == ESP_OK) {
       res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
@@ -295,6 +355,10 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   enable_led(false);
 #endif
 
+  if (s_stream_sock == my_fd) {
+    s_stream_sock = -1;
+  }
+  xSemaphoreGive(s_stream_lock);
   return res;
 }
 
@@ -672,6 +736,11 @@ static esp_err_t index_handler(httpd_req_t *req) {
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 16;
+  config.lru_purge_enable = true;
+
+  if (!s_stream_lock) {
+    s_stream_lock = xSemaphoreCreateMutex();
+  }
 
   httpd_uri_t index_uri = {
     .uri = "/",
@@ -835,6 +904,10 @@ void startCameraServer() {
 
   config.server_port += 1;
   config.ctrl_port += 1;
+  config.max_open_sockets = 3;
+  config.lru_purge_enable = true;
+  config.send_wait_timeout = 2;
+  config.recv_wait_timeout = 2;
   log_i("Starting stream server on port: '%u'", config.server_port);
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);

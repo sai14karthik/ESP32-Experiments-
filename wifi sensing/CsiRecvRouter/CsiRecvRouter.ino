@@ -7,8 +7,11 @@
 // Board: ESP32C5 Dev Module, Flash 4MB, USB CDC On Boot Enabled.
 // Serial Monitor: 921600. Arduino cannot use esp_csi_gain_ctrl, so fft/agc print as 0.
 
-const char *ssid = "SpectrumSetup-EB9C";
-const char *password = "unitedvideo788";
+//const char *ssid = "SpectrumSetup-EB9C";
+//const char *password = "unitedvideo788";
+
+const char *ssid = "LabHealthSecurePSK";
+const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 static const uint32_t kPingHz = 100;
 static const uint32_t kConnectTimeoutMs = 20000;
