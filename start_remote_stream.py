@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 URL_HEADER = ROOT / "firmware" / "CameraRemoteUpload" / "upload_url.h"
-NGROK_DOMAIN = "unsublimed-lani-torquate.ngrok-free.dev"
+NGROK_DOMAIN = "silica-cosigner-quail.ngrok-free.dev"
 
 
 def wait_ngrok_url(timeout: float = 25.0) -> str:
