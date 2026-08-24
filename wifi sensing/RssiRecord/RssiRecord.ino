@@ -108,7 +108,7 @@ void loop() {
 
   int rssi = WiFi.RSSI();
 
-  if (rssi < -58) {
+  if (rssi < -56) {
     Serial.println("Its covered I guess");
   }
 else {
