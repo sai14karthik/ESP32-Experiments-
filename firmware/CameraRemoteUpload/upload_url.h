@@ -1,2 +1,2 @@
 #pragma once
-#define UPLOAD_URL "https://unsublimed-lani-torquate.ngrok-free.dev/upload"
+#define UPLOAD_URL "https://silica-cosigner-quail.ngrok-free.dev/upload"

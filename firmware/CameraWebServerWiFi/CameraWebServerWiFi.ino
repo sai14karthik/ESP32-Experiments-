@@ -14,11 +14,11 @@
 //const char *ssid = "SaiPhone";
 //const char *password = "123456789";
 
-//const char *ssid = "SpectrumSetup-EB9C";
-//const char *password = "unitedvideo788";
+const char *ssid = "SpectrumSetup-EB9C";
+const char *password = "unitedvideo788";
 
-const char *ssid = "LabHealthSecurePSK";
-const char *password = "ZLMKAQm@UV2e9g8r7GW!";
+//const char *ssid = "LabHealthSecurePSK";
+//const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 
 void startCameraServer();
