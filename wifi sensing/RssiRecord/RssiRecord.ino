@@ -108,11 +108,11 @@ void loop() {
 
   int rssi = WiFi.RSSI();
 
-  // If WiFi is covered, don't output RSSI.
-  if (rssi < -55) {
-    return;
+  if (rssi < -58) {
+    Serial.println("Its covered I guess");
   }
+else {
+    Serial.println(rssi);
 
-  // Normal condition: output RSSI.
-  Serial.println(rssi);
+}
 }
