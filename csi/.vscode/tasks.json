@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // DEFAULT build task -> Cmd+Shift+B.
+      // Plain shell task: runs the same `cmake` the CLI uses, so it does NOT
+      // depend on the CMake Tools extension's internal state. It configures
+      // first (via the "Configure" dependency, a no-op once configured), then
+      // builds.
+      "label": "Build",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "${workspaceFolder}/build"],
+      "dependsOn": "Configure",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"],
+      "detail": "cmake --build build (auto-configures first)"
+    },
+    {
+      // Configure into build/ with Ninja. Idempotent — re-running is a fast
+      // no-op once build/ exists and is configured with Ninja.
+      "label": "Configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S", "${workspaceFolder}",
+        "-B", "${workspaceFolder}/build",
+        "-G", "Ninja"
+      ],
+      "problemMatcher": [],
+      "detail": "cmake -S . -B build -G Ninja"
+    },
+    {
+      // Build, then run the binary. Handy to bind or trigger from the
+      // Terminal > Run Task menu.
+      "label": "Run",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/csi-collector",
+      "dependsOn": "Build",
+      "problemMatcher": [],
+      "detail": "Build then run ./build/csi-collector"
+    },
+    {
+      // Alternative: build via the CMake Tools extension provider. This is the
+      // task that fails with "exit code -1" until the EXTENSION has configured
+      // the project — select a kit ([Unspecified]) and let it configure first,
+      // or just use the extension's status-bar Build button instead.
+      "label": "CMake Tools: build (extension)",
+      "type": "cmake",
+      "command": "build",
+      "targets": ["all"],
+      "problemMatcher": ["$gcc"],
+      "detail": "Needs the CMake Tools extension to have configured the project"
+    }
+  ]
+}

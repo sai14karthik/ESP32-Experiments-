@@ -4,34 +4,35 @@ set -euo pipefail
 # Official IDF CSI serial monitor. Quit with Ctrl+]
 # Usage: ./monitor_csi.sh
 #        ./monitor_csi.sh /dev/cu.usbserial-10
+#        ./monitor_csi.sh /dev/ttyUSB0
+# Optional: export IDF_ACTIVATE=/path/to/activate_idf_v6.0.2.sh
 
-IDF_ACTIVATE="/Users/saikarthik/.espressif/tools/activate_idf_v6.0.2.sh"
-PROJECT="/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_recv_router"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/serial_helpers.sh
+source "$ROOT/scripts/serial_helpers.sh"
 
-# C5 boards with a CH340/CP2102 UART show up as cu.usbserial-*, not cu.usbmodem-*.
-# Prefer usbserial so a plugged-in XIAO camera (usbmodem) is not picked first.
-pick_usb_serial() {
-  if [[ -n "${1:-}" ]]; then
-    printf '%s\n' "$1"
-    return
-  fi
-  local p
-  shopt -s nullglob
-  for p in /dev/cu.usbserial* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART /dev/cu.usbmodem*; do
-    [[ -e "$p" ]] || continue
-    printf '%s\n' "$p"
-    return
-  done
-}
+PROJECT="$ROOT/esp-csi/examples/get-started/csi_recv_router"
 
-PORT="$(pick_usb_serial "${1:-}")"
-
-if [[ -z "${PORT:-}" || ! -e "$PORT" ]]; then
-  echo "No USB serial port found. Plug in the C5, then run: ls /dev/cu.usb*"
+if ! IDF_ACTIVATE="$(find_idf_activate)"; then
+  echo "ESP-IDF activate script not found."
+  echo "Install ESP-IDF 6.0.x (Espressif IDE / eim), then either:"
+  echo "  export IDF_ACTIVATE=\"\$HOME/.espressif/tools/activate_idf_v6.0.2.sh\""
+  echo "or put export.sh on PATH via: . \$HOME/esp/esp-idf/export.sh"
   exit 1
 fi
 
-# Espressif's activate script refuses unless \$0 is bash/zsh.
+if ! PORT="$(pick_usb_serial "${1:-}")"; then
+  echo "No USB serial port found."
+  echo "  macOS:  ls /dev/cu.usb*"
+  echo "  Linux:  ls /dev/ttyUSB* /dev/ttyACM*"
+  exit 1
+fi
+
+if [[ ! -d "$PROJECT" ]]; then
+  echo "Missing CSI project: $PROJECT"
+  exit 1
+fi
+
 export IDF_ACTIVATE PROJECT PORT
 exec bash --noprofile --norc -c '
   set +u

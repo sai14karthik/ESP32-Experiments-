@@ -5,38 +5,31 @@ set -euo pipefail
 # Do not run this at the same time as ./monitor_csi.sh (same USB port).
 # Usage: ./plot_csi.sh
 #        ./plot_csi.sh /dev/cu.usbserial-10
+#        ./plot_csi.sh /dev/ttyUSB0
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/serial_helpers.sh
+source "$ROOT/scripts/serial_helpers.sh"
+
 TOOLS="$ROOT/esp-csi/examples/get-started/tools"
 VENV_PY="$ROOT/.venv/bin/python"
 
 if [[ ! -x "$VENV_PY" ]]; then
-  echo "Missing $VENV_PY — from the repo root run: uv sync"
+  echo "Missing $VENV_PY"
+  echo "From the repo root (after unzip/clone):"
+  echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+  echo "  uv sync"
   exit 1
 fi
 
-pick_usb_serial() {
-  if [[ -n "${1:-}" ]]; then
-    printf '%s\n' "$1"
-    return
-  fi
-  local p
-  shopt -s nullglob
-  for p in /dev/cu.usbserial* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART /dev/cu.usbmodem*; do
-    [[ -e "$p" ]] || continue
-    printf '%s\n' "$p"
-    return
-  done
-}
-
-PORT="$(pick_usb_serial "${1:-}")"
-
-if [[ -z "${PORT:-}" || ! -e "$PORT" ]]; then
-  echo "No USB serial port found. Plug in the C5, then run: ls /dev/cu.usb*"
+if ! PORT="$(pick_usb_serial "${1:-}")"; then
+  echo "No USB serial port found."
+  echo "  macOS:  ls /dev/cu.usb*"
+  echo "  Linux:  ls /dev/ttyUSB* /dev/ttyACM*"
   exit 1
 fi
 
-if lsof "$PORT" >/dev/null 2>&1; then
+if command -v lsof >/dev/null 2>&1 && lsof "$PORT" >/dev/null 2>&1; then
   echo "Port $PORT is already in use. Quit idf.py monitor or ./monitor_csi.sh first (Ctrl+])."
   lsof "$PORT" || true
   exit 1

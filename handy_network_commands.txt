@@ -74,12 +74,14 @@ ipconfig getifaddr en0
 
 
 
-source "/Users/saikarthik/.espressif/tools/activate_idf_v6.0.2.sh"
-cd "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_recv_router"
-idf.py set-target esp32c5
-idf.py -p /dev/cu.usbmodem2101 flash monitor
+# ESP-IDF activate (path varies per laptop — or rely on ./monitor_csi.sh auto-detect)
+# source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+# cd esp-csi/examples/get-started/csi_recv_router
+# idf.py set-target esp32c5
+# idf.py -p /dev/cu.usbserial-10 flash monitor
 
 
 # Official IDF CSI serial. Quit with Ctrl+]
 ./monitor_csi.sh
-# ./monitor_csi.sh /dev/cu.usbmodem2101
+# ./monitor_csi.sh /dev/cu.usbserial-10
+# ./monitor_csi.sh /dev/ttyUSB0

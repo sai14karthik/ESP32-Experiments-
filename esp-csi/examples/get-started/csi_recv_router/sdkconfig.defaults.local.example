@@ -1,0 +1,12 @@
+# Machine-local Wi-Fi for csi_recv_router (do not commit).
+# Copy to sdkconfig.defaults.local next to sdkconfig.defaults, then:
+#   idf.py fullclean
+#   rm -f sdkconfig
+#   idf.py set-target esp32c5
+#   idf.py build flash monitor
+#
+# Or set the same keys in the generated sdkconfig file.
+
+CONFIG_EXAMPLE_WIFI_SSID="office-or-home-ssid"
+CONFIG_EXAMPLE_WIFI_PASSWORD="office-or-home-password"
+CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y

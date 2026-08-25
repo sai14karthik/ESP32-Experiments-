@@ -1,0 +1,25 @@
+# CMake out-of-source builds (root build tree)
+/build/
+/build-release/
+
+# Defensive: CMake artifacts if anyone configures in-source
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# PlatformIO
+firmware/.pio/
+# PIO auto-regenerates these; keep extensions.json committed
+firmware/.vscode/c_cpp_properties.json
+firmware/.vscode/launch.json
+
+# Local WiFi credentials — never commit
+firmware/include/secrets.h
+
+# macOS
+.DS_Store
+build/
+build-*/
+.pio/
+sdkconfig
+sdkconfig.old

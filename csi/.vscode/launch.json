@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // CodeLLDB (vadimcn.vscode-lldb) is the most reliable lldb integration
+      // on Apple Silicon — it avoids the deprecated lldb-mi that ms-vscode's
+      // cppdbg relies on. Press F5 to build (preLaunchTask) then debug.
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug (CodeLLDB)",
+      // Resolves to whatever target CMake Tools has selected as the launch
+      // target — no hard-coded binary path.
+      "program": "${command:cmake.launchTargetPath}",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "CMake: build"
+    }
+  ]
+}

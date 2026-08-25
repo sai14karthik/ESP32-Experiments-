@@ -1,0 +1,7 @@
+# Line endings: keep shell/Python portable across macOS / Linux / Windows ZIP extracts
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf

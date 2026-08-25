@@ -1,0 +1,23 @@
+{
+  // Multi-root workspace: CMake Tools binds to the root folder (the only one
+  // with a CMakeLists.txt); the PlatformIO extension binds to firmware/
+  // (the only folder with a platformio.ini). Open THIS file, not the folder.
+  "folders": [
+    { "name": "csi (host: shared + collector)", "path": "." },
+    { "name": "firmware (ESP32-C6, PlatformIO)", "path": "firmware" }
+  ],
+  "settings": {
+    // The firmware folder has no CMakeLists.txt — don't nag about it.
+    "cmake.ignoreCMakeListsMissing": true,
+    // Hide firmware/ inside the root folder view so it appears only under
+    // its own workspace folder (drop this if you prefer the double listing).
+    "files.exclude": { "firmware": true }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-vscode.cmake-tools",
+      "vadimcn.vscode-lldb",
+      "platformio.platformio-ide"
+    ]
+  }
+}

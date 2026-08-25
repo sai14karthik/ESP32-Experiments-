@@ -1,0 +1,78 @@
+
+# Application project files
+# Debug files
+# Executables
+# IDF package manager
+# Kernel Module Compile Results
+# Libraries
+# Linker output
+# MacOS directory files
+# Object files
+# Precompiled Headers
+# Prerequisites
+# Shared objects (inc. Windows DLLs)
+# clangd
+# cli logs
+# eclipse setting
+# emacs
+# emacs temp file suffixes
+# node_modules
+**/*.bin
+**/*.lock
+**/.DS_Store
+**/.vscode
+**/build
+**/data
+**/log
+**/logs
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+*.app
+*.cmd
+*.d
+*.dSYM/
+*.dll
+*.dylib
+*.elf
+*.exe
+*.exp
+*.gch
+*.hex
+*.i*86
+*.idb
+*.ilk
+*.ko
+*.la
+*.lib
+*.lo
+*.map
+*.mod*
+*.o
+*.obj
+*.out
+*.pch
+*.pdb
+*.pyc
+*.so
+*.so.*
+*.su
+*.x86_64
+*~
+.#*
+.cache/
+.dir-locals.el
+.settings
+.tmp_versions/
+Mkfile.old
+Module.symvers
+\#*#
+build/
+dependencies.lock
+dkms.conf
+docs/docusaurus/website/node_modules
+managed_components/
+modules.order
+sdkconfig
+sdkconfig.defaults.local
+sdkconfig.old

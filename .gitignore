@@ -5,3 +5,20 @@ network_commands.txt
 __pycache__/
 *.pyc
 .python-version
+
+# Local secrets / machine paths (never commit)
+**/secrets.h
+**/sdkconfig.defaults.local
+eim_config.toml
+
+# ESP-IDF / Arduino build trees (absolute paths, not portable)
+**/build/
+**/build-*/
+sdkconfig
+sdkconfig.old
+**/sdkconfig
+**/sdkconfig.old
+
+# Logs / caches
+*.log
+.cache/

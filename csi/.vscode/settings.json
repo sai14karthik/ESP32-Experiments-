@@ -1,0 +1,55 @@
+{
+  // ===== CMake Tools (ms-vscode.cmake-tools) =====
+  // Out-of-source build dir (matches .gitignore).
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  // Configure as soon as the folder opens so the build button "just works".
+  "cmake.configureOnOpen": true,
+  // --- Compiler selection ---------------------------------------------------
+  // You asked for "clang on /opt/homebrew", but Homebrew LLVM is NOT installed
+  // on this machine, so we point at Apple clang 17 (arm64, full C++20). It
+  // needs zero SDK/libc++ setup.
+  //
+  // When CMake Tools prompts "Select a Kit", choose **[Unspecified]** so it
+  // honors the compilers set here instead of an auto-scanned kit.
+  //
+  // To switch to Homebrew LLVM later:
+  //   1) brew install llvm ninja
+  //   2) swap the compiler line below for the Homebrew path (commented).
+  //   3) delete build/ and reconfigure (the compiler is cached on first run).
+  //
+  // Only CMAKE_CXX_COMPILER is set because the project is CXX-only
+  // (LANGUAGES CXX). If you add C sources, add `C` to LANGUAGES in
+  // CMakeLists.txt and also set "CMAKE_C_COMPILER" here.
+  "cmake.configureSettings": {
+    "CMAKE_CXX_COMPILER": "/usr/bin/clang++"
+    // Homebrew LLVM alternative:
+    // "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++"
+  },
+  // Generator: pinned to Ninja (installed at /opt/homebrew/bin/ninja) so the
+  // extension, the tasks.json Build task, and the CLI all agree. A build/ dir
+  // configured with a different generator triggers "does not match the
+  // generator used previously" — pinning avoids that. If you ever remove Ninja,
+  // delete build/ and set this to "Unix Makefiles" (or remove the line).
+  "cmake.generator": "Ninja",
+  // Keep the classic (kit/variant) flow above. CMakePresets.json exists only to
+  // provide a CLI "release" build (`cmake --workflow --preset release`). Left on
+  // "auto", CMake Tools would auto-switch to preset mode the moment it sees that
+  // file — ignoring the buildDirectory/compiler/generator pinned here and
+  // prompting for a preset. "never" keeps the one-button build behaving exactly
+  // as before; the presets stay a command-line tool.
+  "cmake.useCMakePresets": "never",
+  // ===== C/C++ IntelliSense (ms-vscode.cpptools) =====
+  "C_Cpp.default.cppStandard": "c++20",
+  // Use the compile_commands.json CMake emits, so IntelliSense matches the
+  // real build flags (no manual include/define lists).
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  // ===== Editor housekeeping =====
+  "files.exclude": {
+    "build/": true
+  },
+  "search.exclude": {
+    "build/": true
+  },
+  "C_Cpp.doxygen.generateOnType": true,
+  "C_Cpp.doxygen.generatedStyle": "///"
+}
