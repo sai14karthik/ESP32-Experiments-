@@ -1,3 +1,7 @@
 .DS_Store
 ngrok.log
 network_commands.txt
+.venv/
+__pycache__/
+*.pyc
+.python-version

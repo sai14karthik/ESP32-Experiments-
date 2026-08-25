@@ -23,8 +23,6 @@
 #include "camera_index.h"
 #include "board_config.h"
 #include "lwip/sockets.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -52,28 +50,19 @@ static const char *_STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 httpd_handle_t stream_httpd = NULL;
 httpd_handle_t camera_httpd = NULL;
 
-// Only one MJPEG client can own the camera. Closing a tab does not always
-// close the TCP socket, so a reopen used to start a second /stream and both
-// starved the framebuffers (video worked once, then went black).
-static SemaphoreHandle_t s_stream_lock = NULL;
 static volatile uint32_t s_stream_id = 0;
 static volatile int s_stream_sock = -1;
+static httpd_handle_t s_stream_handle = NULL;
 
-static void stream_sock_keepalive(httpd_req_t *req) {
-  int fd = httpd_req_to_sockfd(req);
-  if (fd < 0) {
-    return;
+static void stream_kick_previous(httpd_req_t *req) {
+  int new_fd = httpd_req_to_sockfd(req);
+  int old_fd = s_stream_sock;
+  s_stream_id++;
+  if (old_fd >= 0 && old_fd != new_fd && s_stream_handle) {
+    httpd_sess_trigger_close(s_stream_handle, old_fd);
   }
-  int yes = 1;
-  setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
-#ifdef TCP_KEEPIDLE
-  int idle = 2;
-  int interval = 1;
-  int count = 2;
-  setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-  setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
-  setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
-#endif
+  s_stream_sock = new_fd;
+  s_stream_handle = req->handle;
 }
 
 typedef struct {
@@ -236,6 +225,8 @@ static esp_err_t capture_handler(httpd_req_t *req) {
   return res;
 }
 
+#define STREAM_MAX_FPS 12
+
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t *fb = NULL;
   struct timeval _timestamp;
@@ -244,45 +235,25 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   uint8_t *_jpg_buf = NULL;
   char *part_buf[128];
   int capture_fails = 0;
-  const uint32_t my_id = ++s_stream_id;
   const int my_fd = httpd_req_to_sockfd(req);
 
   static int64_t last_frame = 0;
-  if (!last_frame) {
-    last_frame = esp_timer_get_time();
-  }
+  last_frame = esp_timer_get_time();
 
-  // Closing the browser often leaves /stream open. Kick that socket so this
-  // new viewer can take the camera instead of hanging on a black image.
-  if (s_stream_sock >= 0 && s_stream_sock != my_fd && stream_httpd) {
-    httpd_sess_trigger_close(stream_httpd, s_stream_sock);
-  }
-
-  if (!s_stream_lock || xSemaphoreTake(s_stream_lock, pdMS_TO_TICKS(8000)) != pdTRUE) {
-    httpd_resp_send_500(req);
-    return ESP_FAIL;
-  }
-  if (my_id != s_stream_id) {
-    xSemaphoreGive(s_stream_lock);
-    httpd_resp_send_500(req);
-    return ESP_FAIL;
-  }
-  s_stream_sock = my_fd;
+  stream_kick_previous(req);
+  const uint32_t my_id = s_stream_id;
 
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if (res != ESP_OK) {
     if (s_stream_sock == my_fd) {
       s_stream_sock = -1;
     }
-    xSemaphoreGive(s_stream_lock);
     return res;
   }
 
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "X-Framerate", "60");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-  httpd_resp_set_hdr(req, "Pragma", "no-cache");
-  stream_sock_keepalive(req);
+  httpd_resp_set_hdr(req, "X-Framerate", "12");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
 #if defined(LED_GPIO_NUM)
   isStreaming = true;
@@ -338,16 +309,12 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       log_e("Send frame failed");
       break;
     }
-    int64_t fr_end = esp_timer_get_time();
-
-    int64_t frame_time = fr_end - last_frame;
-    last_frame = fr_end;
-
-    frame_time /= 1000;
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-    uint32_t avg_frame_time = ra_filter_run(&ra_filter, frame_time);
-    (void)avg_frame_time;
-#endif
+    const int64_t min_us = 1000000 / STREAM_MAX_FPS;
+    int64_t used = esp_timer_get_time() - last_frame;
+    if (used < min_us) {
+      vTaskDelay(pdMS_TO_TICKS((min_us - used) / 1000));
+    }
+    last_frame = esp_timer_get_time();
   }
 
 #if defined(LED_GPIO_NUM)
@@ -358,7 +325,6 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   if (s_stream_sock == my_fd) {
     s_stream_sock = -1;
   }
-  xSemaphoreGive(s_stream_lock);
   return res;
 }
 
@@ -738,10 +704,6 @@ void startCameraServer() {
   config.max_uri_handlers = 16;
   config.lru_purge_enable = true;
 
-  if (!s_stream_lock) {
-    s_stream_lock = xSemaphoreCreateMutex();
-  }
-
   httpd_uri_t index_uri = {
     .uri = "/",
     .method = HTTP_GET,
@@ -894,6 +856,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &status_uri);
     httpd_register_uri_handler(camera_httpd, &capture_uri);
     httpd_register_uri_handler(camera_httpd, &bmp_uri);
+    httpd_register_uri_handler(camera_httpd, &stream_uri);
 
     httpd_register_uri_handler(camera_httpd, &xclk_uri);
     httpd_register_uri_handler(camera_httpd, &reg_uri);
@@ -906,8 +869,6 @@ void startCameraServer() {
   config.ctrl_port += 1;
   config.max_open_sockets = 3;
   config.lru_purge_enable = true;
-  config.send_wait_timeout = 2;
-  config.recv_wait_timeout = 2;
   log_i("Starting stream server on port: '%u'", config.server_port);
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);

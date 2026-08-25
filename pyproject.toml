@@ -1,0 +1,20 @@
+[project]
+name = "camera-module"
+version = "0.1.0"
+description = "Local Python tools for ESP32 camera, USB preview, and CSI collection"
+requires-python = ">=3.10"
+dependencies = [
+    "esptool",
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+    "pandas",
+    "pyqt5",
+    "pyqtgraph",
+    "pyserial",
+    "scipy",
+    "statsmodels",
+]
+
+[tool.uv]
+package = false
