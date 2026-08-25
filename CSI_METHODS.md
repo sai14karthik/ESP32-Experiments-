@@ -1,93 +1,138 @@
 # CSI collection methods (ESP32-C5)
 
-Aligned with Espressif’s **“How to get CSI”** in [`esp-csi/README.md`](esp-csi/README.md). Official diagrams:
+Aligned with Espressif’s **“How to get CSI”** in [`esp-csi/README.md`](esp-csi/README.md).
 
 | §4.1 Router | §4.2 Between devices | §4.3 Specific / broadcast |
 |-------------|----------------------|---------------------------|
 | ![4.1](esp-csi/docs/_static/get_router_csi.png) | ![4.2](esp-csi/docs/_static/get_device_csi.png) | ![4.3](esp-csi/docs/_static/get_broadcast_csi.png) |
 
-| Espressif | Name | Router / AP? | Example in this repo | Helper script |
-|-----------|------|--------------|----------------------|---------------|
-| **4.1** | Get **router** CSI | **Yes** | `csi_recv_router` | `set_csi_wifi.sh` · `monitor_csi.sh` |
-| **4.2** | Get CSI **between devices** | **Yes** | `csi_between_devices` | `flash_csi_between.sh` |
-| **4.3** | Get CSI from a **specific** sender | **No** (CSI link) | `csi_send` + `csi_recv` | `flash_csi_pair.sh` |
+| § | Name | AP needed? | Example path | Helper |
+|---|------|------------|--------------|--------|
+| **4.1** | Router CSI | Yes | `esp-csi/examples/get-started/csi_recv_router` | `set_csi_wifi.sh` · `monitor_csi.sh` |
+| **4.2** | Between devices | Yes | `esp-csi/examples/get-started/csi_between_devices` | `flash_csi_between.sh` |
+| **4.3** | Specific sender | No (CSI link) | `esp-csi/examples/get-started/csi_send` + `csi_recv` | `flash_csi_pair.sh` |
 
-**Note on 4.3:** Espressif’s full §4.3 describes a dedicated multi-channel broadcaster. The get-started pair (`csi_send`/`csi_recv`) is the practical starter: fixed channel **11**, ESP‑NOW, sender MAC `1a:00:00:00:00:00` — same idea (CSI from a known sender), not the full channel-hopping product.
+**Hardware:** ESP32-C5-KITC-A · `/dev/cu.usbmodem*` or `/dev/cu.usbserial*` · baud **115200**  
+**Plotter:** `./plot_csi.sh [port]` (not together with monitor on the same port)  
+**List ports:** `ls /dev/cu.usb*`
 
-**Hardware:** ESP32-C5-KITC-A (PCB antenna). Ports: `/dev/cu.usbmodem*` or `/dev/cu.usbserial*`. Baud: **115200**.
-
-**Plotter:** `./plot_csi.sh [port]` — not at the same time as monitor on that port.
+**Note on 4.3:** Full Espressif §4.3 is a multi-channel broadcaster. Get-started uses fixed channel **11**, ESP‑NOW, sender MAC `1a:00:00:00:00:00`.
 
 ---
 
 ## 4.1 — Get router CSI (one C5 + AP)
 
-**Espressif:** ESP pings the router; CSI comes from the **ping reply**.
+ESP joins the AP, pings the gateway, CSI from the **router’s ping reply** (filter = AP BSSID).
 
 | | |
 |---|---|
-| Boards | 1× ESP32-C5 |
-| Firmware | `esp-csi/examples/get-started/csi_recv_router` |
-| Wi‑Fi | **Required** |
-| CSI filter | AP BSSID |
+| Boards | 1× |
+| Firmware | `csi_recv_router` |
+| Wi‑Fi | Required |
+
+### Examples
 
 ```bash
-./scripts/set_csi_wifi.sh 'YourSSID' 'YourPassword' [/dev/cu.usbmodem…]
-./monitor_csi.sh /dev/cu.usbmodem…    # quit Ctrl+]
-./plot_csi.sh /dev/cu.usbmodem…
+# Phone hotspot
+./scripts/set_csi_wifi.sh 'SaiPhone' '123456789'
+./scripts/set_csi_wifi.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101
+
+# Home / lab APs (use single quotes if password has ! @ etc.)
+./scripts/set_csi_wifi.sh 'SpectrumSetup-EB9C' 'unitedvideo788'
+./scripts/set_csi_wifi.sh 'LabHealthSecurePSK' 'ZLMKAQm@UV2e9g8r7GW!'
+
+# Monitor then plot (quit monitor with Ctrl+] first)
+./monitor_csi.sh /dev/cu.usbmodem101
+./plot_csi.sh /dev/cu.usbmodem101
 ```
+
+Look for: `got ip:…` then `CSI_DATA,…` (MAC = AP BSSID).
 
 ---
 
 ## 4.2 — Get CSI between devices (two C5s + AP)
 
-**Espressif:** Both ESPs ping the router; one measures CSI on frames **from the other ESP** (not from the router).
+Both join the **same** AP and ping. Sense board measures CSI from the **peer** STA (`1a:00:00:00:00:0a`), not the router.
 
 | | |
 |---|---|
-| Boards | 2× ESP32-C5 |
-| Firmware | `esp-csi/examples/get-started/csi_between_devices` |
-| Wi‑Fi | **Required** (same SSID) |
-| Peer MAC | `1a:00:00:00:00:0a` |
-| Sense | Promiscuous + filter that MAC |
+| Boards | 2× |
+| Firmware | `csi_between_devices` |
+| Peer port | Traffic source (MAC `1a:00:00:00:00:0a`) |
+| Sense port | Plot this one |
+
+### Examples
 
 ```bash
-# port1 = peer (traffic), port2 = sense (plot)
-./scripts/flash_csi_between.sh 'YourSSID' 'YourPassword' [peer-port] [sense-port]
-./plot_csi.sh <sense-port>
+# Flash both (peer first, sense second)
+./scripts/flash_csi_between.sh 'SaiPhone' '123456789'
+./scripts/flash_csi_between.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+
+./scripts/flash_csi_between.sh 'SpectrumSetup-EB9C' 'unitedvideo788' \
+  /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+
+./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'ZLMKAQm@UV2e9g8r7GW!' \
+  /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+
+# Reuse Wi‑Fi from csi_recv_router/sdkconfig.defaults.local; auto-detect ports
+./scripts/flash_csi_between.sh
+
+# Plot sense board only
+./plot_csi.sh /dev/cu.usbmodem2101
 ```
 
-Expect `CSI_DATA,…,1a:00:00:00:00:0a,…` on the sense UART.
+Look for: `CSI_DATA,…,1a:00:00:00:00:0a,…`
 
 ---
 
 ## 4.3 — Get CSI from a specific sender (two C5s, ESP‑NOW)
 
-**Espressif (get-started form):** Dedicated sender; receiver takes CSI from that MAC. **No AP** for the CSI link.
+No AP/SSID. `csi_send` broadcasts; `csi_recv` filters sender MAC `1a:00:00:00:00:00`. Channel 11, ~100 Hz. Place boards **> ~1 m** apart.
 
 | | |
 |---|---|
-| Boards | 2× ESP32-C5 |
+| Boards | 2× |
 | Firmware | `csi_send` + `csi_recv` |
-| Wi‑Fi | **Not used** |
-| Channel | 11, HT40 |
-| Sender MAC | `1a:00:00:00:00:00` |
+| Send port | First arg |
+| Recv port | Second arg — plot this one |
+
+### Examples
 
 ```bash
-./scripts/flash_csi_pair.sh [send-port] [recv-port]
-./plot_csi.sh <recv-port>
+# Auto-pick two ports
+./scripts/flash_csi_pair.sh
+
+# Explicit ports (send, then recv)
+./scripts/flash_csi_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+
+# Plot receiver only
+./plot_csi.sh /dev/cu.usbmodem2101
 ```
 
-Place boards **> ~1 m** apart. (`monitor_csi.sh` / `set_csi_wifi.sh` are **4.1 only**.)
+Look for: `CSI_DATA,…,1a:00:00:00:00:00,…`  
+(`set_csi_wifi.sh` / `monitor_csi.sh` are **4.1 only**.)
 
 ---
 
 ## Switching
 
-| Go to | Run |
-|-------|-----|
-| **4.1** | `./scripts/set_csi_wifi.sh 'SSID' 'PASSWORD' [port]` |
-| **4.2** | `./scripts/flash_csi_between.sh 'SSID' 'PASSWORD' [peer] [sense]` |
-| **4.3** | `./scripts/flash_csi_pair.sh [send] [recv]` |
+| Go to | Example |
+|-------|---------|
+| **4.1** | `./scripts/set_csi_wifi.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101` |
+| **4.2** | `./scripts/flash_csi_between.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101 /dev/cu.usbmodem2101` |
+| **4.3** | `./scripts/flash_csi_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem2101` |
 
-One firmware per board at a time.
+One firmware image per board at a time.
+
+---
+
+## Quick reference — all helpers
+
+| Script | Methods | Purpose |
+|--------|---------|---------|
+| `./scripts/set_csi_wifi.sh` | 4.1 | Set SSID/password, build, flash `csi_recv_router` |
+| `./monitor_csi.sh` | 4.1 | IDF serial monitor |
+| `./scripts/flash_csi_between.sh` | 4.2 | Flash peer + sense |
+| `./scripts/flash_csi_pair.sh` | 4.3 | Flash send + recv |
+| `./plot_csi.sh` | 4.1 / 4.2 / 4.3 | Live CSI plot (sense/recv/router port) |
+| `./scripts/setup_python.sh` | — | Create `.venv` for the plotter |
