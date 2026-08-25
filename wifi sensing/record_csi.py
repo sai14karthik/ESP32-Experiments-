@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 """Save CSI_DATA lines from the C5 into wifi sensing/data/."""
 
 import glob

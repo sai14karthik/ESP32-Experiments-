@@ -7,7 +7,7 @@
 ls /dev/cu.usbmodem*
 
 # ---------- 2) MAC address ----------
-python3 -m esptool --port /dev/cu.usbmodem101 chip-id
+uv run python -m esptool --port /dev/cu.usbmodem101 chip-id
 
 # In Arduino sketch after WiFi starts:
 #   Serial.println(WiFi.macAddress());
@@ -59,7 +59,7 @@ networksetup -getairportnetwork en0
 ipconfig getifaddr en0
 
 # ---------- 8) Arduino USB serial log (115200). Resets the board. ----------
-# python3 -c "
+# uv run python -c "
 # import glob, serial, time
 # p = glob.glob('/dev/cu.usbmodem*')[0]
 # s = serial.Serial(); s.port=p; s.baudrate=115200; s.timeout=0.2

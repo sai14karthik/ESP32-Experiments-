@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 """Save RSSI CSV lines from the C5 serial port into wifi sensing/data/."""
 
 import glob

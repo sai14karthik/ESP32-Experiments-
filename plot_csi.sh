@@ -6,7 +6,14 @@ set -euo pipefail
 # Usage: ./plot_csi.sh
 #        ./plot_csi.sh /dev/cu.usbmodem101
 
-TOOLS="/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/tools"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+TOOLS="$ROOT/esp-csi/examples/get-started/tools"
+VENV_PY="$ROOT/.venv/bin/python"
+
+if [[ ! -x "$VENV_PY" ]]; then
+  echo "Missing $VENV_PY — from the repo root run: uv sync"
+  exit 1
+fi
 
 if [[ -n "${1:-}" ]]; then
   PORT="$1"
@@ -31,4 +38,4 @@ fi
 
 cd "$TOOLS"
 echo "CSI plotter on $PORT — quit with Ctrl+C"
-exec python3 csi_data_read_parse.py -p "$PORT"
+exec "$VENV_PY" csi_data_read_parse.py -p "$PORT"

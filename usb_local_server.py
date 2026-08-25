@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 """Live view over USB. Laptop and ESP can be on different Wi-Fi; video uses the cable."""
 
 from __future__ import annotations
