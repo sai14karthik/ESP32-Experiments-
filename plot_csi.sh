@@ -4,7 +4,7 @@ set -euo pipefail
 # Live CSI amplitude/phase plotter. Stop with Ctrl+C.
 # Do not run this at the same time as ./monitor_csi.sh (same USB port).
 # Usage: ./plot_csi.sh
-#        ./plot_csi.sh /dev/cu.usbmodem101
+#        ./plot_csi.sh /dev/cu.usbserial-10
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 TOOLS="$ROOT/esp-csi/examples/get-started/tools"
@@ -15,18 +15,24 @@ if [[ ! -x "$VENV_PY" ]]; then
   exit 1
 fi
 
-if [[ -n "${1:-}" ]]; then
-  PORT="$1"
-elif [[ -e /dev/cu.usbmodem101 ]]; then
-  PORT=/dev/cu.usbmodem101
-elif [[ -e /dev/cu.usbmodem2101 ]]; then
-  PORT=/dev/cu.usbmodem2101
-else
-  PORT="$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1 || true)"
-fi
+pick_usb_serial() {
+  if [[ -n "${1:-}" ]]; then
+    printf '%s\n' "$1"
+    return
+  fi
+  local p
+  shopt -s nullglob
+  for p in /dev/cu.usbserial* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART /dev/cu.usbmodem*; do
+    [[ -e "$p" ]] || continue
+    printf '%s\n' "$p"
+    return
+  done
+}
+
+PORT="$(pick_usb_serial "${1:-}")"
 
 if [[ -z "${PORT:-}" || ! -e "$PORT" ]]; then
-  echo "No USB serial port found. Plug in the C5, then run: ls /dev/cu.usbmodem*"
+  echo "No USB serial port found. Plug in the C5, then run: ls /dev/cu.usb*"
   exit 1
 fi
 
