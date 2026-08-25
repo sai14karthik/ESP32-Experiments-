@@ -4,7 +4,7 @@ set -euo pipefail
 # Change CSI board Wi-Fi, rebuild, and flash.
 # Usage (from repo root):
 #   ./scripts/set_csi_wifi.sh "SaiPhone" "123456789"
-#   ./scripts/set_csi_wifi.sh "LabHealthSecurePSK" "your-password"
+#   ./scripts/set_csi_wifi.sh 'YourSSID' 'YourPassword'
 # Optional 3rd arg = serial port, else auto-detect.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

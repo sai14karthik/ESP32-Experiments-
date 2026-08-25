@@ -37,9 +37,9 @@ ESP joins the AP, pings the gateway, CSI from the **router’s ping reply** (fil
 ./scripts/set_csi_wifi.sh 'SaiPhone' '123456789'
 ./scripts/set_csi_wifi.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101
 
-# Home / lab APs (use single quotes if password has ! @ etc.)
+# Other APs (use single quotes if password has ! @ etc.)
 ./scripts/set_csi_wifi.sh 'SpectrumSetup-EB9C' 'unitedvideo788'
-./scripts/set_csi_wifi.sh 'LabHealthSecurePSK' 'ZLMKAQm@UV2e9g8r7GW!'
+./scripts/set_csi_wifi.sh 'YourSSID' 'YourPassword'
 
 # Monitor then plot (quit monitor with Ctrl+] first)
 ./monitor_csi.sh /dev/cu.usbmodem101
@@ -71,7 +71,7 @@ Both join the **same** AP and ping. Sense board measures CSI from the **peer** S
 ./scripts/flash_csi_between.sh 'SpectrumSetup-EB9C' 'unitedvideo788' \
   /dev/cu.usbmodem101 /dev/cu.usbmodem2101
 
-./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'ZLMKAQm@UV2e9g8r7GW!' \
+./scripts/flash_csi_between.sh 'YourSSID' 'YourPassword' \
   /dev/cu.usbmodem101 /dev/cu.usbmodem2101
 
 # Reuse Wi‑Fi from csi_recv_router/sdkconfig.defaults.local; auto-detect ports

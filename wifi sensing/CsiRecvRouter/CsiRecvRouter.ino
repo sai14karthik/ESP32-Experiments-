@@ -10,8 +10,8 @@
 //const char *ssid = "SpectrumSetup-EB9C";
 //const char *password = "unitedvideo788";
 
-const char *ssid = "LabHealthSecurePSK";
-const char *password = "ZLMKAQm@UV2e9g8r7GW!";
+const char *ssid = "YourSSID";
+const char *password = "YourPassword";
 
 static const uint32_t kPingHz = 100;
 static const uint32_t kConnectTimeoutMs = 20000;
