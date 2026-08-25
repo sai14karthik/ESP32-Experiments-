@@ -22,3 +22,5 @@ sdkconfig.old
 # Logs / caches
 *.log
 .cache/
+
+examples.txt
