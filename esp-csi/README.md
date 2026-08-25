@@ -72,6 +72,14 @@ Provides some applications using CSI data, including RainMaker cloud reporting a
 - **Disadvantages:** In addition to the ordinary ESP32, it is also necessary to add a special package issuing equipment, the cost is the same and higher.
 - **Applicable scenarios:** Suitable for scenarios that require high accuracy and multi-device cluster positioning.
 
+**Ready examples in this tree (ESP32-C5 helpers in repo root [`CSI_METHODS.md`](../CSI_METHODS.md)):**
+
+| § | Example |
+|---|--------|
+| 4.1 | [`examples/get-started/csi_recv_router`](./examples/get-started/csi_recv_router) |
+| 4.2 | [`examples/get-started/csi_between_devices`](./examples/get-started/csi_between_devices) |
+| 4.3 (get-started form) | [`csi_send`](./examples/get-started/csi_send) + [`csi_recv`](./examples/get-started/csi_recv) |
+
 ## 5 Note
 
 1. The effect of external IPEX antenna is better than PCB antenna, PCB antenna has directivity.

@@ -1,0 +1,4 @@
+# Local only — copy from this file or let scripts/flash_csi_between.sh write it.
+CONFIG_EXAMPLE_WIFI_SSID="YOUR_WIFI_SSID"
+CONFIG_EXAMPLE_WIFI_PASSWORD="YOUR_WIFI_PASSWORD"
+CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y

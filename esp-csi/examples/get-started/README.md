@@ -1,7 +1,19 @@
 # Get Started Examples
 [[中文]](./README_cn.md)
 
-This example demonstrates how to obtain CSI data through communication between two espressif chips, and uses a graphical interface to display real-time data of CSI subcarriers
+Maps to Espressif **How to get CSI** ([`esp-csi/README.md`](../../README.md)):
+
+| § | Example | Repo helper (from camera_module root) |
+|---|---------|----------------------------------------|
+| **4.1** Router CSI | [`csi_recv_router`](./csi_recv_router) | `./scripts/set_csi_wifi.sh` · `./monitor_csi.sh` · `./plot_csi.sh` |
+| **4.2** Between devices | [`csi_between_devices`](./csi_between_devices) | `./scripts/flash_csi_between.sh` · `./plot_csi.sh` (sense port) |
+| **4.3** Specific sender | [`csi_send`](./csi_send) + [`csi_recv`](./csi_recv) | `./scripts/flash_csi_pair.sh` · `./plot_csi.sh` (recv port) |
+
+Full notes (ports, baud **115200**, switching): [`CSI_METHODS.md`](../../../CSI_METHODS.md).
+
+---
+
+This folder’s classic walkthrough is **4.3** (two chips, ESP‑NOW-style sender/receiver) with a GUI for CSI subcarriers.
 
 ## hardware
 
@@ -13,34 +25,43 @@ You need to prepare two development boards for espressif chips, one as the sende
 2. Use an external antenna: The PCB antenna has poor directivity and is easily interfered with by the motherboard.
 3. The distance between the two devices should be greater than 1 meter.
 
-## Binding
+## Binding (4.3 / csi_send + csi_recv)
 
 1. Burn the firmware of `csi_recv` and `csi_send` on two development boards respectively
 
     ![device_log](./docs/_static/device_log.png)
 
+    Prefer the repo helper (ESP32-C5, 115200):
+
+    ```shell
+    # from camera_module root
+    ./scripts/flash_csi_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+    ./plot_csi.sh /dev/cu.usbmodem2101
+    ```
+
+    Or manually:
+
     ```shell
     # csi_send
     cd esp-csi/examples/get-started/csi_send
-    idf.py set-target esp32c3
-    idf.py flash -b 921600 -p /dev/ttyUSB0 monitor
+    idf.py set-target esp32c5
+    idf.py flash -b 460800 -p /dev/cu.usbmodem101
 
     # csi_recv
     cd esp-csi/examples/get-started/csi_recv
-    idf.py set-target esp32c3
-    idf.py flash -b 921600 -p /dev/ttyUSB1
+    idf.py set-target esp32c5
+    idf.py flash -b 460800 -p /dev/cu.usbmodem2101
     ```
 
-2. Run `csi_data_read_parse.py` in `csi_recv` for data analysis. Please close `idf.py monitor` before running
+2. Run `csi_data_read_parse.py` for data analysis. Please close `idf.py monitor` before running
 
     ```shell
-    cd esp-csi-gitlab/examples/get-started/tools
+    # from camera_module root
+    ./plot_csi.sh /dev/cu.usbmodem2101
 
-    # Install python related dependencies
-    pip install -r requirements.txt
-
-    # Graphical display
-    python csi_data_read_parse.py -p /dev/ttyUSB1
+    # or:
+    cd esp-csi/examples/get-started/tools
+    # use repo .venv — see ../../../../scripts/setup_python.sh
     ```
 
 ## CSI Data Format

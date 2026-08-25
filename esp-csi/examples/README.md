@@ -2,9 +2,20 @@
 [[中文]](./README_cn.md)  
 This directory contains multiple example projects for esp-csi. These examples are intended to demonstrate various features of esp-csi and provide code that can be copied and adapted for your own projects.
 
+**Espressif “How to get CSI” ↔ examples in this tree**
+
+| § | Method | Example(s) |
+|---|--------|------------|
+| 4.1 | Router CSI | `get-started/csi_recv_router` |
+| 4.2 | CSI between devices (same AP) | `get-started/csi_between_devices` |
+| 4.3 | CSI from a specific / broadcast sender | `get-started/csi_send` + `get-started/csi_recv` |
+
+Repo-root helpers for ESP32-C5 (baud 115200, flash scripts): see [`CSI_METHODS.md`](../../CSI_METHODS.md).
+
 - `get-started/csi_recv`: A basic CSI data reception example showing how to obtain CSI information via a Wi-Fi receiver.
 - `get-started/csi_send`: A basic CSI transmission example designed to work with `csi_recv`, sending Wi-Fi packets for the receiver to extract CSI.
 - `get-started/csi_recv_router`: Receives CSI in router communication mode by pinging a router and parsing the CSI from its reply packets.
+- `get-started/csi_between_devices`: Both STAs join the same AP and ping; the sense board measures CSI from the peer STA (Espressif §4.2).
 - `esp-radar/connect_rainmaker`: Connects CSI data to Espressif's Rainmaker cloud platform for remote visualization or control.
 - `esp-radar/console_test`: A console-based testing example for debugging and evaluating CSI data and algorithm performance.
 - `esp-radar/wifi_sensing_demo`: A Wi-Fi sensing demo built on the `esp_wifi_sensing` component, featuring motion and human presence detection, on-site training, LED feedback, and a browser-based Web Serial monitor for live diagnostics and tuning.

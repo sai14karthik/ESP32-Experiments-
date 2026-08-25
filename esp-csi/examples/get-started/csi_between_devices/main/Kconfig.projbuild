@@ -1,0 +1,16 @@
+menu "CSI between devices (Espressif 4.2)"
+
+    choice CSI_BETWEEN_ROLE
+        prompt "Board role"
+        default CSI_BETWEEN_ROLE_SENSE
+        help
+            Peer board uses a fixed STA MAC and only generates traffic (ping).
+            Sense board joins the same AP, pings, and measures CSI from the peer MAC.
+
+        config CSI_BETWEEN_ROLE_PEER
+            bool "Peer (traffic source)"
+        config CSI_BETWEEN_ROLE_SENSE
+            bool "Sense (CSI from peer)"
+    endchoice
+
+endmenu

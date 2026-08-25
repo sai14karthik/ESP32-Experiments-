@@ -9,6 +9,10 @@ __pycache__/
 # Local secrets / machine paths (never commit)
 **/secrets.h
 **/sdkconfig.defaults.local
+**/sdkconfig.peer
+**/sdkconfig.sense
+**/build_peer/
+**/build_sense/
 eim_config.toml
 
 # ESP-IDF / Arduino build trees (absolute paths, not portable)

@@ -64,7 +64,13 @@ Camera sketch: edit `ssid` / `password` in
 
 Serial baud for CSI in this repo: **115200**.
 
+**Which CSI method?** See [CSI_METHODS.md](CSI_METHODS.md) — Espressif **4.1** / **4.2** / **4.3** (same as the esp-csi README diagrams).
+
 ### E. Monitor / plot CSI
+
+- **4.1:** `./monitor_csi.sh` then `./plot_csi.sh` (same port; not both at once)
+- **4.2:** after `./scripts/flash_csi_between.sh`, plot the **sense** port only
+- **4.3:** after `./scripts/flash_csi_pair.sh`, plot the **recv** port only
 
 ```bash
 # from repo root — only one of these at a time (same USB port)
