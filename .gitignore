@@ -7,6 +7,7 @@ __pycache__/
 .python-version
 
 # Local secrets / machine paths (never commit)
+.env
 **/secrets.h
 **/sdkconfig.defaults.local
 **/sdkconfig.peer
