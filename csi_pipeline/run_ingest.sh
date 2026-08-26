@@ -15,7 +15,8 @@ export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:$PATH"
 if [[ -f "$ROOT/.env" ]]; then
   # shellcheck disable=SC1091
   set -a
-  source "$ROOT/.env"
+  # strip CR so Windows-edited .env does not break DATABASE_URL
+  source <(tr -d '\r' < "$ROOT/.env")
   set +a
 fi
 
@@ -51,4 +52,9 @@ if [[ $has_port -eq 0 && $has_file -eq 0 ]]; then
   fi
 fi
 
-exec "$PY" "$ROOT/ingest_serial.py" "${EXTRA[@]}" "$@"
+# macOS bash 3.2 + set -u: empty "${EXTRA[@]}" is an unbound variable
+if [[ ${#EXTRA[@]} -gt 0 ]]; then
+  exec "$PY" "$ROOT/ingest_serial.py" "${EXTRA[@]}" "$@"
+else
+  exec "$PY" "$ROOT/ingest_serial.py" "$@"
+fi
