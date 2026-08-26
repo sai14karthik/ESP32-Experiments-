@@ -110,19 +110,23 @@ bash --noprofile --norc -c '
     echo
     echo "=== role=$role → $port ==="
     rm -rf "$bdir"
-    # Isolated sdkconfig per role (do not share ./sdkconfig across PEER/SENSE)
-    rm -f "$sdk"
+    # IDF honors SDKCONFIG for the generated config path
     export SDKCONFIG="$PROJECT/$sdk"
+    rm -f "$SDKCONFIG"
     idf.py -B "$bdir" \
+      -D SDKCONFIG="$SDKCONFIG" \
       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.local;$defs" \
       set-target esp32c5
-    # Sanity: role bit must match
+    # Prefer isolated file; fall back to project sdkconfig if IDF ignored SDKCONFIG
+    local cfg="$SDKCONFIG"
+    [[ -f "$cfg" ]] || cfg="$PROJECT/sdkconfig"
     if [[ "$role" == "PEER" ]]; then
-      grep -q 'CONFIG_CSI_BETWEEN_ROLE_PEER=y' "$SDKCONFIG"
+      grep -q 'CONFIG_CSI_BETWEEN_ROLE_PEER=y' "$cfg"
     else
-      grep -q 'CONFIG_CSI_BETWEEN_ROLE_SENSE=y' "$SDKCONFIG"
+      grep -q 'CONFIG_CSI_BETWEEN_ROLE_SENSE=y' "$cfg"
     fi
     idf.py -B "$bdir" \
+      -D SDKCONFIG="$cfg" \
       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.local;$defs" \
       build flash -p "$port" -b 460800
   }
