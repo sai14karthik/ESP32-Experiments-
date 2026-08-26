@@ -13,10 +13,19 @@ Aligned with Espressif’s **“How to get CSI”** in [`esp-csi/README.md`](esp
 | **4.3** | Specific sender | No (CSI link) | `esp-csi/examples/get-started/csi_send` + `csi_recv` | `flash_csi_pair.sh` |
 
 **Hardware:** ESP32-C5-KITC-A · `/dev/cu.usbmodem*` or `/dev/cu.usbserial*` · baud **115200**  
-**Plotter:** `./plot_csi.sh [port]` (not together with monitor on the same port)  
-**List ports:** `ls /dev/cu.usb*`
+**List ports:** `ls /dev/cu.usb*`  
+**Rule:** do **not** run terminal monitor and `./plot_csi.sh` on the **same** port at the same time.
 
 **Note on 4.3:** Full Espressif §4.3 is a multi-channel broadcaster. Get-started uses fixed channel **11**, ESP‑NOW, sender MAC `1a:00:00:00:00:00`.
+
+### Terminal vs plot (all methods)
+
+| View | How |
+|------|-----|
+| **Terminal** (raw `CSI_DATA` lines) | IDF `idf.py … monitor` or `screen` — see each method below |
+| **Plot** (optional) | `./plot_csi.sh [port]` after quitting the monitor |
+
+Quit IDF monitor with **`Ctrl+]`**. Quit `screen` with **`Ctrl+A`**, then **`K`**, then **`Y`**.
 
 ---
 
@@ -29,24 +38,41 @@ ESP joins the AP, pings the gateway, CSI from the **router’s ping reply** (fil
 | Boards | 1× |
 | Firmware | `csi_recv_router` |
 | Wi‑Fi | Required |
+| Terminal port | That one board |
 
-### Examples
+### Flash examples
 
 ```bash
-# Phone hotspot
 ./scripts/set_csi_wifi.sh 'SaiPhone' '123456789'
 ./scripts/set_csi_wifi.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101
 
-# Other APs (use single quotes if password has ! @ etc.)
 ./scripts/set_csi_wifi.sh 'SpectrumSetup-EB9C' 'unitedvideo788'
 ./scripts/set_csi_wifi.sh 'YourSSID' 'YourPassword'
-
-# Monitor then plot (quit monitor with Ctrl+] first)
-./monitor_csi.sh /dev/cu.usbmodem101
-./plot_csi.sh /dev/cu.usbmodem101
 ```
 
-Look for: `got ip:…` then `CSI_DATA,…` (MAC = AP BSSID).
+### See output in terminal
+
+```bash
+# Helper (opens csi_recv_router monitor)
+./monitor_csi.sh /dev/cu.usbmodem101
+
+# Or manually
+source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+cd esp-csi/examples/get-started/csi_recv_router
+idf.py -p /dev/cu.usbmodem101 monitor
+
+# Or plain serial (no IDF)
+screen /dev/cu.usbmodem101 115200
+```
+
+**Expect:** `got ip:…` then `CSI_DATA,…` (MAC = AP BSSID).
+
+### Optional plot
+
+```bash
+# quit terminal monitor first
+./plot_csi.sh /dev/cu.usbmodem101
+```
 
 ---
 
@@ -58,13 +84,12 @@ Both join the **same** AP and ping. Sense board measures CSI from the **peer** S
 |---|---|
 | Boards | 2× |
 | Firmware | `csi_between_devices` |
-| Peer port | Traffic source (MAC `1a:00:00:00:00:0a`) |
-| Sense port | Plot this one |
+| Peer port | Traffic only (usually no CSI lines) |
+| Sense port | **Terminal / plot this one** |
 
-### Examples
+### Flash examples
 
 ```bash
-# Flash both (peer first, sense second)
 ./scripts/flash_csi_between.sh 'SaiPhone' '123456789'
 ./scripts/flash_csi_between.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101 /dev/cu.usbmodem2101
 
@@ -76,12 +101,28 @@ Both join the **same** AP and ping. Sense board measures CSI from the **peer** S
 
 # Reuse Wi‑Fi from csi_recv_router/sdkconfig.defaults.local; auto-detect ports
 ./scripts/flash_csi_between.sh
-
-# Plot sense board only
-./plot_csi.sh /dev/cu.usbmodem2101
 ```
 
-Look for: `CSI_DATA,…,1a:00:00:00:00:0a,…`
+### See output in terminal (sense board)
+
+```bash
+source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+cd esp-csi/examples/get-started/csi_between_devices
+idf.py -B build-sense -p /dev/cu.usbmodem2101 monitor
+
+# Or plain serial
+screen /dev/cu.usbmodem2101 115200
+```
+
+(`./monitor_csi.sh` is **4.1 only** — do not use it for 4.2.)
+
+**Expect:** `CSI_DATA,…,1a:00:00:00:00:0a,…`
+
+### Optional plot
+
+```bash
+./plot_csi.sh /dev/cu.usbmodem2101
+```
 
 ---
 
@@ -93,24 +134,35 @@ No AP/SSID. `csi_send` broadcasts; `csi_recv` filters sender MAC `1a:00:00:00:00
 |---|---|
 | Boards | 2× |
 | Firmware | `csi_send` + `csi_recv` |
-| Send port | First arg |
-| Recv port | Second arg — plot this one |
+| Send port | First flash arg (usually quiet / send logs only) |
+| Recv port | **Terminal / plot this one** |
 
-### Examples
+### Flash examples
 
 ```bash
-# Auto-pick two ports
 ./scripts/flash_csi_pair.sh
-
-# Explicit ports (send, then recv)
 ./scripts/flash_csi_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-
-# Plot receiver only
-./plot_csi.sh /dev/cu.usbmodem2101
 ```
 
-Look for: `CSI_DATA,…,1a:00:00:00:00:00,…`  
-(`set_csi_wifi.sh` / `monitor_csi.sh` are **4.1 only**.)
+### See output in terminal (recv board)
+
+```bash
+cd esp-csi/examples/get-started/csi_recv
+idf.py -p /dev/cu.usbmodem2101 monitor
+
+# Or plain serial
+screen /dev/cu.usbmodem2101 115200
+```
+
+(`./monitor_csi.sh` is **4.1 only** — do not use it for 4.3.)
+
+**Expect:** `CSI_DATA,…,1a:00:00:00:00:00,…`
+
+### Optional plot
+
+```bash
+./plot_csi.sh /dev/cu.usbmodem2101
+```
 
 ---
 
@@ -131,8 +183,11 @@ One firmware image per board at a time.
 | Script | Methods | Purpose |
 |--------|---------|---------|
 | `./scripts/set_csi_wifi.sh` | 4.1 | Set SSID/password, build, flash `csi_recv_router` |
-| `./monitor_csi.sh` | 4.1 | IDF serial monitor |
+| `./monitor_csi.sh` | **4.1 only** | IDF serial monitor (`csi_recv_router`) |
 | `./scripts/flash_csi_between.sh` | 4.2 | Flash peer + sense |
 | `./scripts/flash_csi_pair.sh` | 4.3 | Flash send + recv |
-| `./plot_csi.sh` | 4.1 / 4.2 / 4.3 | Live CSI plot (sense/recv/router port) |
+| `idf.py -p PORT monitor` | 4.2 / 4.3 | Terminal output (from correct example dir) |
+| `screen PORT 115200` | all | Terminal output without IDF |
+| `./plot_csi.sh` | all | Live CSI plot (optional) |
 | `./scripts/setup_python.sh` | — | Create `.venv` for the plotter |
+source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
