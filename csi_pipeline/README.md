@@ -114,6 +114,8 @@ LIMIT 5;
 
 **Pager tip:** if `SELECT *` freezes on a wall of `iq`, press **`q`**. Prefer the `iq[1:6]` query above.
 
+**More queries:** [`queries.sql`](queries.sql) is a snippet library covering inspection, capture health (sample rate, jitter, packet loss), amplitude/phase extraction from `iq`, CSV export, and data deletion. Open `psql` and paste blocks from it — do not run it with `psql -f`, since it ends with destructive statements.
+
 One-shot from the shell (no interactive `psql`):
 
 ```bash
