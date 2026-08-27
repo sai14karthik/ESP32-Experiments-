@@ -39,6 +39,18 @@ JOIN csi_sessions s ON s.id = c.session_id
 GROUP BY s.id, s.label, s.method
 ORDER BY max(c.host_ts) DESC;
 
+-- Packets per session, including sessions that recorded nothing.
+-- Note: this count is normally a few rows higher than the last
+-- "inserted total=N" line printed during capture, because the final flush on
+-- Ctrl+C is reported by the "stopped ... rows=N" line instead.
+SELECT s.label,
+       s.started_at,
+       count(c.id) AS packets
+FROM csi_sessions s
+LEFT JOIN csi_samples c ON c.session_id = s.id
+GROUP BY s.id, s.label, s.started_at
+ORDER BY s.started_at;
+
 -- Sessions that were never closed (process killed instead of Ctrl+C).
 SELECT id, label, started_at
 FROM csi_sessions
@@ -66,6 +78,15 @@ LIMIT 1;
 -- ############################################################################
 -- 2. HEALTH — is the capture trustworthy
 -- ############################################################################
+
+-- Quick whole-database sanity check. Expect iq_ok = t, len = 234, and a
+-- single mac / channel for a §4.3 setup.
+SELECT count(*)                                AS packets,
+       bool_and(array_length(iq, 1) = len)     AS iq_ok,
+       min(len)                                AS len,
+       count(DISTINCT mac)                     AS macs,
+       count(DISTINCT channel)                 AS channels
+FROM csi_samples;
 
 -- Integrity summary per run. Every boolean should be true, bad_iq should be 0.
 SELECT s.label,
