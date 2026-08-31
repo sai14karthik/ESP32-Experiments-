@@ -186,6 +186,7 @@ One firmware image per board at a time.
 | `./monitor_csi.sh` | **4.1 only** | IDF serial monitor (`csi_recv_router`) |
 | `./scripts/flash_csi_between.sh` | 4.2 | Flash peer + sense |
 | `./scripts/flash_csi_pair.sh` | 4.3 | Flash send + recv |
+| [`csi_pipeline/MAC_MINI.md`](csi_pipeline/MAC_MINI.md) | 4.1–4.3 | Mac Mini → PostgreSQL ingest |
 | `idf.py -p PORT monitor` | 4.2 / 4.3 | Terminal output (from correct example dir) |
 | `screen PORT 115200` | all | Terminal output without IDF |
 | `./plot_csi.sh` | all | Live CSI plot (optional) |

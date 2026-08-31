@@ -1,7 +1,10 @@
 # CSI Pipeline — Capture to PostgreSQL
 
-ESP32-C5 CSI (§4.3 first) over USB → parse `CSI_DATA` → store in local PostgreSQL.  
-Works the same on **this Mac** and a **Mac Mini**.
+ESP32-C5 CSI over USB → parse `CSI_DATA` → store in local PostgreSQL.
+
+**Mac Mini (methods 4.1 / 4.2 / 4.3):** see **[`MAC_MINI.md`](MAC_MINI.md)** — full setup, hardware, ingest commands, export, troubleshooting.
+
+This README is the short reference; [`MAC_MINI.md`](MAC_MINI.md) is the complete Mac Mini runbook.
 
 ```
 csi_send  --ESP-NOW ch11-->  csi_recv  --USB 115200-->  run_ingest.sh  -->  Postgres (csi DB)
@@ -27,19 +30,11 @@ Requires [Homebrew](https://brew.sh). Apple Silicon path: `/opt/homebrew/...`.
 
 ---
 
-## 2. Hardware (§4.3)
+## 2. Hardware
 
-1. Flash `csi_send` + `csi_recv` (see [`CSI_METHODS.md`](../CSI_METHODS.md)).
-2. Plug the **receiver** USB into the Mac that runs ingest.
-3. Keep the **sender** powered nearby (no Wi‑Fi AP needed).
-4. Quit anything else on that serial port (`idf.py monitor`, `screen`, `plot_csi.sh`).
+See **[`MAC_MINI.md`](MAC_MINI.md)** for per-method wiring (4.1 one board, 4.2 sense board, 4.3 recv + sender on power).
 
-```bash
-ls /dev/cu.usb*
-./run_ingest.sh --probe          # which port prints CSI_DATA
-```
-
----
+**§4.3 quick check:**
 
 ## 3. Capture CSI
 
@@ -122,20 +117,10 @@ One-shot from the shell (no interactive `psql`):
 psql postgresql:///csi -c "SELECT label, count(*) FROM csi_sessions s JOIN csi_samples c ON c.session_id=s.id GROUP BY label;"
 ```
 
----
-
-## 5. Mac Mini
-
-Same repo folder and commands:
-
 ```bash
-cd csi_pipeline
-./setup_mac.sh
-# plug csi_recv into the Mini
-./run_ingest.sh --method 4.3 --channel 11 --label mini_desk
+ls /dev/cu.usb*
+./run_ingest.sh --probe
 ```
-
-Sender only needs power nearby; it does not USB into the Mini.
 
 ---
 
@@ -157,6 +142,7 @@ Amplitude / phase are **not** stored; compute offline from `iq` when needed.
 
 | Path | Role |
 |------|------|
+| [`MAC_MINI.md`](MAC_MINI.md) | **Mac Mini runbook** (4.1 / 4.2 / 4.3 + Postgres) |
 | [`setup_mac.sh`](setup_mac.sh) | One-time machine setup |
 | [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `.venv`) |
 | [`probe_recv_port.py`](probe_recv_port.py) | Detect recv USB port |
