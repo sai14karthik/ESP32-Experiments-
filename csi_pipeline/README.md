@@ -24,7 +24,7 @@ cd csi_pipeline
 ./setup_mac.sh
 ```
 
-This installs/starts **PostgreSQL 16** (Homebrew), creates DB `csi`, applies [`schema.sql`](schema.sql), creates `.venv`, and writes `.env`.
+This installs **PostgreSQL 16** (Homebrew), creates DB `csi`, applies [`schema.sql`](schema.sql), runs `uv sync --group csi`, and writes `.env`.
 
 Requires [Homebrew](https://brew.sh). Apple Silicon path: `/opt/homebrew/...`.
 
@@ -65,20 +65,15 @@ cd csi_pipeline
 Trained on `baseline_*` vs `object_*` exports. Reads the same USB serial stream as ingest (do **not** run both on one port).
 
 ```bash
-cd csi_pipeline
+cd ~/Desktop/camera_module
+uv sync --group csi          # one-time: psycopg, sklearn, joblib
 
-# One-time: train best deploy model (auto-picks logreg / HGB / RF)
-./run_detect.sh --train
-./run_detect.sh --eval-csv          # print saved hold-out metrics
+cd csi_pipeline
+./run_detect.sh --train --csv "../sample data /csi_packets.csv"
+./run_detect.sh --eval-csv
 
 # Live — recv USB to Mini, send on power (§4.3)
-./run_detect.sh
-
-# Only print when state changes EMPTY ↔ OBJECT
 ./run_detect.sh --quiet
-
-# JSON lines (for logging / dashboards)
-./run_detect.sh --json
 ```
 
 **v2 model:** baseline-subtracted subcarrier features + band-energy stats; auto model selection; tuned threshold; EMA + hysteresis for stable live labels.
@@ -178,7 +173,7 @@ Amplitude / phase are **not** stored; compute offline from `iq` when needed.
 |------|------|
 | [`MAC_MINI.md`](MAC_MINI.md) | **Mac Mini runbook** (4.1 / 4.2 / 4.3 + Postgres) |
 | [`setup_mac.sh`](setup_mac.sh) | One-time machine setup |
-| [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `.venv`) |
+| [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `uv run --group csi`) |
 | [`probe_recv_port.py`](probe_recv_port.py) | Detect recv USB port |
 | [`ingest_serial.py`](ingest_serial.py) | Serial/file → batch INSERT |
 | [`schema.sql`](schema.sql) | Table definitions |

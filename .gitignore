@@ -28,4 +28,5 @@ sdkconfig.old
 *.log
 .cache/
 
-examples.txt
+csi_pipeline/.venv/
+csi_pipeline/.venv-ml/

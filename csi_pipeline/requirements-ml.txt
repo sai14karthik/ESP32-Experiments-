@@ -1,4 +1,1 @@
-numpy>=1.24
-scikit-learn>=1.3
-joblib>=1.3
-pyserial>=3.5
+# See pyproject.toml [dependency-groups.csi] and csi_pipeline/uv_common.sh

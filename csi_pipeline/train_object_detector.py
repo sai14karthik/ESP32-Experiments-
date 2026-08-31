@@ -308,6 +308,7 @@ def main() -> None:
     )
     print(f"\nSaved → {args.out}")
     print("Live:  cd csi_pipeline && ./run_detect.sh")
+    print("Setup: cd .. && uv sync --group csi")
 
 
 if __name__ == "__main__":

@@ -1,2 +1,2 @@
-pyserial>=3.5
-psycopg[binary]>=3.1
+# Dependencies moved to repo pyproject.toml [dependency-groups.csi]
+# Install:  cd .. && uv sync --group csi

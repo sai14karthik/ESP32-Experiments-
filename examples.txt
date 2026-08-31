@@ -1,0 +1,3 @@
+./scripts/set_csi_wifi.sh "SaiPhone" "123456789"
+./scripts/set_csi_wifi.sh "SpectrumSetup-EB9C" "unitedvideo788"
+./scripts/set_csi_wifi.sh 'YourSSID' 'YourPassword'

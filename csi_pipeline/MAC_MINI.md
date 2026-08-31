@@ -53,7 +53,7 @@ cd csi_pipeline
 ./setup_mac.sh
 ```
 
-This installs **PostgreSQL 16** (Homebrew), creates database `csi`, applies [`schema.sql`](schema.sql), creates Python `.venv`, and writes [`.env`](.env).
+This installs **PostgreSQL 16** (Homebrew), creates database `csi`, applies [`schema.sql`](schema.sql), runs `uv sync --group csi`, and writes [`.env`](.env).
 
 Add Postgres to your shell (optional, add to `~/.zshrc`):
 
@@ -93,18 +93,56 @@ psql postgresql:///csi -c "
 
 Use a **descriptive `--label`** every time (`baseline_empty`, `object_box`, `lab_desk`, …). Each run creates **one** row in `csi_sessions` and many rows in `csi_samples`.
 
-### Real-time empty vs object (no Postgres)
+### Train + live object detection (full workflow on Mac Mini)
 
-Same hardware as §4.3 ingest — **recv on USB, send on power**. Do not run `run_ingest.sh` and `run_detect.sh` on the same port.
+**Hardware:** recv → USB Mini, send → power only, ~2 m apart, channel 11.
+
+#### Step 0 — one-time setup
 
 ```bash
-cd ~/Desktop/camera_module/csi_pipeline
-./run_detect.sh --train          # v2: baseline features + auto model pick
-./run_detect.sh --eval-csv       # hold-out metrics from training
-./run_detect.sh --quiet          # live: prints only on EMPTY ↔ OBJECT change
+cd ~/Desktop/camera_module
+uv sync --group csi
+
+cd csi_pipeline
+./setup_mac.sh    # Postgres + ingest (if not done)
 ```
 
-First prediction after ~6 s (30 packets); updates about every 3 s.
+#### Step 1 — capture EMPTY (no object on link)
+
+```bash
+./run_ingest.sh --probe
+./run_ingest.sh --method 4.3 --channel 11 --label baseline_mini
+# keep running 2–5 min, then Ctrl+C
+```
+
+#### Step 2 — capture OBJECT (same geometry, object between TX/RX)
+
+```bash
+./run_ingest.sh --method 4.3 --channel 11 --label object_mini
+# 2–5 min, Ctrl+C
+```
+
+Labels must contain **`baseline`** or **`empty`** and **`object`** (e.g. `baseline_mini`, `object_mini`).
+
+#### Step 3 — train from Postgres on the Mini
+
+```bash
+./run_detect.sh --train-from-db
+./run_detect.sh --eval-csv
+```
+
+This exports `exports/training_packets.csv` from your captures and saves `models/object_detector.joblib`.
+
+#### Step 4 — live test (do not run ingest on same port)
+
+```bash
+./run_detect.sh --probe
+./run_detect.sh --quiet
+```
+
+Remove object → should say **EMPTY**. Put object back → **OBJECT** (~6 s first result, then ~3 s updates).
+
+**Already have `baseline_1hr` / `object_1hr` in Postgres?** Skip steps 1–2 and run `./run_detect.sh --train-from-db` directly.
 
 ---
 

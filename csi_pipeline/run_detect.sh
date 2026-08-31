@@ -1,52 +1,50 @@
 #!/usr/bin/env bash
-# Real-time CSI object detection on Mac / Mac Mini.
+# Real-time CSI object detection (uv + csi dependency group).
 #
 #   ./run_detect.sh                          # live serial
-#   ./run_detect.sh --train                  # (re)train best model from sample CSV
-#   ./run_detect.sh --from-file fixtures/sample_csi_lines.csv
-#   ./run_detect.sh --quiet                  # print only on EMPTY ↔ OBJECT change
-#   ./run_detect.sh --probe                  # same as run_ingest.sh --probe
+#   ./run_detect.sh --train                  # train from default sample CSV
+#   ./run_detect.sh --train-from-db          # export Postgres → train
+#   ./run_detect.sh --eval-csv               # print saved hold-out metrics
+#   ./run_detect.sh --quiet                  # live: print only on EMPTY ↔ OBJECT
+#   ./run_detect.sh --probe                  # which USB port has CSI_DATA
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/uv_common.sh"
 
 export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:$PATH"
 
-ML_PY="$ROOT/.venv-ml/bin/python"
-INGEST_PY="$ROOT/.venv/bin/python"
-
 if [[ "${1:-}" == "--probe" ]]; then
-  if [[ ! -x "$INGEST_PY" ]]; then
-    echo "Missing .venv — run ./setup_mac.sh first." >&2
-    exit 1
-  fi
-  exec "$INGEST_PY" "$ROOT/probe_recv_port.py" "${@:2}"
+  shift
+  uv_csi "$ROOT/probe_recv_port.py" "$@"
+  exit 0
 fi
 
 if [[ "${1:-}" == "--train" ]]; then
   shift
-  if [[ ! -x "$ML_PY" ]]; then
-    python3 -m venv "$ROOT/.venv-ml"
-    "$ROOT/.venv-ml/bin/pip" install -q -r "$ROOT/requirements-ml.txt"
-  fi
-  exec "$ML_PY" "$ROOT/train_object_detector.py" --deploy "$@"
+  uv_csi "$ROOT/train_object_detector.py" --deploy "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--train-from-db" ]]; then
+  shift
+  EXPORT="$ROOT/exports/training_packets.csv"
+  uv_csi "$ROOT/export_training_csv.py" --out "$EXPORT"
+  uv_csi "$ROOT/train_object_detector.py" --deploy --csv "$EXPORT" "$@"
+  exit 0
 fi
 
 if [[ "${1:-}" == "--eval-csv" ]]; then
   shift
   [[ $# -gt 0 && "${1:-}" != --* ]] && shift || true
-  exec "$ML_PY" "$ROOT/eval_object_detector.py" --model "$ROOT/models/object_detector.joblib" "$@"
-fi
-
-if [[ ! -x "$ML_PY" ]]; then
-  echo "ML venv missing. Run: ./run_detect.sh --train" >&2
-  exit 1
+  uv_csi "$ROOT/eval_object_detector.py" --model "$ROOT/models/object_detector.joblib" "$@"
+  exit 0
 fi
 
 if [[ ! -f "$ROOT/models/object_detector.joblib" ]]; then
   echo "No model yet — training from sample data …" >&2
-  "$ML_PY" "$ROOT/train_object_detector.py" --deploy
+  uv_csi "$ROOT/train_object_detector.py" --deploy
 fi
 
 EXTRA=()
@@ -59,8 +57,8 @@ for a in "$@"; do
   esac
 done
 
-if [[ $has_port -eq 0 && $has_file -eq 0 && -x "$INGEST_PY" ]]; then
-  RECV="$("$INGEST_PY" "$ROOT/probe_recv_port.py" --quiet 2>/dev/null || true)"
+if [[ $has_port -eq 0 && $has_file -eq 0 ]]; then
+  RECV="$(uv_csi "$ROOT/probe_recv_port.py" --quiet 2>/dev/null || true)"
   if [[ -n "${RECV:-}" ]]; then
     echo "auto recv port: $RECV" >&2
     EXTRA=(--port "$RECV")
@@ -68,7 +66,7 @@ if [[ $has_port -eq 0 && $has_file -eq 0 && -x "$INGEST_PY" ]]; then
 fi
 
 if [[ ${#EXTRA[@]} -gt 0 ]]; then
-  exec "$ML_PY" "$ROOT/detect_live.py" "${EXTRA[@]}" "$@"
+  uv_csi "$ROOT/detect_live.py" "${EXTRA[@]}" "$@"
 else
-  exec "$ML_PY" "$ROOT/detect_live.py" "$@"
+  uv_csi "$ROOT/detect_live.py" "$@"
 fi

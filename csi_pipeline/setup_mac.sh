@@ -4,7 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/uv_common.sh"
 
 export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:$PATH"
 
@@ -19,7 +20,6 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 
 brew services start postgresql@16 >/dev/null 2>&1 || true
-# Wait briefly for socket
 for _ in 1 2 3 4 5; do
   if psql -d postgres -c 'SELECT 1' >/dev/null 2>&1; then
     break
@@ -35,13 +35,8 @@ fi
 echo "Applying schema…"
 psql -d csi -v ON_ERROR_STOP=1 -f "$ROOT/schema.sql" >/dev/null
 
-if [[ ! -d "$ROOT/.venv" ]]; then
-  echo "Creating .venv…"
-  python3 -m venv "$ROOT/.venv"
-fi
-# shellcheck disable=SC1091
-source "$ROOT/.venv/bin/activate"
-pip install -q -r "$ROOT/requirements.txt"
+echo "Syncing Python deps (uv)…"
+ensure_uv
 
 ENV_FILE="$ROOT/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -52,5 +47,6 @@ fi
 echo
 echo "Setup OK on $(hostname)."
 echo "  DATABASE_URL=postgresql:///csi"
+echo "  Python: uv run --group csi (from repo root)"
 echo "  Next: ./run_ingest.sh --method 4.3 --channel 11 --label desk"
-echo "  Dry-run: ./run_ingest.sh --from-file fixtures/sample_csi_lines.csv --label dryrun"
+echo "  Detect: ./run_detect.sh --train --csv \"../sample data /csi_packets.csv\""
