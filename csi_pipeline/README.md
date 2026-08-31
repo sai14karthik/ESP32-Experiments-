@@ -60,6 +60,40 @@ cd csi_pipeline
 
 ---
 
+## 3b. Real-time object detection (Mac Mini)
+
+Trained on `baseline_*` vs `object_*` exports. Reads the same USB serial stream as ingest (do **not** run both on one port).
+
+```bash
+cd csi_pipeline
+
+# One-time: train best deploy model (auto-picks logreg / HGB / RF)
+./run_detect.sh --train
+./run_detect.sh --eval-csv          # print saved hold-out metrics
+
+# Live — recv USB to Mini, send on power (§4.3)
+./run_detect.sh
+
+# Only print when state changes EMPTY ↔ OBJECT
+./run_detect.sh --quiet
+
+# JSON lines (for logging / dashboards)
+./run_detect.sh --json
+```
+
+**v2 model:** baseline-subtracted subcarrier features + band-energy stats; auto model selection; tuned threshold; EMA + hysteresis for stable live labels.
+
+Output example:
+
+```text
+EMPTY   P(object)=0.12  raw=0.08  thr=0.83  seq=32090 rssi=-53
+OBJECT  P(object)=0.91  raw=0.88  thr=0.83  seq=17201 rssi=-47
+```
+
+Waits for **30 packets** (~6 s) before the first prediction, then updates every **15 packets** (~3 s).
+
+---
+
 ## 4. View data in Postgres
 
 ```bash

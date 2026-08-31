@@ -4,22 +4,20 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import glob
-import io
 import os
 import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 import serial
 from psycopg import Connection
 
-DEFAULT_BAUD = 115200
+from csi_parse import DEFAULT_BAUD, parse_csi_line
+
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_FLUSH_S = 0.1
 DEFAULT_DATABASE_URL = "postgresql://localhost/csi"
@@ -45,72 +43,6 @@ def git_commit() -> str | None:
         return out.strip() or None
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
-
-
-def parse_csi_line(line: str) -> dict[str, Any] | None:
-    """Parse one CSI_DATA CSV line into fields + iq list."""
-    if not line.startswith("CSI_DATA,"):
-        return None
-    # csv handles the quoted "[…]" data field
-    try:
-        row = next(csv.reader(io.StringIO(line)))
-    except csv.Error:
-        return None
-    if len(row) < 15:
-        return None
-
-    (
-        _type,
-        seq,
-        mac,
-        rssi,
-        rate,
-        noise_floor,
-        fft_gain,
-        agc_gain,
-        channel,
-        local_timestamp,
-        sig_len,
-        rx_format,
-        length,
-        first_word,
-        data,
-    ) = row[:15]
-
-    data = data.strip()
-    if data.startswith("[") and data.endswith("]"):
-        data = data[1:-1]
-    if not data.strip():
-        iq: list[int] = []
-    else:
-        try:
-            iq = [int(x.strip()) for x in data.split(",") if x.strip() != ""]
-        except ValueError:
-            return None
-
-    def to_int(s: str) -> int | None:
-        s = s.strip()
-        if s == "" or s.lower() == "null":
-            return None
-        return int(s)
-
-    return {
-        "seq": to_int(seq),
-        "mac": mac.strip(),
-        "rssi": to_int(rssi),
-        "rate": to_int(rate),
-        "noise_floor": to_int(noise_floor),
-        "fft_gain": to_int(fft_gain),
-        "agc_gain": to_int(agc_gain),
-        "channel": to_int(channel),
-        "device_ts": to_int(local_timestamp),
-        "sig_len": to_int(sig_len),
-        "rx_format": to_int(rx_format),
-        "len": to_int(length),
-        "first_word": to_int(first_word),
-        "iq": iq,
-        "host_ts": datetime.now(timezone.utc),
-    }
 
 
 def create_session(

@@ -93,6 +93,19 @@ psql postgresql:///csi -c "
 
 Use a **descriptive `--label`** every time (`baseline_empty`, `object_box`, `lab_desk`, …). Each run creates **one** row in `csi_sessions` and many rows in `csi_samples`.
 
+### Real-time empty vs object (no Postgres)
+
+Same hardware as §4.3 ingest — **recv on USB, send on power**. Do not run `run_ingest.sh` and `run_detect.sh` on the same port.
+
+```bash
+cd ~/Desktop/camera_module/csi_pipeline
+./run_detect.sh --train          # v2: baseline features + auto model pick
+./run_detect.sh --eval-csv       # hold-out metrics from training
+./run_detect.sh --quiet          # live: prints only on EMPTY ↔ OBJECT change
+```
+
+First prediction after ~6 s (30 packets); updates about every 3 s.
+
 ---
 
 ## Method 4.3 — ESP-NOW (recommended for controlled lab data)
