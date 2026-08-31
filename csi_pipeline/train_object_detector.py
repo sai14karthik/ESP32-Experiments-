@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train empty vs object classifier — auto model pick, baseline features, deploy bundle."""
+"""Train empty vs object classifier — auto model pick, v3 features, deploy bundle."""
 
 from __future__ import annotations
 
@@ -29,16 +29,19 @@ from csi_features import (
     FEATURE_VERSION,
     LABEL_EMPTY,
     LABEL_OBJECT,
+    PacketRecord,
     WindowSpec,
+    parse_optional_float,
+    compute_baseline_phase_profile,
     compute_baseline_profile,
     feature_dim,
-    iq_field_to_amplitudes,
+    iq_list_to_packet,
     window_to_features,
 )
 
 
-def load_packets(csv_path: Path) -> tuple[list[np.ndarray], list[int], list[str]]:
-    amps: list[np.ndarray] = []
+def load_packets(csv_path: Path) -> tuple[list[PacketRecord], list[int], list[str]]:
+    packets: list[PacketRecord] = []
     y: list[int] = []
     sessions: list[str] = []
 
@@ -53,34 +56,47 @@ def load_packets(csv_path: Path) -> tuple[list[np.ndarray], list[int], list[str]
                 print(f"skip unknown label: {row['label']!r}", file=sys.stderr)
                 continue
             try:
-                amps.append(iq_field_to_amplitudes(row["iq"]))
+                packets.append(
+                    iq_list_to_packet(
+                        [int(x) for x in row["iq"].strip("{}").split(",") if x.strip()],
+                        rssi=parse_optional_float(row.get("rssi")),
+                        agc_gain=parse_optional_float(row.get("agc_gain")),
+                        fft_gain=parse_optional_float(row.get("fft_gain")),
+                    )
+                )
             except ValueError as exc:
                 print(f"skip bad iq row: {exc}", file=sys.stderr)
                 continue
             sessions.append(row["label"])
 
-    if not amps:
+    if not packets:
         sys.exit(f"No rows loaded from {csv_path}")
-    return amps, y, sessions
+    return packets, y, sessions
 
 
 def build_windows(
-    amps: list[np.ndarray],
+    packets: list[PacketRecord],
     labels: list[int],
     session_labels: list[str],
     spec: WindowSpec,
     baseline_profile: np.ndarray,
+    baseline_phase: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     X: list[np.ndarray] = []
     y: list[int] = []
     meta: list[str] = []
 
-    if len(amps) < spec.size:
-        return np.empty((0, feature_dim(baseline_profile))), np.empty(0, dtype=np.int32), []
+    fdim = feature_dim(baseline_profile, window_size=spec.size)
+    if len(packets) < spec.size:
+        return np.empty((0, fdim)), np.empty(0, dtype=np.int32), []
 
-    for start in range(0, len(amps) - spec.size + 1, spec.stride):
-        chunk = amps[start : start + spec.size]
-        feat = window_to_features(chunk, baseline_profile=baseline_profile)
+    for start in range(0, len(packets) - spec.size + 1, spec.stride):
+        chunk = packets[start : start + spec.size]
+        feat = window_to_features(
+            chunk,
+            baseline_profile=baseline_profile,
+            baseline_phase=baseline_phase,
+        )
         window_labs = labels[start : start + spec.size]
         label = int(round(sum(window_labs) / len(window_labs)))
         X.append(feat)
@@ -156,7 +172,6 @@ def candidate_models() -> dict[str, object]:
 
 def build_pipeline(name: str) -> Pipeline:
     clf = candidate_models()[name]
-    # HGB is scale-invariant; scaler still helps RF/logreg and is harmless for HGB.
     return Pipeline([("scaler", StandardScaler()), ("clf", clf)])
 
 
@@ -197,6 +212,7 @@ def save_bundle(
     pipe: Pipeline,
     spec: WindowSpec,
     baseline_profile: np.ndarray,
+    baseline_phase: np.ndarray,
     threshold: float,
     model_type: str,
     csv_path: Path,
@@ -213,6 +229,7 @@ def save_bundle(
             "hysteresis": 0.06,
             "ema_alpha": 0.3,
             "baseline_profile": baseline_profile,
+            "baseline_phase": baseline_phase,
             "labels": {"empty": LABEL_EMPTY, "object": LABEL_OBJECT},
             "model_type": model_type,
             "metrics": metrics,
@@ -245,14 +262,15 @@ def main() -> None:
         sys.exit(f"CSV not found: {args.csv}")
 
     print(f"Loading {args.csv} …")
-    amps, labels, sessions = load_packets(args.csv)
-    print(f"  packets: {len(amps)}  empty={labels.count(LABEL_EMPTY)}  object={labels.count(LABEL_OBJECT)}")
+    packets, labels, sessions = load_packets(args.csv)
+    print(f"  packets: {len(packets)}  empty={labels.count(LABEL_EMPTY)}  object={labels.count(LABEL_OBJECT)}")
 
-    baseline_profile = compute_baseline_profile(amps, labels)
-    print(f"  baseline profile: {baseline_profile.shape[0]} active subcarriers")
+    baseline_profile = compute_baseline_profile(packets, labels)
+    baseline_phase = compute_baseline_phase_profile(packets, labels)
+    print(f"  baseline profiles: {baseline_profile.shape[0]} active subcarriers")
 
     spec = WindowSpec(size=args.window, stride=args.stride)
-    X, y, meta = build_windows(amps, labels, sessions, spec, baseline_profile)
+    X, y, meta = build_windows(packets, labels, sessions, spec, baseline_profile, baseline_phase)
     print(f"  windows: {len(y)}  features={X.shape[1]}  (v{FEATURE_VERSION})")
 
     X_train, X_test, y_train, y_test = blocked_split(
@@ -301,6 +319,7 @@ def main() -> None:
         pipe=pipe,
         spec=spec,
         baseline_profile=baseline_profile,
+        baseline_phase=baseline_phase,
         threshold=threshold,
         model_type=model_name,
         csv_path=args.csv,

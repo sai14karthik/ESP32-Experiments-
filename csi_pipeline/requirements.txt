@@ -1,2 +1,0 @@
-# Dependencies moved to repo pyproject.toml [dependency-groups.csi]
-# Install:  cd .. && uv sync --group csi

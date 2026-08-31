@@ -11,8 +11,12 @@ import time
 import serial
 
 
-def list_ports() -> list[str]:
-    return sorted(glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*"))
+def list_ports(*, recv_only: bool = False) -> list[str]:
+    """Recv boards are usually usbmodem*; usbserial* is often the sender (do not open)."""
+    modems = sorted(glob.glob("/dev/cu.usbmodem*"))
+    if recv_only:
+        return modems
+    return modems + sorted(glob.glob("/dev/cu.usbserial*"))
 
 
 def count_csi(port: str, seconds: float, baud: int) -> tuple[int, str | None]:
@@ -48,13 +52,18 @@ def main() -> None:
     p.add_argument("--seconds", type=float, default=2.0)
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument(
+        "--all-ports",
+        action="store_true",
+        help="Also probe usbserial* (may reset sender board; use for diagnose only)",
+    )
+    p.add_argument(
         "--quiet",
         action="store_true",
         help="Print only the best recv port path (or nothing)",
     )
     args = p.parse_args()
 
-    ports = list_ports()
+    ports = list_ports(recv_only=not args.all_ports)
     if not ports:
         if not args.quiet:
             print("No /dev/cu.usbmodem* or usbserial* found.", file=sys.stderr)
