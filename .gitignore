@@ -3,6 +3,7 @@ ngrok.log
 network_commands.txt
 .venv/
 __pycache__/
+__pycache__/
 *.pyc
 .python-version
 
