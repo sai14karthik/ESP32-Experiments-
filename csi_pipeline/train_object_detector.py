@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -40,14 +41,38 @@ from csi_features import (
 )
 
 
-def load_packets(csv_path: Path) -> tuple[list[PacketRecord], list[int], list[str]]:
+MIN_LABEL_FRACTION = 0.9
+
+
+def derive_session_keys(session_labels: list[str]) -> list[str]:
+    """Assign a unique key per contiguous label run (when CSV has no session_id)."""
+    keys: list[str] = []
+    run = -1
+    prev_label: str | None = None
+    for label in session_labels:
+        if label != prev_label:
+            run += 1
+            prev_label = label
+        keys.append(f"{label}#{run}")
+    return keys
+
+
+def load_packets(
+    csv_path: Path,
+) -> tuple[list[PacketRecord], list[int], list[str], list[str]]:
     packets: list[PacketRecord] = []
     y: list[int] = []
-    sessions: list[str] = []
+    session_labels: list[str] = []
+    session_keys: list[str] = []
 
     with csv_path.open(newline="") as f:
-        for row in csv.DictReader(f):
-            lab = row["label"].strip().lower()
+        reader = csv.DictReader(f)
+        has_session_id = reader.fieldnames is not None and "session_id" in reader.fieldnames
+        run = -1
+        prev_label: str | None = None
+        for row in reader:
+            lab_raw = row["label"].strip()
+            lab = lab_raw.lower()
             if "object" in lab:
                 y.append(LABEL_OBJECT)
             elif "baseline" in lab or "empty" in lab:
@@ -67,11 +92,77 @@ def load_packets(csv_path: Path) -> tuple[list[PacketRecord], list[int], list[st
             except ValueError as exc:
                 print(f"skip bad iq row: {exc}", file=sys.stderr)
                 continue
-            sessions.append(row["label"])
+            session_labels.append(lab_raw)
+            if has_session_id and row.get("session_id", "").strip():
+                session_keys.append(row["session_id"].strip())
+            else:
+                if lab_raw != prev_label:
+                    run += 1
+                    prev_label = lab_raw
+                session_keys.append(f"{lab_raw}#{run}")
 
     if not packets:
         sys.exit(f"No rows loaded from {csv_path}")
-    return packets, y, sessions
+    return packets, y, session_labels, session_keys
+
+
+def _contiguous_runs(keys: list[str]) -> list[tuple[int, int]]:
+    if not keys:
+        return []
+    runs: list[tuple[int, int]] = []
+    start = 0
+    for i in range(1, len(keys)):
+        if keys[i] != keys[i - 1]:
+            runs.append((start, i))
+            start = i
+    runs.append((start, len(keys)))
+    return runs
+
+
+def _window_label(window_labs: list[int], *, min_fraction: float) -> int | None:
+    n = len(window_labs)
+    empty_frac = window_labs.count(LABEL_EMPTY) / n
+    if empty_frac >= min_fraction:
+        return LABEL_EMPTY
+    if empty_frac <= 1.0 - min_fraction:
+        return LABEL_OBJECT
+    return None
+
+
+def _windows_for_segment(
+    packets: list[PacketRecord],
+    labels: list[int],
+    session_labels: list[str],
+    session_keys: list[str],
+    spec: WindowSpec,
+    baseline_profile: np.ndarray,
+    baseline_phase: np.ndarray,
+    *,
+    min_label_fraction: float,
+) -> tuple[list[np.ndarray], list[int], list[str]]:
+    X: list[np.ndarray] = []
+    y: list[int] = []
+    meta: list[str] = []
+
+    if len(packets) < spec.size:
+        return X, y, meta
+
+    for start in range(0, len(packets) - spec.size + 1, spec.stride):
+        chunk = packets[start : start + spec.size]
+        window_labs = labels[start : start + spec.size]
+        label = _window_label(window_labs, min_fraction=min_label_fraction)
+        if label is None:
+            continue
+        feat = window_to_features(
+            chunk,
+            baseline_profile=baseline_profile,
+            baseline_phase=baseline_phase,
+        )
+        X.append(feat)
+        y.append(label)
+        meta.append(session_keys[start])
+
+    return X, y, meta
 
 
 def build_windows(
@@ -81,7 +172,11 @@ def build_windows(
     spec: WindowSpec,
     baseline_profile: np.ndarray,
     baseline_phase: np.ndarray,
+    *,
+    session_keys: list[str] | None = None,
+    min_label_fraction: float = MIN_LABEL_FRACTION,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    keys = session_keys if session_keys is not None else derive_session_keys(session_labels)
     X: list[np.ndarray] = []
     y: list[int] = []
     meta: list[str] = []
@@ -90,19 +185,23 @@ def build_windows(
     if len(packets) < spec.size:
         return np.empty((0, fdim)), np.empty(0, dtype=np.int32), []
 
-    for start in range(0, len(packets) - spec.size + 1, spec.stride):
-        chunk = packets[start : start + spec.size]
-        feat = window_to_features(
-            chunk,
-            baseline_profile=baseline_profile,
-            baseline_phase=baseline_phase,
+    for start, end in _contiguous_runs(keys):
+        seg_x, seg_y, seg_meta = _windows_for_segment(
+            packets[start:end],
+            labels[start:end],
+            session_labels[start:end],
+            keys[start:end],
+            spec,
+            baseline_profile,
+            baseline_phase,
+            min_label_fraction=min_label_fraction,
         )
-        window_labs = labels[start : start + spec.size]
-        label = int(round(sum(window_labs) / len(window_labs)))
-        X.append(feat)
-        y.append(label)
-        meta.append(session_labels[start])
+        X.extend(seg_x)
+        y.extend(seg_y)
+        meta.extend(seg_meta)
 
+    if not X:
+        return np.empty((0, fdim)), np.empty(0, dtype=np.int32), []
     return np.asarray(X, dtype=np.float64), np.asarray(y, dtype=np.int32), meta
 
 
@@ -217,6 +316,8 @@ def save_bundle(
     model_type: str,
     csv_path: Path,
     metrics: dict[str, float],
+    session_keys: list[str] | None = None,
+    packet_count: int = 0,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
@@ -234,6 +335,9 @@ def save_bundle(
             "model_type": model_type,
             "metrics": metrics,
             "csv": str(csv_path),
+            "sessions": sorted(set(session_keys or [])),
+            "packet_count": packet_count,
+            "trained_at": datetime.now(timezone.utc).isoformat(),
         },
         path,
     )
@@ -262,15 +366,24 @@ def main() -> None:
         sys.exit(f"CSV not found: {args.csv}")
 
     print(f"Loading {args.csv} …")
-    packets, labels, sessions = load_packets(args.csv)
+    packets, labels, session_labels, session_keys = load_packets(args.csv)
     print(f"  packets: {len(packets)}  empty={labels.count(LABEL_EMPTY)}  object={labels.count(LABEL_OBJECT)}")
+    print(f"  sessions: {len(set(session_keys))}  ({', '.join(sorted(set(session_labels)))})")
 
     baseline_profile = compute_baseline_profile(packets, labels)
     baseline_phase = compute_baseline_phase_profile(packets, labels)
     print(f"  baseline profiles: {baseline_profile.shape[0]} active subcarriers")
 
     spec = WindowSpec(size=args.window, stride=args.stride)
-    X, y, meta = build_windows(packets, labels, sessions, spec, baseline_profile, baseline_phase)
+    X, y, meta = build_windows(
+        packets,
+        labels,
+        session_labels,
+        spec,
+        baseline_profile,
+        baseline_phase,
+        session_keys=session_keys,
+    )
     print(f"  windows: {len(y)}  features={X.shape[1]}  (v{FEATURE_VERSION})")
 
     X_train, X_test, y_train, y_test = blocked_split(
@@ -311,6 +424,18 @@ def main() -> None:
         print(f"\nDeploy: retraining {model_name} on all {len(y)} windows …")
         pipe = build_pipeline(model_name)
         pipe.fit(X, y)
+        proba_test = pipe.predict_proba(X_test)[:, LABEL_OBJECT]
+        threshold, min_rec = tune_threshold(y_test, proba_test)
+        pred_test = (proba_test >= threshold).astype(np.int32)
+        metrics = {
+            "accuracy": float(accuracy_score(y_test, pred_test)),
+            "balanced_accuracy": float(balanced_accuracy_score(y_test, pred_test)),
+            "object_f1": float(f1_score(y_test, pred_test, pos_label=LABEL_OBJECT, zero_division=0)),
+            "empty_f1": float(f1_score(y_test, pred_test, pos_label=LABEL_EMPTY, zero_division=0)),
+        }
+        if len(np.unique(y_test)) > 1:
+            metrics["roc_auc"] = float(roc_auc_score(y_test, proba_test))
+        print(f"  deploy threshold (hold-out, full model): {threshold:.2f}  min_recall={min_rec:.3f}")
     else:
         pipe = eval_pipe
 
@@ -324,6 +449,8 @@ def main() -> None:
         model_type=model_name,
         csv_path=args.csv,
         metrics=metrics,
+        session_keys=session_keys,
+        packet_count=len(packets),
     )
     print(f"\nSaved → {args.out}")
     print("Live:  cd csi_pipeline && ./run_detect.sh")

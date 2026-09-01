@@ -15,7 +15,7 @@ from pathlib import Path
 import joblib
 import serial
 
-from csi_features import LABEL_OBJECT, iq_list_to_packet, window_to_features
+from csi_features import FEATURE_VERSION, LABEL_OBJECT, iq_list_to_packet, window_to_features
 from csi_parse import DEFAULT_BAUD, parse_csi_line
 
 
@@ -179,6 +179,12 @@ def main() -> None:
         sys.exit(f"Model not found: {args.model}\nTrain first: ./run_detect.sh --train")
 
     bundle = joblib.load(args.model)
+    model_version = bundle.get("feature_version")
+    if model_version is not None and model_version != FEATURE_VERSION:
+        sys.exit(
+            f"Model feature v{model_version} != code v{FEATURE_VERSION}.\n"
+            f"Retrain: cd csi_pipeline && ./run_detect.sh --train"
+        )
     detector = LiveDetector(bundle, threshold=args.threshold, fast=args.fast)
     last_state: str | None = None
 

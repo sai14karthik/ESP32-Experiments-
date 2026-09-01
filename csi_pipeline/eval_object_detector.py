@@ -25,6 +25,13 @@ def main() -> None:
           f"threshold={bundle.get('threshold', 0.5):.2f}")
     print(f"features={bundle.get('window_size')}pkt window  stride={bundle.get('stride')}")
     print(f"trained from: {bundle.get('csv', '?')}")
+    sessions = bundle.get("sessions")
+    if sessions:
+        print(f"sessions: {', '.join(sessions)}")
+    if bundle.get("packet_count"):
+        print(f"packets: {bundle['packet_count']}")
+    if bundle.get("trained_at"):
+        print(f"trained_at: {bundle['trained_at']}")
     print()
     for k, v in metrics.items():
         print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
