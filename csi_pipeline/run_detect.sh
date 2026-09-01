@@ -4,6 +4,7 @@
 #   ./run_detect.sh                          # live serial (probes CSI first)
 #   ./run_detect.sh --train                  # train from default sample CSV
 #   ./run_detect.sh --train-from-db          # export Postgres → train
+#   ./run_detect.sh --train-from-db --include baseline_desk,object_desk
 #   ./run_detect.sh --eval-csv               # print saved hold-out metrics
 #   ./run_detect.sh --quiet                  # live: print only on EMPTY ↔ OBJECT
 #   ./run_detect.sh --fast                   # low-latency: stride=1, no EMA (~0.2s updates)
@@ -48,8 +49,22 @@ fi
 if [[ "${1:-}" == "--train-from-db" ]]; then
   shift
   EXPORT="$ROOT/exports/training_packets.csv"
-  uv_csi "$ROOT/export_training_csv.py" --out "$EXPORT"
-  uv_csi "$ROOT/train_object_detector.py" --deploy --csv "$EXPORT" "$@"
+  EXPORT_ARGS=()
+  TRAIN_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --include|--include=*|--exclude|--exclude=*)
+        EXPORT_ARGS+=("$1")
+        shift
+        ;;
+      *)
+        TRAIN_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
+  uv_csi "$ROOT/export_training_csv.py" --out "$EXPORT" "${EXPORT_ARGS[@]}"
+  uv_csi "$ROOT/train_object_detector.py" --deploy --csv "$EXPORT" "${TRAIN_ARGS[@]}"
   exit 0
 fi
 

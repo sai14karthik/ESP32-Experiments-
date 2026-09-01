@@ -41,11 +41,19 @@ def main() -> int:
         fail(f"sample csv missing: {csv_path}")
         return 1
 
-    packets, labels, sessions = load_packets(csv_path)
+    packets, labels, session_labels, session_keys = load_packets(csv_path)
     baseline = compute_baseline_profile(packets, labels)
     baseline_phase = compute_baseline_phase_profile(packets, labels)
     spec = WindowSpec(30, 15)
-    X, y, meta = build_windows(packets, labels, sessions, spec, baseline, baseline_phase)
+    X, y, meta = build_windows(
+        packets,
+        labels,
+        session_labels,
+        spec,
+        baseline,
+        baseline_phase,
+        session_keys=session_keys,
+    )
     if X.shape[1] != feature_dim(baseline, window_size=30):
         fail(f"feature dim mismatch: {X.shape[1]}")
     else:
@@ -79,15 +87,19 @@ def main() -> int:
             start = i - 29
             if start % 15 != 0:
                 continue
-            wi = start // 15
             from csi_features import window_to_features
 
-            feat = window_to_features(
+            feat_buf = window_to_features(
+                list(det.buf),
+                baseline_profile=baseline,
+                baseline_phase=baseline_phase,
+            )
+            feat_slice = window_to_features(
                 packets[start : i + 1],
                 baseline_profile=baseline,
                 baseline_phase=baseline_phase,
             )
-            max_diff = max(max_diff, float(np.max(np.abs(X[wi] - feat))))
+            max_diff = max(max_diff, float(np.max(np.abs(feat_buf - feat_slice))))
 
     if max_diff > 1e-9:
         fail(f"train/live parity max_diff={max_diff}")
