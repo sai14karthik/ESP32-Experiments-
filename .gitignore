@@ -31,3 +31,9 @@ sdkconfig.old
 
 csi_pipeline/.venv/
 csi_pipeline/.venv-ml/
+
+# Generated training export exceeds GitHub's 100 MB file limit
+csi_pipeline_new/exports/training_packets.csv
+
+# CatBoost temp files
+csi_pipeline_new/catboost_info/tmp/

@@ -45,7 +45,11 @@ WHERE {BASE_WHERE}
 EXPORT_ORDER_BY = "\nORDER BY s.started_at, c.host_ts\n"
 
 
-def build_export_query(include: list[str], exclude: list[str]) -> tuple[str, list[str]]:
+def build_export_query(
+    include: list[str],
+    exclude: list[str],
+    session_ids: list[str],
+) -> tuple[str, list[str]]:
     params: list[str] = []
     clauses = ""
     if include:
@@ -54,6 +58,9 @@ def build_export_query(include: list[str], exclude: list[str]) -> tuple[str, lis
     for p in exclude:
         clauses += " AND lower(s.label) NOT LIKE %s"
         params.append(f"%{p}%")
+    if session_ids:
+        clauses += " AND s.id::text = ANY(%s)"
+        params.append(session_ids)
     # psycopg scans for placeholders only when params are passed. In that mode
     # the LIKE literals baked into BASE_WHERE ('%baseline%') are read as
     # placeholder syntax and rejected, so they have to be escaped first — but
@@ -105,9 +112,14 @@ def main() -> None:
         "--exclude",
         help="Comma-separated label substrings to skip (e.g. baseline_1hr,object_1hr)",
     )
+    p.add_argument(
+        "--session-id",
+        help="Comma-separated session UUIDs to export (e.g. from csi_sessions.id)",
+    )
     args = p.parse_args()
     include = _parse_patterns(args.include)
     exclude = _parse_patterns(args.exclude)
+    session_ids = [s.strip() for s in (args.session_id or "").split(",") if s.strip()]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -156,8 +168,10 @@ def main() -> None:
             print(f"  (include filter: {include})")
         if exclude:
             print(f"  (exclude filter: {exclude})")
+        if session_ids:
+            print(f"  (session-id filter: {session_ids})")
 
-        sql, params = build_export_query(include, exclude)
+        sql, params = build_export_query(include, exclude, session_ids)
         cur.execute(sql, params)
         rows = cur.fetchall()
 
