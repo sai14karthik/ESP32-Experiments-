@@ -9,6 +9,9 @@ __pycache__/
 
 # Local secrets / machine paths (never commit)
 .env
+auto.crt
+auto.key
+*.key
 **/secrets.h
 **/sdkconfig.defaults.local
 **/sdkconfig.peer
