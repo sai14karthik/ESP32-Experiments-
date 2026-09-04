@@ -40,3 +40,8 @@ csi_pipeline_new/catboost_info/tmp/
 
 # Local Cursor rules (machine / session notes)
 .cursor/rules/csi-detection-parked.mdc
+
+# Local reference materials (do not publish)
+/materials/
+/heartrate estimation/
+/Hands-on Wireless Sensing/
