@@ -37,3 +37,6 @@ csi_pipeline_new/exports/training_packets.csv
 
 # CatBoost temp files
 csi_pipeline_new/catboost_info/tmp/
+
+# Local Cursor rules (machine / session notes)
+.cursor/rules/csi-detection-parked.mdc
