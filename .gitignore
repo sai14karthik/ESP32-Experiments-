@@ -1,47 +1,78 @@
+# OS / editor
 .DS_Store
-ngrok.log
-network_commands.txt
+Thumbs.db
+.AppleDouble
+.idea/
+.cache/
+
+# Python
 .venv/
+**/.venv/
+**/.venv-ml/
 __pycache__/
-__pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
 
 # Local secrets / machine paths (never commit)
 .env
+*.key
+*.pem
+*.crt
+*.p12
+*.der
 auto.crt
 auto.key
-*.key
 **/secrets.h
 **/sdkconfig.defaults.local
 **/sdkconfig.peer
 **/sdkconfig.sense
-**/build_peer/
-**/build_sense/
 eim_config.toml
+network_commands.txt
 
-# ESP-IDF / Arduino build trees (absolute paths, not portable)
+# ESP-IDF / Arduino / PIO build trees (absolute paths, not portable)
 **/build/
 **/build-*/
+**/.pio/
+**/managed_components/
 sdkconfig
 sdkconfig.old
 **/sdkconfig
 **/sdkconfig.old
+compile_commands.json
+.clangd/
 
-# Logs / caches
+# Firmware binaries produced by local compiles (keep source + partitions.csv)
+*.elf
+*.map
+*.o
+*.d
+*.a
+*.exe
+*_flashed.bin
+*.ino.merged.bin
+*.ino.bin
+firmware/*.bin
+
+# Logs
 *.log
-.cache/
 
-csi_pipeline/.venv/
-csi_pipeline/.venv-ml/
+# Archives (local copies / vendor dumps)
+*.zip
 
-# Generated training export exceeds GitHub's 100 MB file limit
-csi_pipeline_new/exports/training_packets.csv
+# CatBoost / training run artifacts
+**/catboost_info/
 
-# CatBoost temp files
-csi_pipeline_new/catboost_info/tmp/
+# Generated CSI exports (too large for GitHub; keep fixtures/)
+csi_pipeline_new/exports/*.csv
+csi_pipeline/exports/*.csv
 
-# Local Cursor rules (machine / session notes)
+# Local Cursor session notes
 .cursor/rules/csi-detection-parked.mdc
 
 # Local reference materials (do not publish)

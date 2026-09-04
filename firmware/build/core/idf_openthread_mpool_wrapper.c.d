@@ -1,4 +1,0 @@
-/Users/saikarthik/Desktop/camera_module/firmware/build/core/idf_openthread_mpool_wrapper.c.o: \
- /Users/saikarthik/Library/Arduino15/packages/esp32/hardware/esp32/3.3.11/cores/esp32/idf_openthread_mpool_wrapper.c \
- /Users/saikarthik/Library/Arduino15/packages/esp32/tools/esp32s3-libs/3.3.11/include/soc/esp32s3/include/soc/soc_caps.h \
- /Users/saikarthik/Library/Arduino15/packages/esp32/tools/esp32s3-libs/3.3.11/qio_opi/include/sdkconfig.h
