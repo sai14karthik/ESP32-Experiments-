@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MediaMTX lab viewer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; background: #111; color: #eee; }
+    a { color: #7ec8ff; }
+    .row { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    .card { flex: 1 1 320px; background: #1a1a1a; padding: 1rem; border-radius: 8px; }
+    iframe { width: 100%; height: 360px; border: 0; background: #000; border-radius: 6px; }
+    code { background: #222; padding: 0.15rem 0.4rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>MediaMTX lab</h1>
+  <p>Embedded players (MediaMTX built-in pages). Also open in VLC: <code>rtsp://127.0.0.1:8554/cam1</code></p>
+  <div class="row">
+    <div class="card">
+      <h2>cam1 (webcam) — HLS</h2>
+      <p><a href="http://127.0.0.1:8888/cam1/" target="_blank">Open HLS</a> ·
+         <a href="http://127.0.0.1:8889/cam1/" target="_blank">Open WebRTC</a></p>
+      <iframe src="http://127.0.0.1:8888/cam1/" title="cam1 HLS"></iframe>
+    </div>
+    <div class="card">
+      <h2>cam_xiao — HLS</h2>
+      <p><a href="http://127.0.0.1:8888/cam_xiao/" target="_blank">Open HLS</a> ·
+         <a href="http://127.0.0.1:8889/cam_xiao/" target="_blank">Open WebRTC</a></p>
+      <iframe src="http://127.0.0.1:8888/cam_xiao/" title="cam_xiao HLS"></iframe>
+    </div>
+  </div>
+</body>
+</html>

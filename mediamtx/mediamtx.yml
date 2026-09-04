@@ -1,0 +1,44 @@
+###############################################
+# Local MediaMTX lab config (this Mac only)
+# Paths: cam1 = Mac webcam, cam_xiao = XIAO MJPEG bridge
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+
+###############################################
+# Protocols
+###############################################
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp, udp]
+# Avoid clash with anything already bound on :8000
+rtpAddress: :8002
+rtcpAddress: :8003
+
+rtmp: yes
+rtmpAddress: :1935
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ["*"]
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ["*"]
+# Local lab — no STUN required for 127.0.0.1
+webrtcICEServers2: []
+
+###############################################
+# Paths (publisher = FFmpeg / client pushes in)
+###############################################
+
+paths:
+  cam1:
+    source: publisher
+
+  cam_xiao:
+    source: publisher
