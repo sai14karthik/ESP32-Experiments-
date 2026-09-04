@@ -207,12 +207,19 @@ class PresenceWindow(QMainWindow):
         self.plot = pg.PlotWidget()
         self.plot.setLabel("left", "P(object)")
         self.plot.setLabel("bottom", "seconds")
-        self.plot.setYRange(0.0, 1.0)
+        # Lock Y to probability space. Auto-range on a flat P≈1.0 series drifts
+        # into nonsense ranges (e.g. -1.6..-0.6) and hides the curve off-screen.
+        self.plot.setYRange(0.0, 1.0, padding=0.0)
+        self.plot.enableAutoRange(axis="y", enable=False)
+        self.plot.getViewBox().setLimits(yMin=-0.02, yMax=1.02)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.curve = self.plot.plot(pen=pg.mkPen("#5ec8ff", width=2))
         thr = float(detector.threshold)
+        self._thr_line = None
         if 0.0 <= thr <= 1.0:
-            self.plot.addLine(y=thr, pen=pg.mkPen("#f0c14a", width=1, style=Qt.DashLine))
+            self._thr_line = self.plot.addLine(
+                y=thr, pen=pg.mkPen("#f0c14a", width=2, style=Qt.DashLine)
+            )
         layout.addWidget(self.plot, stretch=1)
 
         cal_txt = "calibrated" if calibrated else "NOT calibrated"
@@ -291,8 +298,11 @@ class PresenceWindow(QMainWindow):
         self.bar.setValue(int(round(max(0.0, min(1.0, p)) * 1000)))
 
         t = float(payload.get("t", time.monotonic())) - self._t0
+        # Clamp for display — training score_kind is predict_proba, but keep the
+        # curve inside the locked [0, 1] view even if a bad payload arrives.
+        p_plot = float(max(0.0, min(1.0, p)))
         self._history_t.append(t)
-        self._history_p.append(p)
+        self._history_p.append(p_plot)
         while self._history_t and t - self._history_t[0] > HISTORY_SECONDS:
             self._history_t.popleft()
             self._history_p.popleft()
@@ -300,6 +310,10 @@ class PresenceWindow(QMainWindow):
         if self._history_t:
             left = max(0.0, self._history_t[-1] - HISTORY_SECONDS)
             self.plot.setXRange(left, max(left + 10.0, self._history_t[-1]), padding=0.02)
+        # Re-assert after setData — some pyqtgraph builds re-enable Y auto-range.
+        self.plot.setYRange(0.0, 1.0, padding=0.0)
+        if self._thr_line is not None and 0.0 <= thr <= 1.0:
+            self._thr_line.setValue(thr)
 
         if state != self._last_state:
             self._last_state = state
