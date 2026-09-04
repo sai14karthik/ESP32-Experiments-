@@ -1,0 +1,3 @@
+[submodule "mediamtx-repo"]
+	path = mediamtx-repo
+	url = https://github.com/bluenviron/mediamtx.git
