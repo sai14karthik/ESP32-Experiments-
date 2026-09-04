@@ -2,6 +2,8 @@
 # Real-time CSI object detection (uv + csi dependency group).
 #
 #   ./run_detect.sh                          # live serial (probes CSI first)
+#   ./run_detect.sh --gui                    # live PyQt presence window (EMPTY/OBJECT)
+#   ./run_detect.sh --gui --fast             # GUI + low-latency updates
 #   ./run_detect.sh --calibrate              # record the empty room here, set baseline+threshold
 #   ./run_detect.sh --train                  # train from default sample CSV
 #   ./run_detect.sh --train-from-db          # export Postgres → train
@@ -128,11 +130,13 @@ DETECT_ARGS=()
 has_port=0
 has_file=0
 skip_probe=0
+use_gui=0
 for a in "$@"; do
   case "$a" in
     --port|--port=*) has_port=1 ;;
     --from-file|--from-file=*) has_file=1 ;;
     --skip-probe) skip_probe=1 ;;
+    --gui) use_gui=1 ;;
     *) DETECT_ARGS+=("$a") ;;
   esac
 done
@@ -161,12 +165,17 @@ if [[ $has_port -eq 0 && $has_file -eq 0 ]]; then
   fi
 fi
 
+DETECT_SCRIPT="$ROOT/detect_live.py"
+if [[ $use_gui -eq 1 ]]; then
+  DETECT_SCRIPT="$ROOT/detect_gui.py"
+fi
+
 if [[ ${#EXTRA[@]} -gt 0 && ${#DETECT_ARGS[@]} -gt 0 ]]; then
-  uv_csi "$ROOT/detect_live.py" "${EXTRA[@]}" "${DETECT_ARGS[@]}"
+  uv_csi "$DETECT_SCRIPT" "${EXTRA[@]}" "${DETECT_ARGS[@]}"
 elif [[ ${#EXTRA[@]} -gt 0 ]]; then
-  uv_csi "$ROOT/detect_live.py" "${EXTRA[@]}"
+  uv_csi "$DETECT_SCRIPT" "${EXTRA[@]}"
 elif [[ ${#DETECT_ARGS[@]} -gt 0 ]]; then
-  uv_csi "$ROOT/detect_live.py" "${DETECT_ARGS[@]}"
+  uv_csi "$DETECT_SCRIPT" "${DETECT_ARGS[@]}"
 else
-  uv_csi "$ROOT/detect_live.py"
+  uv_csi "$DETECT_SCRIPT"
 fi

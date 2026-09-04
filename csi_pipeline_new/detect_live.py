@@ -320,7 +320,201 @@ def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None
     )
 
 
-def main() -> None:
+def load_bundle_and_calibration(
+    model_path: Path,
+    *,
+    calibration_path: Path | None = None,
+    no_calibration: bool = False,
+    require_explicit_calibration: bool = False,
+) -> tuple[dict, dict | None, Path | None]:
+    """Load the detector bundle and optional site calibration.
+
+    Returns ``(bundle, calibration_or_None, cal_path_used_or_None)``.
+    """
+    if not model_path.is_file():
+        sys.exit(f"Model not found: {model_path}\nTrain first: ./run_detect.sh --train")
+
+    bundle = joblib.load(model_path)
+    model_version = bundle.get("feature_version")
+    if model_version is not None and model_version != FEATURE_VERSION:
+        sys.exit(
+            f"Model feature v{model_version} != code v{FEATURE_VERSION}.\n"
+            f"Retrain: cd csi_pipeline_new && ./run_detect.sh --train"
+        )
+
+    calibration = None
+    cal_path = calibration_path or (model_path.parent / "site_calibration.joblib")
+    if not no_calibration and cal_path.is_file():
+        loaded = joblib.load(cal_path)
+        why = check_calibration(loaded, bundle)
+        if why:
+            # An explicitly requested calibration that cannot be honoured is an
+            # error; a stale one found by autodiscovery is only a warning, since
+            # the operator did not ask for it.
+            msg = f"calibration {cal_path.name} unusable: {why}"
+            if require_explicit_calibration or calibration_path is not None:
+                sys.exit(f"{msg}\nRecalibrate: ./run_detect.sh --calibrate")
+            print(f"WARNING: ignoring {msg}", file=sys.stderr)
+            print("         Recalibrate: ./run_detect.sh --calibrate", file=sys.stderr)
+            cal_path = None
+        else:
+            calibration = loaded
+    elif calibration_path is not None:
+        sys.exit(f"Calibration not found: {cal_path}")
+    else:
+        cal_path = None
+
+    return bundle, calibration, cal_path
+
+
+def print_startup_banner(
+    bundle: dict,
+    detector: LiveDetector,
+    *,
+    calibration: dict | None,
+    cal_path: Path | None,
+    fast: bool,
+    stop_hint: str = "Ctrl+C to stop. Do not run idf.py monitor on the same port.",
+) -> None:
+    metrics = bundle.get("metrics", {})
+    mode = "fast" if fast else "normal"
+    print(
+        f"model={bundle.get('model_type', '?')}  v{bundle.get('feature_version', 1)}  "
+        f"mode={mode}  window={detector.window_size}  "
+        f"live_stride={detector.live_stride}  threshold={detector.threshold:+.3f}"
+        f" ({detector.score_kind})",
+        file=sys.stderr,
+    )
+    print(f"features: {detector.config.describe()}", file=sys.stderr)
+    if calibration is not None and cal_path is not None:
+        print(
+            f"calibrated: {cal_path.name}  {calibration['n_windows']} empty windows"
+            f" @ {calibration['fpr']:.0%} FPR  ({calibration.get('source', '?')},"
+            f" {calibration['calibrated_at'][:19]})",
+            file=sys.stderr,
+        )
+        if calibration.get("fast", False) != fast:
+            print(
+                "WARNING: calibrated for "
+                f"{'--fast' if calibration.get('fast') else 'normal'} mode but running "
+                f"{'--fast' if fast else 'normal'}. The EMA differs, so the\n"
+                "         false-positive rate will not be the one you asked for.",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            "NOT calibrated: using the training site's baseline and threshold.\n"
+            "         Measured transfer to an uncalibrated new setup is ~0.55 balanced\n"
+            "         accuracy (chance). Run ./run_detect.sh --calibrate first.",
+            file=sys.stderr,
+        )
+    if fast:
+        print(
+            "fast: predict every packet after buffer fills (~2s warmup, then per-packet updates).",
+            file=sys.stderr,
+        )
+    if metrics:
+        print(
+            f"trained metrics: bal_acc={metrics.get('balanced_accuracy', 0):.3f}  "
+            f"acc={metrics.get('accuracy', 0):.3f}",
+            file=sys.stderr,
+        )
+    if bundle.get("evaluation_trustworthy") is False:
+        print(
+            f"WARNING: those metrics are confounded — {bundle.get('evaluation_note', '')}\n"
+            "         Treat live output as unvalidated until sessions are interleaved.",
+            file=sys.stderr,
+        )
+    print(stop_hint, file=sys.stderr)
+
+
+def packet_meta_from_sample(sample: dict) -> dict:
+    return {
+        "seq": sample.get("seq"),
+        "rssi": sample.get("rssi"),
+        "agc_gain": sample.get("agc_gain"),
+        "fft_gain": sample.get("fft_gain"),
+    }
+
+
+def iter_csi_from_file(path: Path, *, delay_s: float = 0.05):
+    """Yield ``(iq, meta)`` from a raw CSI_DATA log."""
+    with path.open() as f:
+        for line in f:
+            sample = parse_csi_line(line.rstrip("\n"))
+            if not sample or not sample.get("iq"):
+                continue
+            yield sample["iq"], packet_meta_from_sample(sample)
+            if delay_s > 0:
+                time.sleep(delay_s)
+
+
+def iter_csi_from_serial(
+    port: str,
+    baud: int = DEFAULT_BAUD,
+    *,
+    should_stop=None,
+    on_status=None,
+):
+    """Yield ``(iq, meta)`` from a live serial port until stopped.
+
+    ``should_stop`` is an optional zero-arg callable; when it returns true the
+    generator exits. ``on_status`` receives short human-readable status strings
+    (waiting / first packet / errors).
+    """
+    last_csi_at = time.monotonic()
+    last_warn_at = 0.0
+    csi_count = 0
+    line_count = 0
+
+    with serial.Serial(port, baud, timeout=1.0) as ser:
+        ser.dtr = False
+        ser.rts = False
+        ser.reset_input_buffer()
+        buf = ""
+        while True:
+            if should_stop is not None and should_stop():
+                return
+            chunk = ser.read(ser.in_waiting or 1)
+            if not chunk:
+                now = time.monotonic()
+                if now - last_csi_at > 5.0 and now - last_warn_at > 5.0:
+                    last_warn_at = now
+                    msg = (
+                        f"waiting for CSI_DATA… ({csi_count} packets so far, "
+                        f"{line_count} serial lines; is csi_send powered?)"
+                    )
+                    if on_status is not None:
+                        on_status(msg)
+                    else:
+                        print(msg, file=sys.stderr)
+                continue
+            buf += chunk.decode("utf-8", errors="replace")
+            while "\n" in buf:
+                if should_stop is not None and should_stop():
+                    return
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                line_count += 1
+                sample = parse_csi_line(line)
+                if sample and sample.get("iq"):
+                    csi_count += 1
+                    if csi_count == 1:
+                        msg = (
+                            f"CSI stream OK (seq={sample.get('seq')} "
+                            f"rssi={sample.get('rssi')})"
+                        )
+                        if on_status is not None:
+                            on_status(msg)
+                        else:
+                            print(msg, file=sys.stderr)
+                    last_csi_at = time.monotonic()
+                    yield sample["iq"], packet_meta_from_sample(sample)
+
+
+def build_live_arg_parser(*, include_terminal_flags: bool = True) -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parent
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -342,100 +536,51 @@ def main() -> None:
         action="store_true",
         help="Ignore any site calibration and use the baked-in training baseline",
     )
-    p.add_argument("--json", action="store_true", help="One JSON object per prediction")
-    p.add_argument("--quiet", action="store_true", help="Only print on state change")
     p.add_argument(
         "--fast",
         action="store_true",
         help="Low-latency live mode: predict every packet (stride=1), no EMA, lower hysteresis",
     )
-    p.add_argument("--eval", action="store_true", help="Replay CSV and print accuracy summary")
+    p.add_argument(
+        "--gui",
+        action="store_true",
+        help="Open the PyQt presence window instead of printing to the terminal",
+    )
+    if include_terminal_flags:
+        p.add_argument("--json", action="store_true", help="One JSON object per prediction")
+        p.add_argument("--quiet", action="store_true", help="Only print on state change")
+        p.add_argument("--eval", action="store_true", help="Replay CSV and print accuracy summary")
+    return p
+
+
+def main() -> None:
+    # Allow ``detect_live.py --gui …`` without importing Qt until requested.
+    if "--gui" in sys.argv[1:]:
+        from detect_gui import main as gui_main
+
+        gui_main()
+        return
+
+    p = build_live_arg_parser()
     args = p.parse_args()
 
-    if not args.model.is_file():
-        sys.exit(f"Model not found: {args.model}\nTrain first: ./run_detect.sh --train")
-
-    bundle = joblib.load(args.model)
-    model_version = bundle.get("feature_version")
-    if model_version is not None and model_version != FEATURE_VERSION:
-        sys.exit(
-            f"Model feature v{model_version} != code v{FEATURE_VERSION}.\n"
-            f"Retrain: cd csi_pipeline && ./run_detect.sh --train"
-        )
-    calibration = None
-    cal_path = args.calibration or (args.model.parent / "site_calibration.joblib")
-    if not args.no_calibration and cal_path.is_file():
-        loaded = joblib.load(cal_path)
-        why = check_calibration(loaded, bundle)
-        if why:
-            # An explicitly requested calibration that cannot be honoured is an
-            # error; a stale one found by autodiscovery is only a warning, since
-            # the operator did not ask for it.
-            msg = f"calibration {cal_path.name} unusable: {why}"
-            if args.calibration:
-                sys.exit(f"{msg}\nRecalibrate: ./run_detect.sh --calibrate")
-            print(f"WARNING: ignoring {msg}", file=sys.stderr)
-            print("         Recalibrate: ./run_detect.sh --calibrate", file=sys.stderr)
-        else:
-            calibration = loaded
-    elif args.calibration:
-        sys.exit(f"Calibration not found: {cal_path}")
-
+    bundle, calibration, cal_path = load_bundle_and_calibration(
+        args.model,
+        calibration_path=args.calibration,
+        no_calibration=args.no_calibration,
+    )
     detector = LiveDetector(
         bundle, threshold=args.threshold, fast=args.fast, calibration=calibration
     )
-    last_state: str | None = None
-    metrics = bundle.get("metrics", {})
-    mode = "fast" if args.fast else "normal"
-    print(
-        f"model={bundle.get('model_type', '?')}  v{bundle.get('feature_version', 1)}  "
-        f"mode={mode}  window={detector.window_size}  "
-        f"live_stride={detector.live_stride}  threshold={detector.threshold:+.3f}"
-        f" ({detector.score_kind})",
-        file=sys.stderr,
+    print_startup_banner(
+        bundle,
+        detector,
+        calibration=calibration,
+        cal_path=cal_path,
+        fast=args.fast,
     )
-    print(f"features: {detector.config.describe()}", file=sys.stderr)
-    if calibration is not None:
-        print(
-            f"calibrated: {cal_path.name}  {calibration['n_windows']} empty windows"
-            f" @ {calibration['fpr']:.0%} FPR  ({calibration.get('source', '?')},"
-            f" {calibration['calibrated_at'][:19]})",
-            file=sys.stderr,
-        )
-        if calibration.get("fast", False) != args.fast:
-            print(
-                "WARNING: calibrated for "
-                f"{'--fast' if calibration.get('fast') else 'normal'} mode but running "
-                f"{'--fast' if args.fast else 'normal'}. The EMA differs, so the\n"
-                "         false-positive rate will not be the one you asked for.",
-                file=sys.stderr,
-            )
-    else:
-        print(
-            "NOT calibrated: using the training site's baseline and threshold.\n"
-            "         Measured transfer to an uncalibrated new setup is ~0.55 balanced\n"
-            "         accuracy (chance). Run ./run_detect.sh --calibrate first.",
-            file=sys.stderr,
-        )
-    if args.fast:
-        print(
-            "fast: predict every packet after buffer fills (~2s warmup, then per-packet updates).",
-            file=sys.stderr,
-        )
-    if metrics:
-        print(
-            f"trained metrics: bal_acc={metrics.get('balanced_accuracy', 0):.3f}  "
-            f"acc={metrics.get('accuracy', 0):.3f}",
-            file=sys.stderr,
-        )
-    if bundle.get("evaluation_trustworthy") is False:
-        print(
-            f"WARNING: those metrics are confounded — {bundle.get('evaluation_note', '')}\n"
-            "         Treat live output as unvalidated until sessions are interleaved.",
-            file=sys.stderr,
-        )
-    print("Ctrl+C to stop. Do not run idf.py monitor on the same port.", file=sys.stderr)
 
+    last_state: str | None = None
     eval_true: list[str] = []
     eval_pred: list[str] = []
 
@@ -479,84 +624,16 @@ def main() -> None:
             )
 
     if args.from_file:
-        path = args.from_file
-        with path.open() as f:
-            for line in f:
-                sample = parse_csi_line(line.rstrip("\n"))
-                if not sample or not sample.get("iq"):
-                    continue
-                lab = (sample.get("label") or "").lower()
-                true_label = None
-                if args.eval:
-                    # label not in serial lines — infer from replay context not available
-                    pass
-                handle_packet(
-                    sample["iq"],
-                    {
-                        "seq": sample.get("seq"),
-                        "rssi": sample.get("rssi"),
-                        "agc_gain": sample.get("agc_gain"),
-                        "fft_gain": sample.get("fft_gain"),
-                        "true_label": true_label,
-                    },
-                )
-                if not args.eval:
-                    time.sleep(0.05)
-
+        for iq, meta in iter_csi_from_file(args.from_file, delay_s=0.0 if args.eval else 0.05):
+            handle_packet(iq, meta)
         if args.eval:
             print("Use: ./run_detect.sh --eval-csv for labeled replay accuracy.", file=sys.stderr)
         return
 
     port = args.port or find_port()
     print(f"serial: {port} @ {args.baud}", file=sys.stderr)
-
-    last_csi_at = time.monotonic()
-    last_warn_at = 0.0
-    csi_count = 0
-    line_count = 0
-
-    with serial.Serial(port, args.baud, timeout=1.0) as ser:
-        ser.dtr = False
-        ser.rts = False
-        ser.reset_input_buffer()
-        buf = ""
-        while True:
-            chunk = ser.read(ser.in_waiting or 1)
-            if not chunk:
-                now = time.monotonic()
-                if now - last_csi_at > 5.0 and now - last_warn_at > 5.0:
-                    last_warn_at = now
-                    print(
-                        f"waiting for CSI_DATA… ({csi_count} packets so far, "
-                        f"{line_count} serial lines; is csi_send powered?)",
-                        file=sys.stderr,
-                    )
-                continue
-            buf += chunk.decode("utf-8", errors="replace")
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                line_count += 1
-                sample = parse_csi_line(line)
-                if sample and sample.get("iq"):
-                    csi_count += 1
-                    if csi_count == 1:
-                        print(
-                            f"CSI stream OK (seq={sample.get('seq')} rssi={sample.get('rssi')})",
-                            file=sys.stderr,
-                        )
-                    last_csi_at = time.monotonic()
-                    handle_packet(
-                        sample["iq"],
-                        {
-                            "seq": sample.get("seq"),
-                            "rssi": sample.get("rssi"),
-                            "agc_gain": sample.get("agc_gain"),
-                            "fft_gain": sample.get("fft_gain"),
-                        },
-                    )
+    for iq, meta in iter_csi_from_serial(port, args.baud):
+        handle_packet(iq, meta)
 
 
 if __name__ == "__main__":
