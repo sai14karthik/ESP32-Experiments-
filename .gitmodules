@@ -1,3 +1,9 @@
 [submodule "mediamtx-repo"]
 	path = mediamtx-repo
 	url = https://github.com/sai14karthik/mediamtx-repo
+[submodule "esp32-camera"]
+	path = esp32-camera
+	url = https://github.com/espressif/esp32-camera
+[submodule "esp32cam-ready"]
+	path = esp32cam-ready
+	url = https://github.com/rzeldent/esp32cam-ready
