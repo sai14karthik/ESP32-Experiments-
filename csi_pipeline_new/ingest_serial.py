@@ -223,24 +223,37 @@ def _ingest_stream(
     *,
     batch_size: int,
     flush_s: float,
+    idle_warn_s: float = 15.0,
 ) -> int:
     """Shared flush loop for serial / TCP (yields None on idle)."""
     batch: list[dict[str, Any]] = []
     last_flush = time.monotonic()
+    last_sample = time.monotonic()
+    last_idle_warn = 0.0
     total = 0
     try:
         for line in lines:
             if line is None:
-                if batch and (time.monotonic() - last_flush) >= flush_s:
+                now = time.monotonic()
+                if batch and (now - last_flush) >= flush_s:
                     total += flush_batch(conn, session_id, batch)
                     batch.clear()
-                    last_flush = time.monotonic()
+                    last_flush = now
                     print(f"flushed total={total}", flush=True)
+                if idle_warn_s > 0 and (now - last_sample) >= idle_warn_s:
+                    if (now - last_idle_warn) >= idle_warn_s:
+                        print(
+                            f"warning: no CSI lines for {now - last_sample:.0f}s "
+                            f"(C5 may be stalled; watchdog should recover)",
+                            flush=True,
+                        )
+                        last_idle_warn = now
                 continue
             sample = process_line(line, batch)
             if sample is None:
                 continue
-            now = time.monotonic()
+            last_sample = time.monotonic()
+            now = last_sample
             if len(batch) >= batch_size or (now - last_flush) >= flush_s:
                 total += flush_batch(conn, session_id, batch)
                 batch.clear()
