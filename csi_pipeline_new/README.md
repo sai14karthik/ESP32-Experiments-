@@ -1,6 +1,6 @@
 # CSI Pipeline — Capture to PostgreSQL
 
-ESP32-C5 CSI over USB → parse `CSI_DATA` → store in local PostgreSQL.
+ESP32-C5 CSI over USB **or Wi‑Fi TCP** → parse `CSI_DATA` → store in local PostgreSQL.
 
 **Mac Mini (methods 4.1 / 4.2 / 4.3):** see **[`MAC_MINI.md`](MAC_MINI.md)** — full setup, hardware, ingest commands, export, troubleshooting.
 
@@ -8,6 +8,9 @@ This README is the short reference; [`MAC_MINI.md`](MAC_MINI.md) is the complete
 
 ```
 csi_send  --ESP-NOW ch11-->  csi_recv  --USB 115200-->  run_ingest.sh  -->  Postgres (csi DB)
+
+# Wireless 4.1 (USB only for flash/power):
+csi_recv_router --TCP CSI_DATA-->  run_ingest.sh --listen-tcp  -->  Postgres
 ```
 
 | Table | What it holds |
@@ -46,11 +49,15 @@ cd csi_pipeline
 
 # Or pin the port
 ./run_ingest.sh --port /dev/cu.usbmodem1101 --method 4.3 --channel 11 --label desk_run1
+
+# Wireless (method 4.1): C5 → TCP → Mini; no USB for data
+./run_ingest.sh --listen-tcp 9055 --method 4.1 --label baseline_room_empty
 ```
 
 - **Ctrl+C** stops the run, flushes the last batch, sets `ended_at`.
 - Each run → **one** new `csi_sessions` row; packets land in `csi_samples` under that `session_id`.
 - Use a clear `--label` every time (`sitting`, `walking`, `baseline`, …).
+- TCP sessions store `recv_port` as `tcp:9055`. See **[Wireless ingest](MAC_MINI.md#wireless-ingest-no-usb-for-data)** in `MAC_MINI.md` (LabPSK peer reachability).
 
 **Dry-run (no boards):**
 
@@ -247,7 +254,7 @@ Amplitude / phase are **not** stored; compute offline from `iq` when needed.
 | [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `uv run --group csi`) |
 | [`run_detect.sh`](run_detect.sh) | Train / calibrate / ablate / self-test / live detect launcher |
 | [`probe_recv_port.py`](probe_recv_port.py) | Detect recv USB port |
-| [`ingest_serial.py`](ingest_serial.py) | Serial/file → batch INSERT |
+| [`ingest_serial.py`](ingest_serial.py) | Serial/TCP/file → batch INSERT |
 | [`csi_features.py`](csi_features.py) | v4 feature builder + `FeatureConfig` (shared by train and live) |
 | [`train_object_detector.py`](train_object_detector.py) | Trainer: 3-tier evaluation, leakage baselines, bundle |
 | [`ablate.py`](ablate.py) | Feature ablation + empty-vs-empty negative control |

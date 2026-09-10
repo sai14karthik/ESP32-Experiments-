@@ -1,0 +1,25 @@
+# Wireless CSI forwarder (TCP client → ingest host)
+
+menu "CSI TCP forwarder"
+
+config CSI_TCP_ENABLE
+    bool "Forward CSI_DATA lines over TCP"
+    default n
+    help
+        When enabled, each CSI_DATA line is also sent to CONFIG_CSI_TCP_HOST
+        (Mac Mini / laptop ingest listener). USB serial printing still works.
+
+config CSI_TCP_HOST
+    string "Ingest host IPv4 address"
+    depends on CSI_TCP_ENABLE
+    default "10.128.93.1"
+    help
+        LabPSK IP of the machine running: ./run_ingest.sh --listen-tcp
+
+config CSI_TCP_PORT
+    int "Ingest TCP port"
+    depends on CSI_TCP_ENABLE
+    range 1 65535
+    default 9055
+
+endmenu

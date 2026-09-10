@@ -164,6 +164,48 @@ def iter_lines_file(path: str):
             yield line.strip()
 
 
+def iter_lines_tcp(port: int, bind: str = "0.0.0.0"):
+    """Accept one CSI TCP client at a time; reconnect loop on disconnect."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((bind, port))
+    srv.listen(1)
+    srv.settimeout(1.0)
+    print(f"listening tcp://{bind}:{port} (waiting for ESP32-C5…)", flush=True)
+    try:
+        while True:
+            try:
+                conn, addr = srv.accept()
+            except TimeoutError:
+                yield None
+                continue
+            print(f"client connected {addr[0]}:{addr[1]}", flush=True)
+            conn.settimeout(1.0)
+            buf = b""
+            try:
+                while True:
+                    try:
+                        chunk = conn.recv(65536)
+                    except TimeoutError:
+                        yield None
+                        continue
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while True:
+                        nl = buf.find(b"\n")
+                        if nl < 0:
+                            break
+                        raw = buf[:nl]
+                        buf = buf[nl + 1 :]
+                        yield raw.decode("utf-8", errors="replace").strip()
+            finally:
+                conn.close()
+                print(f"client disconnected {addr[0]}:{addr[1]}", flush=True)
+    finally:
+        srv.close()
+
+
 def process_line(line: str | None, batch: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not line or line.startswith("#") or line.startswith("type,"):
         return None
@@ -174,22 +216,79 @@ def process_line(line: str | None, batch: list[dict[str, Any]]) -> dict[str, Any
     return sample
 
 
+def _ingest_stream(
+    conn: Connection,
+    session_id: UUID,
+    lines,
+    *,
+    batch_size: int,
+    flush_s: float,
+) -> int:
+    """Shared flush loop for serial / TCP (yields None on idle)."""
+    batch: list[dict[str, Any]] = []
+    last_flush = time.monotonic()
+    total = 0
+    try:
+        for line in lines:
+            if line is None:
+                if batch and (time.monotonic() - last_flush) >= flush_s:
+                    total += flush_batch(conn, session_id, batch)
+                    batch.clear()
+                    last_flush = time.monotonic()
+                    print(f"flushed total={total}", flush=True)
+                continue
+            sample = process_line(line, batch)
+            if sample is None:
+                continue
+            now = time.monotonic()
+            if len(batch) >= batch_size or (now - last_flush) >= flush_s:
+                total += flush_batch(conn, session_id, batch)
+                batch.clear()
+                last_flush = now
+                print(
+                    f"inserted total={total} last_seq={sample['seq']}",
+                    flush=True,
+                )
+    except KeyboardInterrupt:
+        print()
+    finally:
+        try:
+            total += flush_batch(conn, session_id, batch)
+        except Exception as exc:  # noqa: BLE001 — best-effort final flush
+            print(f"final flush failed: {exc}", file=sys.stderr)
+    return total
+
+
 def run(args: argparse.Namespace) -> None:
     database_url = args.database_url or os.environ.get(
         "DATABASE_URL", DEFAULT_DATABASE_URL
     )
     baud = args.baud
     from_file = args.from_file
+    listen_tcp = args.listen_tcp
     port = args.port
+
+    if from_file and listen_tcp is not None:
+        sys.exit("Use only one of --from-file / --listen-tcp / --port")
+    if listen_tcp is not None and port:
+        sys.exit("Use only one of --listen-tcp / --port")
+
     if from_file:
         recv_port = f"file:{from_file}"
+        session_baud: int | None = None
+    elif listen_tcp is not None:
+        recv_port = f"tcp:{listen_tcp}"
+        session_baud = None
     else:
         port = port or find_port()
         recv_port = port
+        session_baud = baud
 
     print(f"database {database_url}")
     if from_file:
         print(f"source file {from_file}")
+    elif listen_tcp is not None:
+        print(f"listen tcp 0.0.0.0:{listen_tcp}")
     else:
         print(f"port {port} @ {baud}")
     print(f"method {args.method} label={args.label!r}")
@@ -200,60 +299,57 @@ def run(args: argparse.Namespace) -> None:
             method=args.method,
             label=args.label,
             recv_port=recv_port,
-            baud=baud if not from_file else None,
+            baud=session_baud,
             channel=args.channel,
         )
         print(f"session_id {session_id}")
 
-        batch: list[dict[str, Any]] = []
-        last_flush = time.monotonic()
         total = 0
         ser: serial.Serial | None = None
 
         try:
             if from_file:
                 print("replaying file…")
-                for line in iter_lines_file(from_file):
-                    sample = process_line(line, batch)
-                    if sample is None:
-                        continue
-                    if len(batch) >= args.batch_size:
+                batch: list[dict[str, Any]] = []
+                try:
+                    for line in iter_lines_file(from_file):
+                        sample = process_line(line, batch)
+                        if sample is None:
+                            continue
+                        if len(batch) >= args.batch_size:
+                            total += flush_batch(conn, session_id, batch)
+                            batch.clear()
+                            print(
+                                f"inserted total={total} last_seq={sample['seq']}",
+                                flush=True,
+                            )
+                finally:
+                    try:
                         total += flush_batch(conn, session_id, batch)
-                        batch.clear()
-                        print(
-                            f"inserted total={total} last_seq={sample['seq']}",
-                            flush=True,
-                        )
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"final flush failed: {exc}", file=sys.stderr)
+            elif listen_tcp is not None:
+                print("Ctrl+C to stop")
+                total = _ingest_stream(
+                    conn,
+                    session_id,
+                    iter_lines_tcp(listen_tcp),
+                    batch_size=args.batch_size,
+                    flush_s=args.flush_s,
+                )
             else:
                 print("Ctrl+C to stop")
                 ser = open_serial(port, baud)
-                for line in iter_lines_serial(ser):
-                    if line is None:
-                        if batch and (time.monotonic() - last_flush) >= args.flush_s:
-                            total += flush_batch(conn, session_id, batch)
-                            batch.clear()
-                            last_flush = time.monotonic()
-                            print(f"flushed total={total}", flush=True)
-                        continue
-                    sample = process_line(line, batch)
-                    if sample is None:
-                        continue
-                    now = time.monotonic()
-                    if len(batch) >= args.batch_size or (now - last_flush) >= args.flush_s:
-                        total += flush_batch(conn, session_id, batch)
-                        batch.clear()
-                        last_flush = now
-                        print(
-                            f"inserted total={total} last_seq={sample['seq']}",
-                            flush=True,
-                        )
+                total = _ingest_stream(
+                    conn,
+                    session_id,
+                    iter_lines_serial(ser),
+                    batch_size=args.batch_size,
+                    flush_s=args.flush_s,
+                )
         except KeyboardInterrupt:
             print()
         finally:
-            try:
-                total += flush_batch(conn, session_id, batch)
-            except Exception as exc:  # noqa: BLE001 — best-effort final flush
-                print(f"final flush failed: {exc}", file=sys.stderr)
             end_session(conn, session_id)
             if ser is not None:
                 ser.close()
@@ -267,13 +363,22 @@ def run(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Ingest ESP32 CSI_DATA serial lines into PostgreSQL."
+        description="Ingest ESP32 CSI_DATA lines (USB serial or TCP) into PostgreSQL."
     )
     p.add_argument(
         "--port",
         help="Serial port (default: first /dev/cu.usbmodem* or usbserial*)",
     )
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    p.add_argument(
+        "--listen-tcp",
+        nargs="?",
+        const=9055,
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Listen for CSI_DATA over TCP (default port 9055). Skips USB serial.",
+    )
     p.add_argument(
         "--method",
         default="4.3",

@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -34,6 +35,7 @@
 
 #include "protocol_examples_common.h"
 #include "esp_csi_gain_ctrl.h"
+#include "csi_tcp_forward.h"
 
 #define CONFIG_SEND_FREQUENCY      20
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
@@ -49,7 +51,28 @@
 #define ESP_IF_WIFI_STA ESP_MAC_WIFI_STA
 #endif
 
+/** Max CSI_DATA line length (header + I/Q text). Must match TCP forwarder. */
+#define CSI_LINE_MAX 4096
+
 static const char *TAG = "csi_recv_router";
+
+static int csi_line_append(char *buf, size_t cap, int *off, const char *fmt, ...)
+{
+    if (*off < 0 || (size_t)*off >= cap) {
+        *off = -1;
+        return -1;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, cap - (size_t)*off, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)(*off + n) >= cap) {
+        *off = -1;
+        return -1;
+    }
+    *off += n;
+    return n;
+}
 
 static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
 {
@@ -84,44 +107,56 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     ESP_LOGD(TAG, "compensate_gain %f, agc_gain %d, fft_gain %d", compensate_gain, agc_gain, fft_gain);
 #endif
 
+    char line[CSI_LINE_MAX];
+    int off = 0;
+
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C61
     if (!s_count) {
         ESP_LOGI(TAG, "================ CSI RECV ================");
         ets_printf("type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data\n");
     }
-    ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d",
-               s_count, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate,
-               rx_ctrl->noise_floor, fft_gain, agc_gain, rx_ctrl->channel,
-               rx_ctrl->timestamp, rx_ctrl->sig_len, rx_ctrl->cur_bb_format);
+    csi_line_append(line, sizeof(line), &off,
+                    "CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                    s_count, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate,
+                    rx_ctrl->noise_floor, fft_gain, agc_gain, rx_ctrl->channel,
+                    rx_ctrl->timestamp, rx_ctrl->sig_len, rx_ctrl->cur_bb_format);
 #else
     if (!s_count) {
         ESP_LOGI(TAG, "================ CSI RECV ================");
         ets_printf("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_format,len,first_word,data\n");
     }
-    ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-               s_count, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
-               rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
-               rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
-               rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
-               rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->sig_mode);
+    csi_line_append(line, sizeof(line), &off,
+                    "CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                    s_count, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
+                    rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
+                    rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
+                    rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
+                    rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->sig_mode);
 #endif
 
 #if (CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61) && CSI_FORCE_LLTF
-
     int16_t csi = ((int16_t)(((((uint16_t)info->buf[1]) << 8) | info->buf[0]) << 4) >> 4);
-    ets_printf(",%d,%d,\"[%d", (info->len - 2) / 2, info->first_word_invalid, (int16_t)(compensate_gain * csi));
-    for (int i = 2; i < (info->len - 2); i += 2) {
+    csi_line_append(line, sizeof(line), &off, ",%d,%d,\"[%d",
+                    (info->len - 2) / 2, info->first_word_invalid, (int16_t)(compensate_gain * csi));
+    for (int i = 2; i < (info->len - 2) && off >= 0; i += 2) {
         csi = ((int16_t)(((((uint16_t)info->buf[i + 1]) << 8) | info->buf[i]) << 4) >> 4);
-        ets_printf(",%d", (int16_t)(compensate_gain * csi));
+        csi_line_append(line, sizeof(line), &off, ",%d", (int16_t)(compensate_gain * csi));
     }
-
 #else
-    ets_printf(",%d,%d,\"[%d", info->len, info->first_word_invalid, (int16_t)(compensate_gain * info->buf[0]));
-    for (int i = 1; i < info->len; i++) {
-        ets_printf(",%d", (int16_t)(compensate_gain * info->buf[i]));
+    csi_line_append(line, sizeof(line), &off, ",%d,%d,\"[%d",
+                    info->len, info->first_word_invalid, (int16_t)(compensate_gain * info->buf[0]));
+    for (int i = 1; i < info->len && off >= 0; i++) {
+        csi_line_append(line, sizeof(line), &off, ",%d", (int16_t)(compensate_gain * info->buf[i]));
     }
 #endif
-    ets_printf("]\"\n");
+    csi_line_append(line, sizeof(line), &off, "]\"\n");
+
+    if (off > 0) {
+        ets_printf("%s", line);
+        csi_tcp_forward_enqueue(line, (size_t)off);
+    } else {
+        ESP_LOGW(TAG, "CSI line truncated (>%d); skipped TCP", CSI_LINE_MAX);
+    }
     s_count++;
 }
 
@@ -216,6 +251,7 @@ void app_main()
      */
     ESP_ERROR_CHECK(example_connect());
 
+    csi_tcp_forward_start();
     wifi_csi_init();
     wifi_ping_router_start();
 }

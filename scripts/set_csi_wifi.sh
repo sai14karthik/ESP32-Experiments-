@@ -6,6 +6,11 @@ set -euo pipefail
 #   ./scripts/set_csi_wifi.sh "SaiPhone" "123456789"
 #   ./scripts/set_csi_wifi.sh 'YourSSID' 'YourPassword'
 # Optional 3rd arg = serial port, else auto-detect.
+#
+# Optional TCP ingest host (wireless CSI, no USB for data after flash):
+#   CSI_TCP_HOST=10.128.93.42 ./scripts/set_csi_wifi.sh "SSID" "PASS"
+#   CSI_TCP_HOST=10.128.93.42 CSI_TCP_PORT=9055 ./scripts/set_csi_wifi.sh "SSID" "PASS" [port]
+# Or set TCP alone later: ./scripts/set_csi_tcp_host.sh 10.128.93.42
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/serial_helpers.sh
@@ -36,13 +41,31 @@ if ! PORT="$(pick_usb_serial "$PORT_ARG")"; then
 fi
 
 # 1) Write machine-local defaults (gitignored)
-cat > "$LOCAL" <<EOF
-# Local only — do not commit.
-CONFIG_EXAMPLE_WIFI_SSID="$SSID"
-CONFIG_EXAMPLE_WIFI_PASSWORD="$PASS"
-CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y
-EOF
+TCP_HOST="${CSI_TCP_HOST:-}"
+TCP_PORT="${CSI_TCP_PORT:-9055}"
+# Preserve prior TCP settings when only updating Wi‑Fi
+if [[ -z "$TCP_HOST" && -f "$LOCAL" ]]; then
+  TCP_HOST="$(grep -E '^CONFIG_CSI_TCP_HOST=' "$LOCAL" 2>/dev/null | sed 's/^CONFIG_CSI_TCP_HOST="//;s/"$//' || true)"
+  PREV_PORT="$(grep -E '^CONFIG_CSI_TCP_PORT=' "$LOCAL" 2>/dev/null | cut -d= -f2 || true)"
+  if [[ -n "${PREV_PORT:-}" ]]; then
+    TCP_PORT="$PREV_PORT"
+  fi
+fi
+{
+  echo "# Local only — do not commit."
+  echo "CONFIG_EXAMPLE_WIFI_SSID=\"$SSID\""
+  echo "CONFIG_EXAMPLE_WIFI_PASSWORD=\"$PASS\""
+  echo "CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y"
+  if [[ -n "$TCP_HOST" ]]; then
+    echo "CONFIG_CSI_TCP_ENABLE=y"
+    echo "CONFIG_CSI_TCP_HOST=\"$TCP_HOST\""
+    echo "CONFIG_CSI_TCP_PORT=$TCP_PORT"
+  fi
+} > "$LOCAL"
 echo "Wrote $LOCAL"
+if [[ -n "$TCP_HOST" ]]; then
+  echo "CSI TCP forward → $TCP_HOST:$TCP_PORT"
+fi
 
 # 2) Patch generated sdkconfig if present (this is what the build actually uses)
 if [[ -f "$SDKCONFIG" ]]; then
@@ -69,6 +92,31 @@ if n1 != 1 or n2 != 1:
 open(path, "w", encoding="utf-8").write(text2)
 print(f"Updated {path}")
 PY
+  if [[ -n "$TCP_HOST" ]]; then
+    python3 - "$SDKCONFIG" "$TCP_HOST" "$TCP_PORT" <<'PY'
+import re, sys
+path, host, port = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, encoding="utf-8").read()
+
+def upsert(text, key, value):
+    line = f"{key}={value}"
+    pat = re.compile(rf"^{re.escape(key)}=.*$", re.M)
+    if pat.search(text):
+        return pat.sub(line, text, count=1)
+    not_set = re.compile(rf"^# {re.escape(key)} is not set\s*$", re.M)
+    if not_set.search(text):
+        return not_set.sub(line, text, count=1)
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + line + "\n"
+
+text = upsert(text, "CONFIG_CSI_TCP_ENABLE", "y")
+text = upsert(text, "CONFIG_CSI_TCP_HOST", f'"{host}"')
+text = upsert(text, "CONFIG_CSI_TCP_PORT", port)
+open(path, "w", encoding="utf-8").write(text)
+print(f"Updated TCP keys in {path}")
+PY
+  fi
 else
   echo "No sdkconfig yet — first build will pick up sdkconfig.defaults.local"
 fi

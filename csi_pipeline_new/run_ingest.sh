@@ -3,6 +3,7 @@
 # Usage:
 #   ./run_ingest.sh --method 4.3 --channel 11 --label desk
 #   ./run_ingest.sh --port /dev/cu.usbmodem1101 --label desk
+#   ./run_ingest.sh --listen-tcp 9055 --method 4.1 --label baseline_room_empty
 #   ./run_ingest.sh --from-file fixtures/sample_csi_lines.csv --label dryrun
 #   ./run_ingest.sh --probe
 set -euo pipefail
@@ -30,15 +31,18 @@ fi
 
 has_port=0
 has_file=0
+has_tcp=0
 EXTRA=()
 for a in "$@"; do
   case "$a" in
     --port|--port=*) has_port=1 ;;
     --from-file|--from-file=*) has_file=1 ;;
+    --listen-tcp|--listen-tcp=*) has_tcp=1 ;;
   esac
 done
 
-if [[ $has_port -eq 0 && $has_file -eq 0 ]]; then
+# Skip USB auto-probe when TCP listen or file replay is requested.
+if [[ $has_port -eq 0 && $has_file -eq 0 && $has_tcp -eq 0 ]]; then
   RECV="$(uv_csi "$ROOT/probe_recv_port.py" --quiet 2>/dev/null || true)"
   if [[ -n "${RECV:-}" ]]; then
     echo "auto recv port: $RECV"

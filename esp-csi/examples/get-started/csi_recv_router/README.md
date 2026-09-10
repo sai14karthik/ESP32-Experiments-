@@ -19,6 +19,17 @@ idf.py menuconfig
 ```
 Open the project configuration menu (`idf.py menuconfig`) to configure Wi-Fi or Ethernet. See "Establishing Wi-Fi or Ethernet Connection" section in [examples/protocols/README.md](https://github.com/espressif/esp-idf/tree/master/examples/protocols#establishing-wi-fi-or-ethernet-connection) for more details.
 
+**Wireless CSI ingest (TCP):** *CSI TCP forwarder* — enable and set ingest host IP / port (default `9055`). From the camera_module repo:
+
+```bash
+CSI_TCP_HOST=<mac-mini-labpsk-ip> ./scripts/set_csi_wifi.sh "SSID" "PASS" [port]
+# or
+./scripts/set_csi_tcp_host.sh <mac-mini-labpsk-ip> 9055 [port]
+```
+
+Host runs: `cd csi_pipeline_new && ./run_ingest.sh --listen-tcp 9055 --method 4.1 --label …`  
+USB serial still prints `CSI_DATA`; after flash, USB is only needed for power.
+
 ### Build and Flash
 
 Build the project and flash it to the board, then run monitor tool to view serial output:

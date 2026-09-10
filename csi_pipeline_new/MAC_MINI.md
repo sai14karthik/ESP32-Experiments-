@@ -1,6 +1,6 @@
 # Mac Mini — CSI capture & PostgreSQL (methods 4.1, 4.2, 4.3)
 
-End-to-end guide for the **Mac Mini** as the data host: flash ESP32-C5 boards, capture CSI over USB, store in local Postgres.
+End-to-end guide for the **Mac Mini** as the data host: flash ESP32-C5 boards, capture CSI over USB **or Wi‑Fi TCP**, store in local Postgres.
 
 | Method | Name | AP needed? | Boards | What prints `CSI_DATA` |
 |--------|------|------------|--------|-------------------------|
@@ -17,7 +17,7 @@ Firmware flashing is documented in [`CSI_METHODS.md`](../CSI_METHODS.md) and [`i
 ```text
                     ┌─────────────────────────────────────────┐
   4.1  one C5 ─────►│  USB serial  →  run_ingest.sh  →  Postgres │
-       + Wi-Fi AP   │         (Mac Mini, database: csi)       │
+       + Wi-Fi AP   │  OR TCP :9055 → run_ingest.sh → Postgres │
                     └─────────────────────────────────────────┘
 
   4.2  peer C5 ────►│  (power / optional USB)                 │
@@ -29,7 +29,9 @@ Firmware flashing is documented in [`CSI_METHODS.md`](../CSI_METHODS.md) and [`i
        no AP        └─────────────────────────────────────────┘
 ```
 
-**Rule:** Only the board that **prints `CSI_DATA`** needs USB on the Mini. The other board (4.2 peer, 4.3 sender) only needs power and radio range.
+**Rule:** Only the board that **prints `CSI_DATA`** needs a path to the Mini (USB serial **or** TCP). The other board (4.2 peer, 4.3 sender) only needs power and radio range.
+
+**Wireless 4.1:** USB is only for flash / wall power — see [Wireless ingest](#wireless-ingest-no-usb-for-data).
 
 **Do not** run `idf.py monitor`, `screen`, or `plot_csi.sh` on the same port while `run_ingest.sh` is running.
 
@@ -266,6 +268,68 @@ WHERE session_id = (SELECT id FROM csi_sessions ORDER BY started_at DESC LIMIT 1
 | AP | Required and must match flash credentials |
 
 **Note:** `./monitor_csi.sh` is only for 4.1 debugging — do not use it at the same time as ingest.
+
+---
+
+## Wireless ingest (no USB for data)
+
+Preferred for **room 207 / presence** capture: C5 stays on wall power; Mac Mini always-on ingest. Measure CSI from LabPSK (method 4.1); **forward** each `CSI_DATA` line over **TCP**.
+
+```text
+LabPSK AP --CSI--> ESP32-C5 --TCP CSI_DATA--> Mac Mini (--listen-tcp) --> Postgres
+```
+
+### LabPSK peer reachability (critical)
+
+LabPSK **client isolation** has blocked Mac↔ESP before. The C5 must reach the Mini’s LabPSK IP on TCP **9055**.
+
+On the Mini (LabPSK Wi‑Fi):
+
+```bash
+# Note Mini IP
+ifconfig | grep -A4 'en0\|en1'   # Wi‑Fi interface — look for 10.128.93.x
+```
+
+```bash
+# Mini must be listening first:
+cd csi_pipeline_new
+./run_ingest.sh --listen-tcp 9055 --method 4.1 --label tcp_smoke
+
+# Optional: from another machine on LabPSK, probe Mini:
+nc -vz <MINI_LABPSK_IP> 9055
+```
+
+If the C5 never connects (`listening…` forever), ask IT to allow **device-to-device** on LabPSK, or use a network without client isolation.
+
+### Flash once (USB for flash only)
+
+```bash
+cd ~/Desktop/camera_module
+
+# Wi‑Fi + TCP host in one flash:
+CSI_TCP_HOST=10.128.93.42 CSI_TCP_PORT=9055 \
+  ./scripts/set_csi_wifi.sh "LabHealthSecurePSK" 'YOUR_PASS' /dev/cu.usbmodem2101
+
+# Or set TCP after Wi‑Fi is already configured:
+./scripts/set_csi_tcp_host.sh 10.128.93.42 9055 /dev/cu.usbmodem2101
+```
+
+`CONFIG_CSI_TCP_*` lives in gitignored `sdkconfig.defaults.local` (see `sdkconfig.defaults.local.example`).
+
+### Collect (USB unplugged OK)
+
+1. Mini: start listener and note IP.
+2. Power C5 from wall — it joins LabPSK, connects to Mini:9055, streams CSI.
+3. Alternate labels by restarting ingest (same as USB):
+
+```bash
+cd csi_pipeline_new
+./run_ingest.sh --listen-tcp 9055 --method 4.1 --label baseline_room_empty
+# Ctrl+C after block, then:
+./run_ingest.sh --listen-tcp 9055 --method 4.1 --label occupied_person
+```
+
+Session `recv_port` is stored as `tcp:9055`. USB serial still prints `CSI_DATA` if you plug in for debug — do not run USB ingest and TCP ingest for the same capture.
 
 ---
 
