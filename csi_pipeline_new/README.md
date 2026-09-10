@@ -41,29 +41,130 @@ See **[`MAC_MINI.md`](MAC_MINI.md)** for per-method wiring (4.1 one board, 4.2 s
 
 ## 3. Capture CSI
 
+### USB serial (methods 4.2 / 4.3, or 4.1 over cable)
+
 ```bash
-cd csi_pipeline
+cd csi_pipeline_new
 
 # Live (auto-picks the recv port)
 ./run_ingest.sh --method 4.3 --channel 11 --label desk_run1
 
 # Or pin the port
 ./run_ingest.sh --port /dev/cu.usbmodem1101 --method 4.3 --channel 11 --label desk_run1
-
-# Wireless (method 4.1): C5 → TCP → Mini; no USB for data
-./run_ingest.sh --listen-tcp 9055 --method 4.1 --label baseline_room_empty
 ```
 
 - **Ctrl+C** stops the run, flushes the last batch, sets `ended_at`.
 - Each run → **one** new `csi_sessions` row; packets land in `csi_samples` under that `session_id`.
 - Use a clear `--label` every time (`sitting`, `walking`, `baseline`, …).
-- TCP sessions store `recv_port` as `tcp:9055`. See **[Wireless ingest](MAC_MINI.md#wireless-ingest-no-usb-for-data)** in `MAC_MINI.md` (LabPSK peer reachability).
 
 **Dry-run (no boards):**
 
 ```bash
 ./run_ingest.sh --from-file fixtures/sample_csi_lines.csv --method 4.3 --label dryrun
 ```
+
+---
+
+### Wireless CSI over TCP (method 4.1 — preferred for room capture)
+
+No USB needed for data. The ESP32-C5 joins LabPSK, measures router CSI, and forwards each `CSI_DATA` line to the Mac Mini over **TCP port 9055**.
+
+```text
+LabPSK AP --CSI--> ESP32-C5 --TCP :9055--> Mac Mini (run_ingest) --> Postgres
+```
+
+**Roles**
+
+| Machine | Job |
+|---------|-----|
+| **Mac Mini** (always on, LabPSK) | Runs ingest + Postgres. C5 is flashed with this host’s IP. |
+| **ESP32-C5** | Wi‑Fi CSI; wall power OK after flash. |
+| **Your laptop** | Optional: SSH to Mini to start/stop — do **not** run `--listen-tcp` on the laptop unless you reflash the C5 to the laptop’s IP. |
+
+#### Step 1 — Note Mini LabPSK IP
+
+On the Mac Mini:
+
+```bash
+ifconfig | grep -A4 'en0\|en1'
+# Example (room 207 Ethernet): inet 10.128.93.23
+```
+
+#### Step 2 — Start ingest on the Mini
+
+```bash
+cd ~/Desktop/ESP32-Experiments-/csi_pipeline_new   # or your clone path
+./run_ingest.sh --listen-tcp 9055 --method 4.1 --label baseline_room_empty
+```
+
+You should see:
+
+```text
+listening tcp://0.0.0.0:9055 (waiting for ESP32-C5…)
+```
+
+Leave this running. Session `recv_port` is stored as `tcp:9055`.
+
+#### Step 3 — Flash C5 once (USB only for this step)
+
+From a machine with ESP-IDF (laptop or Mini), plug in the C5:
+
+```bash
+cd ~/Desktop/camera_module   # repo with scripts/ + esp-csi/
+
+CSI_TCP_HOST=10.128.93.23 CSI_TCP_PORT=9055 \
+  ./scripts/set_csi_wifi.sh "LabHealthSecurePSK" 'YOUR_LABPSK_PASSWORD' /dev/cu.usbmodem2101
+```
+
+Or if Wi‑Fi is already configured:
+
+```bash
+./scripts/set_csi_tcp_host.sh 10.128.93.23 9055 /dev/cu.usbmodem2101
+```
+
+Replace `10.128.93.23` with the Mini IP from Step 1. Check port with `ls /dev/cu.usbmodem*`.
+
+#### Step 4 — Collect (USB unplugged OK)
+
+1. Power the C5 from a wall charger (or USB power only).
+2. On the Mini, wait for:
+   ```text
+   client connected 10.128.93.29:…
+   inserted total=…
+   ```
+3. **Ctrl+C** when the block is done. Restart with a new label:
+   ```bash
+   ./run_ingest.sh --listen-tcp 9055 --method 4.1 --label occupied_person
+   ```
+
+#### Check / stop (Mini or via SSH)
+
+```bash
+# Is ingest running?
+lsof -iTCP:9055 -sTCP:LISTEN
+nc -vz 127.0.0.1 9055
+
+# Stop (if not in that terminal)
+pkill -f 'ingest_serial.py --listen-tcp'
+```
+
+From another LabPSK laptop:
+
+```bash
+ssh dtilakenonalab@10.128.93.23
+# then same start/stop commands on the Mini
+
+# or one-shot stop:
+ssh dtilakenonalab@10.128.93.23 "pkill -f 'ingest_serial.py --listen-tcp'"
+```
+
+Mini must stay **powered on and awake**. Enable **Remote Login** on the Mini for SSH.
+
+#### LabPSK reachability
+
+The C5 must reach the Mini on TCP 9055. If you only see `listening…` and never `client connected`, check firewall on the Mini, or ask IT to allow device-to-device on LabPSK (client isolation).
+
+More detail: [`MAC_MINI.md` — Wireless ingest](MAC_MINI.md#wireless-ingest-no-usb-for-data).
 
 ---
 
