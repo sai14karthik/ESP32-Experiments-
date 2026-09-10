@@ -3,6 +3,7 @@
  */
 #include "csi_tcp_forward.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
@@ -18,13 +19,13 @@ static const char *TAG = "csi_tcp";
 
 #if CONFIG_CSI_TCP_ENABLE
 
-#define CSI_TCP_LINE_MAX   4096
-#define CSI_TCP_QUEUE_LEN  16
+#define CSI_TCP_LINE_MAX    4096
+#define CSI_TCP_QUEUE_LEN   16
 #define CSI_TCP_RECONNECT_MS 2000
 
 typedef struct {
     uint16_t len;
-    char data[CSI_TCP_LINE_MAX];
+    char *data; /* heap; freed by TCP task after send (or drop) */
 } csi_tcp_msg_t;
 
 static QueueHandle_t s_q;
@@ -43,12 +44,19 @@ void csi_tcp_forward_enqueue(const char *line, size_t line_len)
     if (line_len >= CSI_TCP_LINE_MAX) {
         line_len = CSI_TCP_LINE_MAX - 1;
     }
-    csi_tcp_msg_t msg;
-    msg.len = (uint16_t)line_len;
-    memcpy(msg.data, line, line_len);
-    msg.data[line_len] = '\0';
+    char *copy = malloc(line_len + 1);
+    if (!copy) {
+        return;
+    }
+    memcpy(copy, line, line_len);
+    copy[line_len] = '\0';
+
+    csi_tcp_msg_t msg = {
+        .len = (uint16_t)line_len,
+        .data = copy,
+    };
     if (xQueueSend(s_q, &msg, 0) != pdTRUE) {
-        /* Drop rather than block Wi-Fi CSI callback. */
+        free(copy); /* Drop rather than block Wi-Fi CSI callback. */
     }
 }
 
@@ -132,13 +140,18 @@ static void csi_tcp_task(void *arg)
             continue;
         }
 
-        if (!csi_tcp_send_all(msg.data, msg.len)) {
+        bool ok = csi_tcp_send_all(msg.data, msg.len);
+        if (!ok) {
             ESP_LOGW(TAG, "send failed; reconnecting");
             csi_tcp_close_sock();
-            /* Re-queue once if there is room; else drop. */
-            xQueueSendToFront(s_q, &msg, 0);
+            /* Try to re-queue once; else drop. */
+            if (xQueueSendToFront(s_q, &msg, 0) != pdTRUE) {
+                free(msg.data);
+            }
             vTaskDelay(pdMS_TO_TICKS(CSI_TCP_RECONNECT_MS));
+            continue;
         }
+        free(msg.data);
     }
 }
 
@@ -152,6 +165,7 @@ void csi_tcp_forward_start(void)
         ESP_LOGE(TAG, "queue create failed");
         return;
     }
+    /* Small stack: messages live on heap, not on this task stack. */
     BaseType_t ok = xTaskCreate(csi_tcp_task, "csi_tcp", 4096, NULL, 5, NULL);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "task create failed");
