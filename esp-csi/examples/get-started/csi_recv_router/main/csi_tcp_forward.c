@@ -20,7 +20,7 @@ static const char *TAG = "csi_tcp";
 #if CONFIG_CSI_TCP_ENABLE
 
 #define CSI_TCP_LINE_MAX    4096
-#define CSI_TCP_QUEUE_LEN   16
+#define CSI_TCP_QUEUE_LEN   64
 #define CSI_TCP_RECONNECT_MS 2000
 
 typedef struct {
@@ -91,6 +91,16 @@ static bool csi_tcp_connect(void)
     struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    /* Detect half-open sockets (Mini gone / stall) without waiting forever. */
+    int ka = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+#if defined(TCP_KEEPIDLE)
+    int idle = 10, intvl = 3, cnt = 3;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
 
     if (connect(sock, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
         ESP_LOGW(TAG, "connect %s:%d failed errno=%d", host, port, errno);
@@ -172,6 +182,12 @@ void csi_tcp_forward_start(void)
     }
 }
 
+void csi_tcp_forward_force_reconnect(void)
+{
+    ESP_LOGI(TAG, "force TCP reconnect");
+    csi_tcp_close_sock();
+}
+
 #else /* !CONFIG_CSI_TCP_ENABLE */
 
 bool csi_tcp_forward_enabled(void)
@@ -186,6 +202,10 @@ void csi_tcp_forward_enqueue(const char *line, size_t line_len)
 }
 
 void csi_tcp_forward_start(void)
+{
+}
+
+void csi_tcp_forward_force_reconnect(void)
 {
 }
 

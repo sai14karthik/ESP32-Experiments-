@@ -1,0 +1,64 @@
+---
+description: Wireless CSI TCP ingest — status, ops, known limits
+alwaysApply: true
+---
+
+# Wireless CSI ingest (TCP 9055) — keep in mind
+
+**Status (Sep 2026):** Working end-to-end. Treat as production-ready for lab room capture. Do not rebuild unless something breaks or we need multi-C5 / hardening.
+
+## Architecture
+
+```
+LabPSK AP --CSI--> ESP32-C5 --TCP :9055--> Mac Mini (run_ingest) --> Postgres
+```
+
+- Firmware: `esp-csi/examples/get-started/csi_recv_router` (`csi_tcp_forward.c`, Kconfig `CSI_TCP_*`)
+- Flash: `CSI_TCP_HOST=<mini_ip> ./scripts/set_csi_wifi.sh …` or `./scripts/set_csi_tcp_host.sh`
+- Ingest: `csi_pipeline_new/./run_ingest.sh --listen-tcp 9055 --method 4.1 --label …`
+- Docs: `csi_pipeline_new/README.md` (Wireless CSI over TCP) + `MAC_MINI.md`
+
+## Lab facts (room 207)
+
+- Mini LabPSK IP (Ethernet): **`10.128.93.23`**
+- C5 LabPSK IP (example): **`10.128.93.29`**
+- Repo on Mini often: `~/Desktop/ESP32-Experiments-/csi_pipeline_new`
+- USB only for flash/power — not for data while collecting
+
+## Remote control
+
+- **Office laptop → Mini SSH works** (use this for start/stop/monitor)
+- **LabPSK Wi‑Fi clients** (personal Mac on LabPSK) often **cannot** ping/SSH Mini (client isolation) even when C5→Mini TCP works
+- Prefer `tmux` on Mini for long runs; monitor via ingest logs (`inserted total=…`) or Postgres counts
+
+## Correct / good enough (lab capture)
+
+- TCP (not UDP) for long CSI lines
+- Heap-backed send queue (fixed prior stack overflow in `csi_tcp` task)
+- USB serial print still works alongside TCP
+- One client at a time is fine for now
+- **Run until Ctrl+C:** no firmware time limit; watchdog keeps CSI/TCP alive for long sessions
+- **Target ping rate:** 100 Hz (`CONFIG_SEND_FREQUENCY`); actual pkt/s limited by LabPSK AP replies (often lower)
+- **Stall recovery (flash when board available):** `WIFI_PS_NONE`, CSI watchdog (restart ping ~8s, full Wi‑Fi/CSI recycle ~20s), TCP keepalive + force reconnect. Host ingest warns after ~15s idle.
+
+## Later improvements (only when needed)
+
+- Multi-C5 fan-in
+- Queue-drop metrics / backpressure
+- Auth/TLS
+- Live plot over TCP
+- Avoid reflash when Mini IP changes (DHCP DNS or config another way)
+
+## Do not
+
+- Run `--listen-tcp` on a laptop expecting data while C5 is flashed to the Mini IP
+- Merge CSI + MediaMTX unless explicitly asked
+- Treat LabPSK Wi‑Fi laptop reachability as required for capture (it is not)
+
+## Flash stall-recovery build (when C5 USB is plugged in)
+
+```bash
+CSI_TCP_HOST=10.128.93.23 CSI_TCP_PORT=9055 \
+  ./scripts/set_csi_wifi.sh "LabHealthSecurePSK" '…' /dev/cu.usbmodem2101
+# or: ./scripts/set_csi_tcp_host.sh 10.128.93.23 9055
+```

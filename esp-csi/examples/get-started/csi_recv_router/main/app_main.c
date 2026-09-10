@@ -3,14 +3,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-/* Get recv router csi
+/* Get recv router csi — wireless TCP forward + stall recovery for unattended capture. */
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -37,7 +31,7 @@
 #include "esp_csi_gain_ctrl.h"
 #include "csi_tcp_forward.h"
 
-#define CONFIG_SEND_FREQUENCY      20
+#define CONFIG_SEND_FREQUENCY      100
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
 #define CSI_FORCE_LLTF                      0
 #endif
@@ -54,7 +48,17 @@
 /** Max CSI_DATA line length (header + I/Q text). Must match TCP forwarder. */
 #define CSI_LINE_MAX 4096
 
+/** No CSI for this long → restart ping (ms). */
+#define CSI_STALL_PING_MS     8000
+/** Still no CSI after ping restart → full Wi‑Fi/CSI recycle (ms). */
+#define CSI_STALL_RECYCLE_MS  20000
+#define CSI_WATCHDOG_PERIOD_MS 1000
+
 static const char *TAG = "csi_recv_router";
+
+static volatile TickType_t s_last_csi_tick;
+static esp_ping_handle_t s_ping_handle = NULL;
+static wifi_ap_record_t s_ap_info = {0};
 
 static int csi_line_append(char *buf, size_t cap, int *off, const char *fmt, ...)
 {
@@ -84,6 +88,8 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     if (memcmp(info->mac, ctx, 6)) {
         return;
     }
+
+    s_last_csi_tick = xTaskGetTickCount();
 
     const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
     static int s_count = 0;
@@ -160,11 +166,8 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     s_count++;
 }
 
-static void wifi_csi_init()
+static void wifi_csi_init(void)
 {
-    /**
-     * @brief In order to ensure the compatibility of routers, only LLTF sub-carriers are selected.
-     */
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
     wifi_csi_config_t csi_config = {
         .enable                   = true,
@@ -208,16 +211,25 @@ static void wifi_csi_init()
         .shift             = true,
     };
 #endif
-    static wifi_ap_record_t s_ap_info = {0};
+    memset(&s_ap_info, 0, sizeof(s_ap_info));
     ESP_ERROR_CHECK(esp_wifi_sta_get_ap_info(&s_ap_info));
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_rx_cb, s_ap_info.bssid));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 }
 
-static esp_err_t wifi_ping_router_start()
+static void wifi_ping_router_stop(void)
 {
-    static esp_ping_handle_t ping_handle = NULL;
+    if (s_ping_handle) {
+        esp_ping_stop(s_ping_handle);
+        esp_ping_delete_session(s_ping_handle);
+        s_ping_handle = NULL;
+    }
+}
+
+static esp_err_t wifi_ping_router_start(void)
+{
+    wifi_ping_router_stop();
 
     esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
     ping_config.count             = 0;
@@ -232,26 +244,106 @@ static esp_err_t wifi_ping_router_start()
     ping_config.target_addr.type = ESP_IPADDR_TYPE_V4;
 
     esp_ping_callbacks_t cbs = { 0 };
-    esp_ping_new_session(&ping_config, &cbs, &ping_handle);
-    esp_ping_start(ping_handle);
-
-    return ESP_OK;
+    esp_err_t err = esp_ping_new_session(&ping_config, &cbs, &s_ping_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ping session create failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    return esp_ping_start(s_ping_handle);
 }
 
-void app_main()
+static void wifi_disable_power_save(void)
+{
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WIFI_PS_NONE failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Wi‑Fi power save OFF (WIFI_PS_NONE)");
+    }
+}
+
+static void csi_pipeline_start(void)
+{
+    wifi_disable_power_save();
+    wifi_csi_init();
+    wifi_ping_router_start();
+    s_last_csi_tick = xTaskGetTickCount();
+}
+
+/** Soft recover: restart ping to re-stimulate router CSI. */
+static void csi_recover_ping(void)
+{
+    ESP_LOGW(TAG, "CSI stall → restart ping");
+    wifi_ping_router_start();
+    csi_tcp_forward_force_reconnect();
+}
+
+/** Hard recover: drop Wi‑Fi, reconnect, re-enable CSI + ping. */
+static void csi_recover_full(void)
+{
+    ESP_LOGW(TAG, "CSI stall → full Wi‑Fi/CSI recycle");
+    wifi_ping_router_stop();
+    esp_wifi_set_csi(false);
+    example_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_ERROR_CHECK(example_connect());
+    csi_pipeline_start();
+    csi_tcp_forward_force_reconnect();
+}
+
+static void csi_watchdog_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "CSI watchdog up (ping>%ds recycle>%ds)",
+             CSI_STALL_PING_MS / 1000, CSI_STALL_RECYCLE_MS / 1000);
+
+    bool ping_attempted = false;
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(CSI_WATCHDOG_PERIOD_MS));
+
+        TickType_t last = s_last_csi_tick;
+        TickType_t now = xTaskGetTickCount();
+        uint32_t idle_ms = (uint32_t)((now - last) * portTICK_PERIOD_MS);
+
+        wifi_ap_record_t ap;
+        bool wifi_up = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+
+        if (!wifi_up) {
+            ESP_LOGW(TAG, "Wi‑Fi down → reconnect");
+            ping_attempted = false;
+            csi_recover_full();
+            continue;
+        }
+
+        if (idle_ms < CSI_STALL_PING_MS) {
+            ping_attempted = false;
+            continue;
+        }
+
+        if (!ping_attempted) {
+            ping_attempted = true;
+            csi_recover_ping();
+            continue;
+        }
+
+        if (idle_ms >= CSI_STALL_RECYCLE_MS) {
+            ping_attempted = false;
+            csi_recover_full();
+        }
+    }
+}
+
+void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /**
-     * @brief This helper function configures Wi-Fi, as selected in menuconfig.
-     *        Read "Establishing Wi-Fi Connection" section in esp-idf/examples/protocols/README.md
-     *        for more information about this function.
-     */
     ESP_ERROR_CHECK(example_connect());
 
     csi_tcp_forward_start();
-    wifi_csi_init();
-    wifi_ping_router_start();
+    csi_pipeline_start();
+
+    xTaskCreate(csi_watchdog_task, "csi_wd", 4096, NULL, 4, NULL);
 }

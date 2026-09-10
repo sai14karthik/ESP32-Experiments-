@@ -15,6 +15,12 @@ extern "C" {
 void csi_tcp_forward_start(void);
 
 /**
+ * Close the current TCP socket so the forwarder reconnects.
+ * Safe to call from other tasks (e.g. CSI watchdog after a stall).
+ */
+void csi_tcp_forward_force_reconnect(void);
+
+/**
  * Copy a complete newline-terminated CSI line into the send queue.
  * Safe to call from the Wi-Fi CSI callback (non-blocking; drops if full).
  * line_len includes the trailing '\\n' if present.
