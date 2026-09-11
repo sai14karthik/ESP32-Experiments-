@@ -212,6 +212,9 @@ def process_line(line: str | None, batch: list[dict[str, Any]]) -> dict[str, Any
     sample = parse_csi_line(line)
     if sample is None:
         return None
+    iq = sample.get("iq") or []
+    if len(iq) < 2 or len(iq) % 2 != 0:
+        return None
     batch.append(sample)
     return sample
 
@@ -231,6 +234,7 @@ def _ingest_stream(
     last_sample = time.monotonic()
     last_idle_warn = 0.0
     total = 0
+    saw_format = False
     try:
         for line in lines:
             if line is None:
@@ -252,6 +256,15 @@ def _ingest_stream(
             sample = process_line(line, batch)
             if sample is None:
                 continue
+            if not saw_format:
+                saw_format = True
+                n_iq = len(sample.get("iq") or [])
+                print(
+                    f"first CSI: format={sample.get('format')}  "
+                    f"mac={sample.get('mac')}  rssi={sample.get('rssi')}  "
+                    f"iq_len={n_iq}  subcarriers={n_iq // 2}",
+                    flush=True,
+                )
             last_sample = time.monotonic()
             now = last_sample
             if len(batch) >= batch_size or (now - last_flush) >= flush_s:
@@ -324,11 +337,21 @@ def run(args: argparse.Namespace) -> None:
             if from_file:
                 print("replaying file…")
                 batch: list[dict[str, Any]] = []
+                saw_format = False
                 try:
                     for line in iter_lines_file(from_file):
                         sample = process_line(line, batch)
                         if sample is None:
                             continue
+                        if not saw_format:
+                            saw_format = True
+                            n_iq = len(sample.get("iq") or [])
+                            print(
+                                f"first CSI: format={sample.get('format')}  "
+                                f"mac={sample.get('mac')}  rssi={sample.get('rssi')}  "
+                                f"iq_len={n_iq}  subcarriers={n_iq // 2}",
+                                flush=True,
+                            )
                         if len(batch) >= args.batch_size:
                             total += flush_batch(conn, session_id, batch)
                             batch.clear()

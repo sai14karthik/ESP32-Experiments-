@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS csi_samples (
     rx_format     INTEGER,
     len           INTEGER,
     first_word    INTEGER,
-    iq            INTEGER[] NOT NULL     -- imag,real interleaved; length = len
+    iq            INTEGER[] NOT NULL     -- imag,real interleaved; array_length = byte/count from firmware (often 234 → 117 pairs)
 );
 
 CREATE INDEX IF NOT EXISTS csi_samples_session_host_ts_idx

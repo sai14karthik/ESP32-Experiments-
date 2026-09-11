@@ -67,11 +67,15 @@ cd csi_pipeline_new
 
 ### Wireless CSI over TCP (method 4.1 — preferred for room capture)
 
-No USB needed for data. The ESP32-C5 joins LabPSK, measures router CSI, and forwards each `CSI_DATA` line to the Mac Mini over **TCP port 9055**.
+No USB needed for data. The **ESP32-C5** (`csi_recv_router`) joins LabPSK, measures router CSI, and forwards each `CSI_DATA` line to the Mac Mini over **TCP port 9055**.
 
 ```text
 LabPSK AP --CSI--> ESP32-C5 --TCP :9055--> Mac Mini (run_ingest) --> Postgres
 ```
+
+Same parser as the USB visualizer (`csi_parse.py` → `lab_router` format). I/Q is **imag,real** interleaved; a typical LLTF packet stores **234** ints → **117** subcarriers in `csi_samples.iq`.
+
+**Not the XIAO C6 Arduino firmware** (`csi/firmware`). That board is for USB live viz on this laptop. Do **not** point its binary UDP collector at Mini `:9055` — Mini ingest expects text `CSI_DATA` lines from `csi_recv_router` only.
 
 **Roles**
 
