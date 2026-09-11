@@ -55,10 +55,18 @@ LabPSK AP --CSI--> ESP32-C5 --TCP :9055--> Mac Mini (run_ingest) --> Postgres
 - Merge CSI + MediaMTX unless explicitly asked
 - Treat LabPSK Wi‑Fi laptop reachability as required for capture (it is not)
 
-## Flash stall-recovery build (when C5 USB is plugged in)
+## Espressif reference (remember)
 
-```bash
-CSI_TCP_HOST=10.128.93.23 CSI_TCP_PORT=9055 \
-  ./scripts/set_csi_wifi.sh "LabHealthSecurePSK" '…' /dev/cu.usbmodem2101
-# or: ./scripts/set_csi_tcp_host.sh 10.128.93.23 9055
-```
+Video: [ESP-CSI: Transforming Wi-Fi into a Sensing Platform](https://www.youtube.com/watch?v=JjdpzM6zVJ8) (Espressif Systems).
+
+Key claims to keep in mind:
+- CSI = pilots → environment-sensitive channel info (beyond RSSI); works NLOS / through walls
+- No extra sensors — software on Wi‑Fi ESP (e.g. presence bulb)
+- Demo: 1 TX + **8 RX** array for positioning (drone TX)
+- **ESP32-C5** called out for higher sensitivity / 5.8 GHz; can sense tiny vibration / breathing-scale motion
+- Gestures visible in raw CSI; on-device NN possible
+- Vs mmWave/UWB: lower cost/power, wider range
+- Accuracy: **fixed gain** (AGC can mask changes); multi-chip **co-crystal** sync for array / mm-level path disturbance
+- Official path matches us: router CSI (method 4.1) + tools in [espressif/esp-csi](https://github.com/espressif/esp-csi)
+
+Our lab priority stays: Mini TCP capture + interleaved presence labels. Arrays / fixed-gain / on-device NN / co-crystal = later upgrades, not blockers.
