@@ -7,3 +7,6 @@
 [submodule "esp32cam-ready"]
 	path = esp32cam-ready
 	url = https://github.com/rzeldent/esp32cam-ready
+[submodule "ESP32-CSI-Tool"]
+	path = ESP32-CSI-Tool
+	url = https://github.com/StevenMHernandez/ESP32-CSI-Tool
