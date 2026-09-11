@@ -142,7 +142,7 @@ def open_serial(port: str, baud: int) -> serial.Serial:
     except serial.SerialException as exc:
         sys.exit(
             f"{exc}\n"
-            "Port is busy. Quit idf.py monitor / screen / plot_csi.sh, then retry."
+            "Port is busy. Quit idf.py monitor / screen / ./scripts/plot_csi.sh, then retry."
         )
     time.sleep(2.0)
     ser.reset_input_buffer()
