@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Live CSI visualizer for a USB-connected ESP (lab CSI_DATA format).
+"""Live CSI visualizer for a USB-connected ESP (any supported CSI_DATA layout).
+
+Auto-detects lab C5 ``csi_recv_router``, XIAO C6, and Hernandez ESP32-CSI-Tool
+lines via ``csi_parse.parse_csi_line``.
 
 Plug in csi_recv / csi_recv_router, then:
 
@@ -114,6 +117,7 @@ class CsiWorker(QThread):
                 "mean_amp": float(np.mean(amps)),
                 "amps": amps,
                 "pkt_s": round(rate, 1),
+                "format": sample.get("format"),
             }
         )
 
@@ -176,7 +180,8 @@ class CsiWorker(QThread):
                         last_csi = time.monotonic()
                         if count == 1:
                             self.status.emit(
-                                f"CSI OK  mac={sample.get('mac')}  "
+                                f"CSI OK [{sample.get('format')}]  "
+                                f"mac={sample.get('mac')}  "
                                 f"ch={sample.get('channel')}  "
                                 f"rssi={sample.get('rssi')}"
                             )
@@ -428,6 +433,7 @@ class CsiVizWindow(QMainWindow):
         self.plot_heat.setYRange(0, heat_view.shape[0], padding=0)
 
         self.stats.setText(
+            f"[{pkt.get('format', '?')}]  "
             f"pkt/s: {pkt.get('pkt_s', '—')}   "
             f"seq: {pkt.get('seq', '—')}   "
             f"rssi: {rssi if rssi is not None else '—'}   "

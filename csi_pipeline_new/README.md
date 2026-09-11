@@ -170,17 +170,17 @@ More detail: [`MAC_MINI.md` — Wireless ingest](MAC_MINI.md#wireless-ingest-no-
 
 ### Live CSI visualizer (this laptop + USB)
 
-Plug the ESP into **this Mac**, then:
+Universal parser (`csi_parse.py`) auto-detects **lab C5**, **XIAO C6**, and **Hernandez** `CSI_DATA` layouts. Plug any of those boards into **this Mac**, then:
 
 ```bash
 cd csi_pipeline_new
 ./run_csi_viz.sh
 # or pin port / replay without hardware:
-./run_csi_viz.sh --port /dev/cu.usbmodem2101
+./run_csi_viz.sh --port /dev/cu.usbmodem1101   # e.g. XIAO C6
 ./run_csi_viz.sh --from-file fixtures/sample_csi_lines.csv
 ```
 
-Shows mean amplitude vs time, RSSI, and a subcarrier×time heatmap. **Do not** run ingest or `--gui` detect on the same USB port at the same time. Wireless Mini capture stays separate (`--listen-tcp`).
+Shows mean amplitude vs time, RSSI, and a subcarrier×time heatmap (status line includes `format=…`). **Do not** run ingest or `--gui` detect on the same USB port at the same time. Wireless Mini capture stays separate (`--listen-tcp`).
 
 ---
 
