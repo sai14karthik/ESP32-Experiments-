@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 import serial
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -39,11 +39,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from csi_parse import DEFAULT_BAUD, parse_csi_line
+from csi_parse import DEFAULT_BAUD, iq_to_amplitudes, parse_csi_line
 
-HISTORY_SECONDS = 30.0
-HEATMAP_COLS = 120
-UI_EMIT_HZ = 20.0
+HISTORY_SECONDS = 12.0
+HEATMAP_COLS = 180
+# UI redraw rate — denser than CSI pkt/s so plots look continuous.
+UI_HZ = 30.0
+# Blend new CSI into displayed traces (1 = no smooth, 0.2 = very smooth).
+EMA_ALPHA = 0.35
+# Slow-adapt heatmap color scale (avoids flicker from autoLevels).
+HEAT_LEVEL_EMA = 0.08
 
 
 def list_serial_ports() -> list[str]:
@@ -51,18 +56,12 @@ def list_serial_ports() -> list[str]:
 
 
 def iq_amplitudes(iq: list[int]) -> np.ndarray:
-    """Interleaved I/Q ints → per-subcarrier amplitude."""
-    a = np.asarray(iq, dtype=np.float64)
-    if a.size < 2:
-        return np.empty(0, dtype=np.float64)
-    i = a[0::2]
-    q = a[1::2]
-    n = min(i.size, q.size)
-    return np.sqrt(i[:n] ** 2 + q[:n] ** 2)
+    """Interleaved I/Q ints → per-subcarrier amplitude (numpy for plots)."""
+    return np.asarray(iq_to_amplitudes(iq), dtype=np.float64)
 
 
 class CsiWorker(QThread):
-    """Background serial/file reader → UI packets (rate-limited)."""
+    """Background serial/file reader → every CSI sample (no UI throttle)."""
 
     packet = pyqtSignal(dict)
     status = pyqtSignal(str)
@@ -97,38 +96,30 @@ class CsiWorker(QThread):
         span = self._pkt_times[-1] - self._pkt_times[0]
         return (len(self._pkt_times) - 1) / span if span > 0 else 0.0
 
-    def _emit_sample(self, sample: dict, *, force: bool, last_emit: list[float]) -> None:
-        now = time.monotonic()
-        rate = self._pkt_rate()
-        min_dt = 1.0 / UI_EMIT_HZ
-        if not force and (now - last_emit[0]) < min_dt:
-            return
-        last_emit[0] = now
+    def _emit_sample(self, sample: dict) -> None:
         amps = iq_amplitudes(sample["iq"])
         if amps.size == 0:
             return
         self.packet.emit(
             {
-                "t": now,
+                "t": time.monotonic(),
                 "seq": sample.get("seq"),
                 "rssi": sample.get("rssi"),
                 "mac": sample.get("mac"),
                 "channel": sample.get("channel"),
                 "mean_amp": float(np.mean(amps)),
                 "amps": amps,
-                "pkt_s": round(rate, 1),
+                "pkt_s": round(self._pkt_rate(), 1),
                 "format": sample.get("format"),
             }
         )
 
     def run(self) -> None:
-        last_emit = [0.0]
         try:
             if self.from_file is not None:
                 self.status.emit(f"replaying {self.from_file}")
                 with self.from_file.open(encoding="utf-8") as f:
                     lines = f.readlines()
-                # Loop short fixtures so the UI stays alive for demos.
                 while not self._stop:
                     for raw in lines:
                         if self._stop:
@@ -136,8 +127,8 @@ class CsiWorker(QThread):
                         sample = parse_csi_line(raw.strip())
                         if not sample or not sample.get("iq"):
                             continue
-                        self._emit_sample(sample, force=False, last_emit=last_emit)
-                        time.sleep(0.05)
+                        self._emit_sample(sample)
+                        time.sleep(0.04)
                 self.finished_ok.emit()
                 return
 
@@ -159,11 +150,9 @@ class CsiWorker(QThread):
                     chunk = ser.read(ser.in_waiting or 1)
                     if not chunk:
                         now = time.monotonic()
-                        if now - last_csi > 5.0 and now - last_warn > 5.0:
+                        if count == 0 and now - last_csi > 5.0 and now - last_warn > 5.0:
                             last_warn = now
-                            self.status.emit(
-                                f"waiting for CSI_DATA… ({count} packets so far)"
-                            )
+                            self.status.emit("waiting for CSI_DATA… (none yet)")
                         continue
                     buf += chunk.decode("utf-8", errors="replace")
                     while "\n" in buf:
@@ -178,16 +167,13 @@ class CsiWorker(QThread):
                             continue
                         count += 1
                         last_csi = time.monotonic()
-                        if count == 1:
+                        if count == 1 or count % 25 == 0:
                             self.status.emit(
-                                f"CSI OK [{sample.get('format')}]  "
-                                f"mac={sample.get('mac')}  "
-                                f"ch={sample.get('channel')}  "
-                                f"rssi={sample.get('rssi')}"
+                                f"live [{sample.get('format')}]  "
+                                f"{self._pkt_rate():.0f} CSI/s  "
+                                f"mac={sample.get('mac')}  rssi={sample.get('rssi')}"
                             )
-                        self._emit_sample(
-                            sample, force=(count <= 3), last_emit=last_emit
-                        )
+                        self._emit_sample(sample)
             self.finished_ok.emit()
         except Exception as exc:  # noqa: BLE001 — surface in UI
             self.failed.emit(str(exc))
@@ -212,11 +198,22 @@ class CsiVizWindow(QMainWindow):
         self._heat_col = 0
         self._heat_filled = False
 
+        # Smoothed state updated by CSI packets; UI timer paints from this.
+        self._smooth_amps: np.ndarray | None = None
+        self._smooth_mean = 0.0
+        self._smooth_rssi = np.nan
+        self._smooth_sc = 0.0
+        self._have_csi = False
+        self._last_pkt: dict | None = None
+        self._n_sc = 0
+        self._pkt_count = 0
+        self._heat_lo = 0.0
+        self._heat_hi = 1.0
+
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
 
-        # Controls
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Port"))
         self.port_combo = QComboBox()
@@ -230,10 +227,15 @@ class CsiVizWindow(QMainWindow):
         self.baud_spin.setRange(9600, 3000000)
         self.baud_spin.setValue(baud)
         bar.addWidget(self.baud_spin)
-        bar.addWidget(QLabel("Subcarrier"))
+        # This picks WHICH subcarrier the orange trace follows — not the total count.
+        bar.addWidget(QLabel("Plot SC #"))
         self.sc_spin = QSpinBox()
         self.sc_spin.setRange(0, 512)
-        self.sc_spin.setValue(10)
+        self.sc_spin.setValue(11)
+        self.sc_spin.setToolTip(
+            "Which subcarrier index to plot as the orange line.\n"
+            "Total subcarriers come from the device (e.g. 64 on XIAO C6)."
+        )
         bar.addWidget(self.sc_spin)
         self.start_btn = QPushButton("Start")
         self.start_btn.clicked.connect(self.toggle_start)
@@ -247,13 +249,17 @@ class CsiVizWindow(QMainWindow):
 
         pg.setConfigOptions(antialias=True, background="#0f1419", foreground="#c8d0d8")
 
-        # Mean amplitude + RSSI
-        self.plot_amp = pg.PlotWidget(title="Mean CSI amplitude vs time")
+        self.plot_amp = pg.PlotWidget(title="CSI amplitude vs time (blue=mean, orange=Plot SC #)")
         self.plot_amp.setLabel("left", "amplitude")
         self.plot_amp.setLabel("bottom", "seconds")
         self.plot_amp.showGrid(x=True, y=True, alpha=0.25)
-        self.curve_mean = self.plot_amp.plot(pen=pg.mkPen("#5ec8ff", width=2), name="mean")
-        self.curve_sc = self.plot_amp.plot(pen=pg.mkPen("#ffb454", width=1.5), name="subcarrier")
+        self.plot_amp.addLegend(offset=(10, 10))
+        self.curve_mean = self.plot_amp.plot(
+            pen=pg.mkPen("#5ec8ff", width=2.5), name="mean"
+        )
+        self.curve_sc = self.plot_amp.plot(
+            pen=pg.mkPen("#ffb454", width=2), name="SC #"
+        )
         layout.addWidget(self.plot_amp, stretch=2)
 
         self.plot_rssi = pg.PlotWidget(title="RSSI vs time")
@@ -263,13 +269,11 @@ class CsiVizWindow(QMainWindow):
         self.curve_rssi = self.plot_rssi.plot(pen=pg.mkPen("#7dffa3", width=2))
         layout.addWidget(self.plot_rssi, stretch=1)
 
-        # Heatmap: subcarrier × time
         self.plot_heat = pg.PlotWidget(title="Amplitude heatmap (subcarrier × time)")
-        self.plot_heat.setLabel("left", "subcarrier")
+        self.plot_heat.setLabel("left", "subcarrier index")
         self.plot_heat.setLabel("bottom", "← older    newer →")
         self.img = pg.ImageItem()
         self.plot_heat.addItem(self.img)
-        # Viridis-like
         stops = [
             (0.0, (30, 30, 50)),
             (0.25, (40, 80, 140)),
@@ -277,12 +281,20 @@ class CsiVizWindow(QMainWindow):
             (0.75, (200, 200, 60)),
             (1.0, (250, 250, 200)),
         ]
-        self.img.setLookupTable(pg.ColorMap([s[0] for s in stops], [s[1] for s in stops]).getLookupTable())
+        self.img.setLookupTable(
+            pg.ColorMap([s[0] for s in stops], [s[1] for s in stops]).getLookupTable()
+        )
         layout.addWidget(self.plot_heat, stretch=2)
 
-        self.stats = QLabel("pkt/s: —   seq: —   rssi: —   subcarriers: —")
-        self.stats.setFont(QFont("Menlo", 12) if sys.platform == "darwin" else QFont("monospace", 11))
+        self.stats = QLabel("pkt/s: —")
+        self.stats.setFont(
+            QFont("Menlo", 12) if sys.platform == "darwin" else QFont("monospace", 11)
+        )
         layout.addWidget(self.stats)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(int(1000 / UI_HZ))
+        self._timer.timeout.connect(self._on_ui_tick)
 
         self.refresh_ports()
         if port:
@@ -327,6 +339,16 @@ class CsiVizWindow(QMainWindow):
         self._heat_n_sc = 1
         self._heat_col = 0
         self._heat_filled = False
+        self._smooth_amps = None
+        self._smooth_mean = 0.0
+        self._smooth_rssi = np.nan
+        self._smooth_sc = 0.0
+        self._have_csi = False
+        self._last_pkt = None
+        self._n_sc = 0
+        self._pkt_count = 0
+        self._heat_lo = 0.0
+        self._heat_hi = 1.0
 
         port = None
         if self._from_file is None:
@@ -349,8 +371,10 @@ class CsiVizWindow(QMainWindow):
         self.refresh_btn.setEnabled(False)
         self.baud_spin.setEnabled(False)
         self._worker.start()
+        self._timer.start()
 
     def _stop_worker(self) -> None:
+        self._timer.stop()
         if self._worker is not None:
             self._worker.stop()
             self._worker.wait(2000)
@@ -374,49 +398,81 @@ class CsiVizWindow(QMainWindow):
         self._stop_worker()
 
     def on_packet(self, pkt: dict) -> None:
-        t_abs = float(pkt["t"])
-        if self._t0 is None:
-            self._t0 = t_abs
-        t = t_abs - self._t0
-
-        amps = pkt["amps"]
+        """Ingest CSI: EMA-update smooth state only (timer paints)."""
+        amps = np.asarray(pkt["amps"], dtype=np.float64)
         mean_amp = float(pkt["mean_amp"])
         rssi = pkt.get("rssi")
         sc_idx = int(self.sc_spin.value())
         sc_val = float(amps[sc_idx]) if 0 <= sc_idx < amps.size else mean_amp
 
-        self._history_t.append(t)
-        self._history_mean.append(mean_amp)
-        self._history_sc.append(sc_val)
-        self._history_rssi.append(float(rssi) if rssi is not None else np.nan)
+        a = EMA_ALPHA
+        if not self._have_csi or self._smooth_amps is None or self._smooth_amps.shape != amps.shape:
+            self._smooth_amps = amps.copy()
+            self._smooth_mean = mean_amp
+            self._smooth_sc = sc_val
+            self._smooth_rssi = float(rssi) if rssi is not None else np.nan
+            self._have_csi = True
+        else:
+            self._smooth_amps = a * amps + (1.0 - a) * self._smooth_amps
+            self._smooth_mean = a * mean_amp + (1.0 - a) * self._smooth_mean
+            self._smooth_sc = a * sc_val + (1.0 - a) * self._smooth_sc
+            if rssi is not None:
+                prev = self._smooth_rssi
+                if np.isnan(prev):
+                    self._smooth_rssi = float(rssi)
+                else:
+                    self._smooth_rssi = a * float(rssi) + (1.0 - a) * prev
 
+        self._n_sc = int(amps.size)
+        if self._n_sc > 0:
+            self.sc_spin.setMaximum(max(0, self._n_sc - 1))
+        self._last_pkt = pkt
+        self._pkt_count += 1
+        # Keep orange legend label in sync with spinner.
+        if hasattr(self.curve_sc, "opts"):
+            self.curve_sc.opts["name"] = f"SC #{sc_idx}"
+
+    def _trim_history(self, t: float) -> None:
         while self._history_t and (t - self._history_t[0]) > HISTORY_SECONDS:
             self._history_t.popleft()
             self._history_mean.popleft()
             self._history_sc.popleft()
             self._history_rssi.popleft()
 
-        # Heatmap column
+    def _push_heat(self, amps: np.ndarray) -> None:
         n_sc = int(amps.size)
         if n_sc != self._heat_n_sc:
             self._heat_n_sc = n_sc
             self._heat = np.zeros((n_sc, HEATMAP_COLS), dtype=np.float32)
             self._heat_col = 0
             self._heat_filled = False
-            self.sc_spin.setMaximum(max(0, n_sc - 1))
-
         col = self._heat_col % HEATMAP_COLS
         self._heat[:, col] = amps.astype(np.float32)
         self._heat_col += 1
         if self._heat_col >= HEATMAP_COLS:
             self._heat_filled = True
 
-        # Display heatmap with newest on the right
-        if self._heat_filled:
-            order = (np.arange(HEATMAP_COLS) + self._heat_col) % HEATMAP_COLS
-            heat_view = self._heat[:, order]
-        else:
-            heat_view = self._heat[:, : max(1, self._heat_col)]
+    def _on_ui_tick(self) -> None:
+        """~30 Hz paint: dense time axis even when CSI arrives in bursts."""
+        if not self._have_csi or self._smooth_amps is None:
+            return
+
+        now = time.monotonic()
+        if self._t0 is None:
+            self._t0 = now
+        t = now - self._t0
+
+        sc_idx = int(self.sc_spin.value())
+        if 0 <= sc_idx < self._smooth_amps.size:
+            # Re-read SC from smoothed spectrum when user changes spinner.
+            self._smooth_sc = float(self._smooth_amps[sc_idx])
+
+        self._history_t.append(t)
+        self._history_mean.append(self._smooth_mean)
+        self._history_sc.append(self._smooth_sc)
+        self._history_rssi.append(self._smooth_rssi)
+        self._trim_history(t)
+        self._push_heat(self._smooth_amps)
 
         ts = np.asarray(self._history_t, dtype=np.float64)
         self.curve_mean.setData(ts, np.asarray(self._history_mean, dtype=np.float64))
@@ -425,20 +481,47 @@ class CsiVizWindow(QMainWindow):
 
         if len(ts) >= 2:
             left = max(0.0, ts[-1] - HISTORY_SECONDS)
-            self.plot_amp.setXRange(left, max(left + 5.0, ts[-1]), padding=0.02)
-            self.plot_rssi.setXRange(left, max(left + 5.0, ts[-1]), padding=0.02)
+            right = max(left + 3.0, ts[-1])
+            self.plot_amp.setXRange(left, right, padding=0.02)
+            self.plot_rssi.setXRange(left, right, padding=0.02)
 
-        self.img.setImage(heat_view, autoLevels=True, axes={"x": 1, "y": 0})
+        if self._heat_filled:
+            order = (np.arange(HEATMAP_COLS) + self._heat_col) % HEATMAP_COLS
+            heat_view = self._heat[:, order]
+        else:
+            heat_view = self._heat[:, : max(1, self._heat_col)]
+
+        # Stable color scale: slow EMA on percentiles (not per-frame autoLevels).
+        flat = heat_view[np.isfinite(heat_view)]
+        if flat.size:
+            lo = float(np.percentile(flat, 5))
+            hi = float(np.percentile(flat, 95))
+            if hi <= lo:
+                hi = lo + 1.0
+            a = HEAT_LEVEL_EMA
+            self._heat_lo = a * lo + (1.0 - a) * self._heat_lo
+            self._heat_hi = a * hi + (1.0 - a) * self._heat_hi
+            if self._heat_hi <= self._heat_lo:
+                self._heat_hi = self._heat_lo + 1.0
+
+        self.img.setImage(
+            heat_view,
+            levels=(self._heat_lo, self._heat_hi),
+            axes={"x": 1, "y": 0},
+        )
         self.plot_heat.setXRange(0, heat_view.shape[1], padding=0)
         self.plot_heat.setYRange(0, heat_view.shape[0], padding=0)
 
+        pkt = self._last_pkt or {}
+        rssi = pkt.get("rssi")
         self.stats.setText(
             f"[{pkt.get('format', '?')}]  "
             f"pkt/s: {pkt.get('pkt_s', '—')}   "
             f"seq: {pkt.get('seq', '—')}   "
             f"rssi: {rssi if rssi is not None else '—'}   "
-            f"subcarriers: {n_sc}   "
-            f"mean_amp: {mean_amp:.1f}"
+            f"total SC: {self._n_sc}   "
+            f"plotting SC #{sc_idx}   "
+            f"mean_amp: {self._smooth_mean:.1f}"
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802

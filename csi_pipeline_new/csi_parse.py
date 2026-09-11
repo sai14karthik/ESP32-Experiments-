@@ -4,12 +4,16 @@ Supported layouts (auto-detected):
   - Lab Espressif ``csi_recv_router`` (C5): seq,mac,…,comma I/Q in ``[…]``
   - XIAO ESP32-C6 (``csi/firmware``): mac,rssi,…,space I/Q in ``[…]``
   - Hernandez ESP32-CSI-Tool: role (AP/STA/PASSIVE),mac,…,space I/Q in ``[…]``
+
+I/Q convention (all formats): interleaved **imag, real, imag, real, …**
+Amplitude per subcarrier: ``hypot(imag, real)``.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -48,6 +52,20 @@ def _parse_iq_blob(data: str) -> list[int] | None:
         return None
 
 
+def iq_to_amplitudes(iq: list[int] | tuple[int, ...]) -> list[float]:
+    """Interleaved imag/real ints → per-subcarrier amplitude (pure Python).
+
+    Odd trailing sample is ignored. Empty / single-int IQ → empty list.
+    """
+    if not iq or len(iq) < 2:
+        return []
+    n = len(iq) - (len(iq) % 2)
+    out: list[float] = []
+    for i in range(0, n, 2):
+        out.append(math.hypot(float(iq[i]), float(iq[i + 1])))
+    return out
+
+
 def _base_sample(**fields: Any) -> dict[str, Any]:
     out = {
         "seq": None,
@@ -75,7 +93,7 @@ def _parse_lab(row: list[str]) -> dict[str, Any] | None:
     if len(row) < 15:
         return None
     iq = _parse_iq_blob(row[14])
-    if iq is None:
+    if iq is None or len(iq) < 2:
         return None
     return _base_sample(
         format="lab_router",
@@ -97,13 +115,15 @@ def _parse_lab(row: list[str]) -> dict[str, Any] | None:
 
 
 def _parse_xiao_c6(row: list[str]) -> dict[str, Any] | None:
-    """CSI_DATA,mac,rssi,rate,noise_floor,channel,second,bb_format,single_mpdu,
-    sig_len,rx_state,timestamp_us,rx_seq,first_word_invalid,len,[iq…]
+    """Match ``csi/firmware`` CSV:
+
+    CSI_DATA,mac,rssi,rate,noise_floor,channel,second,bb_format,single_mpdu,
+    sig_len,rx_state,timestamp_us,rx_seq,first_word_invalid,len,[imag real …]
     """
     if len(row) < 16:
         return None
     iq = _parse_iq_blob(row[15])
-    if iq is None:
+    if iq is None or len(iq) < 2:
         return None
     return _base_sample(
         format="xiao_c6",
@@ -115,7 +135,7 @@ def _parse_xiao_c6(row: list[str]) -> dict[str, Any] | None:
         rx_format=_to_int(row[7]),  # bb_format
         sig_len=_to_int(row[9]),
         device_ts=_to_int(row[11]),
-        seq=_to_int(row[12]),  # rx_seq
+        seq=_to_int(row[12]),  # rx_seq (firmware host counter)
         first_word=_to_int(row[13]),
         len=_to_int(row[14]),
         iq=iq,
@@ -127,9 +147,8 @@ def _parse_hernandez(row: list[str]) -> dict[str, Any] | None:
     if len(row) < 16:
         return None
     iq = _parse_iq_blob(row[-1])
-    if iq is None:
+    if iq is None or len(iq) < 2:
         return None
-    # Header order (approx): type,role,mac,rssi,rate,...,len,CSI_DATA
     return _base_sample(
         format="hernandez",
         mac=row[2].strip() if len(row) > 2 else "",
@@ -166,17 +185,14 @@ def parse_csi_line(line: str) -> dict[str, Any] | None:
     if second in _ROLE_TOKENS:
         return _parse_hernandez(row)
     if _MAC_RE.match(second):
-        # XIAO C6 (mac second) vs unlikely lab variant
         sample = _parse_xiao_c6(row)
         if sample is not None:
             return sample
-    # Default: lab router / C5
     sample = _parse_lab(row)
     if sample is not None:
         return sample
-    # Last resort: treat last field as I/Q blob
     iq = _parse_iq_blob(row[-1])
-    if iq is None or not iq:
+    if iq is None or len(iq) < 2:
         return None
     return _base_sample(
         format="generic",
