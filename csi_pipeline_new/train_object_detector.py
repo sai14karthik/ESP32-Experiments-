@@ -72,12 +72,14 @@ from csi_features import (
     WindowSpec,
     compute_baseline_phase_profile,
     compute_baseline_profile,
+    configure_from_iq_len,
     feature_dim,
     iq_list_to_packet,
     parse_optional_float,
     window_is_contiguous,
     window_to_features,
 )
+import csi_features as _csi_feat
 
 MIN_LABEL_FRACTION = 0.9
 META_NAMES = ("mean RSSI", "mean AGC gain", "mean FFT gain")
@@ -110,16 +112,44 @@ def derive_session_keys(session_labels: list[str]) -> list[str]:
     return keys
 
 
+def _dominant_iq_len(csv_path: Path, *, sample_rows: int = 4000) -> int:
+    """Pick the most common even I/Q length in the export (e.g. 106 vs 234)."""
+    from collections import Counter
+
+    counts: Counter[int] = Counter()
+    with csv_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        for i, row in enumerate(reader):
+            if i >= sample_rows:
+                break
+            n = len([x for x in row.get("iq", "").strip("{}").split(",") if x.strip()])
+            if n >= 16 and n % 2 == 0:
+                counts[n] += 1
+    if not counts:
+        sys.exit(f"No usable iq lengths in {csv_path}")
+    best, n_best = counts.most_common(1)[0]
+    total = sum(counts.values())
+    print(
+        f"CSI layout: dominant iq len={best} ({n_best}/{total} sampled) "
+        f"→ {best // 2} subcarriers"
+        + (f"; also seen {dict(counts)}" if len(counts) > 1 else ""),
+        flush=True,
+    )
+    return best
+
+
 def load_packets(
     csv_path: Path,
     *,
     config: FeatureConfig | None = None,
 ) -> tuple[list[PacketRecord], list[int], list[str], list[str]]:
     config = config or FeatureConfig()
+    configure_from_iq_len(_dominant_iq_len(csv_path))
     packets: list[PacketRecord] = []
     y: list[int] = []
     session_labels: list[str] = []
     session_keys: list[str] = []
+    skipped_iq = 0
 
     with csv_path.open(newline="") as f:
         reader = csv.DictReader(f)
@@ -150,7 +180,9 @@ def load_packets(
                     )
                 )
             except ValueError as exc:
-                print(f"skip bad iq row: {exc}", file=sys.stderr)
+                skipped_iq += 1
+                if skipped_iq <= 5:
+                    print(f"skip bad iq row: {exc}", file=sys.stderr)
                 y.pop()
                 continue
             session_labels.append(lab_raw)
@@ -162,8 +194,11 @@ def load_packets(
                     prev_label = lab_raw
                 session_keys.append(f"{lab_raw}#{run}")
 
+    if skipped_iq > 5:
+        print(f"skip bad iq row: … ({skipped_iq} total skipped)", file=sys.stderr)
     if not packets:
         sys.exit(f"No rows loaded from {csv_path}")
+    print(f"Loaded {len(packets)} packets @ {_csi_feat.N_SUBCARRIERS} subcarriers", flush=True)
     return packets, y, session_labels, session_keys
 
 
@@ -790,6 +825,7 @@ def save_bundle(
             "ema_alpha": 0.3,
             "baseline_profile": baseline_profile,
             "baseline_phase": baseline_phase,
+            "n_subcarriers": _csi_feat.N_SUBCARRIERS,
             "labels": {"empty": LABEL_EMPTY, "object": LABEL_OBJECT},
             "model_type": model_type,
             # Held-out metrics from before any deploy refit. These are the ones

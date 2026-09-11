@@ -36,8 +36,11 @@ import numpy as np
 
 FEATURE_VERSION = 4
 
+# Defaults match HT-LTF / HT40-style C5 packets (234 ints → 117 bins).
+# LabPSK ICMP CSI is often LLTF (106 ints → 53 bins); call
+# ``configure_subcarriers`` before training/inference on those captures.
 N_SUBCARRIERS = 117
-DEAD_1BASED = frozenset({58, 59, 60})
+DEAD_1BASED: frozenset[int] = frozenset({58, 59, 60})
 ACTIVE_IDX = np.array(
     [i for i in range(N_SUBCARRIERS) if (i + 1) not in DEAD_1BASED],
     dtype=np.int32,
@@ -57,6 +60,50 @@ BAND_LO, BAND_HI = 45, 61
 
 LABEL_EMPTY = 0
 LABEL_OBJECT = 1
+
+
+def configure_subcarriers(n_subcarriers: int) -> int:
+    """Set global layout for a CSI packet width (subcarrier count, not I/Q ints).
+
+    Common widths:
+      * 117 — HT-LTF (``len=234``), lab default for method 4.3 / HT AP replies
+      * 53  — LLTF / non-HT (``len=106``), common for LabPSK ICMP / legacy rates
+      * 57  — HT20-style
+    """
+    global N_SUBCARRIERS, DEAD_1BASED, ACTIVE_IDX, N_ACTIVE, BAND_LO, BAND_HI
+    n = int(n_subcarriers)
+    if n < 8:
+        raise ValueError(f"n_subcarriers too small: {n}")
+    N_SUBCARRIERS = n
+    if n == 117:
+        DEAD_1BASED = frozenset({58, 59, 60})
+        BAND_LO, BAND_HI = 45, 61
+    elif n == 53:
+        # Espressif LLTF packing: indices 0..26 then -26..-1; DC at bin 26.
+        DEAD_1BASED = frozenset({27})  # 1-based
+        BAND_LO, BAND_HI = 20, 32
+    elif n == 57:
+        DEAD_1BASED = frozenset({29})
+        BAND_LO, BAND_HI = 22, 34
+    else:
+        mid_1based = n // 2 + 1
+        DEAD_1BASED = frozenset({mid_1based})
+        BAND_LO = max(0, n // 2 - 8)
+        BAND_HI = min(n - 1, n // 2 + 8)
+    ACTIVE_IDX = np.array(
+        [i for i in range(N_SUBCARRIERS) if (i + 1) not in DEAD_1BASED],
+        dtype=np.int32,
+    )
+    N_ACTIVE = int(ACTIVE_IDX.size)
+    return N_SUBCARRIERS
+
+
+def configure_from_iq_len(n_iq: int) -> int:
+    """Configure from interleaved I/Q int count (must be even)."""
+    n_iq = int(n_iq)
+    if n_iq < 16 or n_iq % 2:
+        raise ValueError(f"iq length must be even and >= 16, got {n_iq}")
+    return configure_subcarriers(n_iq // 2)
 
 
 @dataclass(frozen=True)
@@ -361,7 +408,7 @@ def window_to_features(
     packets: list[PacketRecord],
     *,
     config: FeatureConfig = DEFAULT_CONFIG,
-    active_idx: np.ndarray = ACTIVE_IDX,
+    active_idx: np.ndarray | None = None,
     baseline_profile: np.ndarray | None = None,
     baseline_phase: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -372,6 +419,8 @@ def window_to_features(
     per-bin temporal delta and energy slope. Optional per ``config``: phase
     block, receiver metadata block, flattened sequence block.
     """
+    if active_idx is None:
+        active_idx = ACTIVE_IDX
     mat = np.stack([p.amp for p in packets], axis=0)[:, active_idx]
     eps = config.eps
     parts: list[np.ndarray] = []

@@ -20,6 +20,7 @@ from csi_features import (
     FEATURE_VERSION,
     LABEL_OBJECT,
     FeatureConfig,
+    configure_subcarriers,
     iq_list_to_packet,
     window_to_features,
 )
@@ -115,6 +116,9 @@ class LiveDetector:
         calibration: dict | None = None,
     ) -> None:
         self.pipe = bundle["pipeline"]
+        n_sc = bundle.get("n_subcarriers")
+        if n_sc is not None:
+            configure_subcarriers(int(n_sc))
         self.baseline_profile = bundle.get("baseline_profile")
         self.baseline_phase = bundle.get("baseline_phase")
         # A site calibration replaces both site-specific quantities at once.
