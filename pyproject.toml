@@ -13,6 +13,7 @@ dependencies = [
     "pyqtgraph",
     "pyserial",
     "scipy",
+    "sounddevice",
     "statsmodels",
 ]
 

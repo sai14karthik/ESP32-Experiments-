@@ -38,6 +38,7 @@ Same idea as Care.AI-style diagram: **local nodes in**, colleague is **RTSP clie
 - Spectrum / SaiPhone / Guest Wi-Fi workarounds as the primary path
 - Multi-laptop publish hops (Guest laptop as MediaMTX host)
 - Hospital VLANs / TLS / GCP / recording (still out of scope)
+- **MediaMTX A/V** (ESP mic PCM/AAC muxed with video) — parked; see `csi-detection-parked.mdc`. Stage 2 stays video-only until we explicitly pick this up.
 
 ## Working Stage 2 commands (reminder)
 

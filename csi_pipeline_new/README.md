@@ -182,9 +182,10 @@ cd csi_pipeline_new
 # or pin port / replay without hardware:
 ./run_csi_viz.sh --port /dev/cu.usbmodem1101   # e.g. XIAO C6
 ./run_csi_viz.sh --from-file fixtures/sample_csi_lines.csv
+./run_csi_viz.sh --mic                         # start Mac mic RMS plot
 ```
 
-Shows mean amplitude vs time, RSSI, and a subcarrier×time heatmap (status line includes `format=…`). **Do not** run ingest or `--gui` detect on the same USB port at the same time. Wireless Mini capture stays separate (`--listen-tcp`).
+Shows mean amplitude vs time, RSSI, optional mic RMS (dBFS), and a subcarrier×time heatmap (status line includes `format=…`). Click **Mic Off** → **Mic On** in the toolbar anytime. **Do not** run ingest or `--gui` detect on the same USB port at the same time. Wireless Mini capture stays separate (`--listen-tcp`).
 
 ---
 
@@ -374,7 +375,7 @@ Amplitude / phase are **not** stored; compute offline from `iq` when needed.
 | [`setup_mac.sh`](setup_mac.sh) | One-time machine setup |
 | [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `uv run --group csi`) |
 | [`run_detect.sh`](run_detect.sh) | Train / calibrate / ablate / self-test / live detect launcher |
-| [`run_csi_viz.sh`](run_csi_viz.sh) / [`csi_viz_gui.py`](csi_viz_gui.py) | Live CSI scope (USB): amp / RSSI / heatmap |
+| [`run_csi_viz.sh`](run_csi_viz.sh) / [`csi_viz_gui.py`](csi_viz_gui.py) | Live CSI scope (USB): amp / RSSI / heatmap + optional Mic RMS |
 | [`probe_recv_port.py`](probe_recv_port.py) | Detect recv USB port |
 | [`ingest_serial.py`](ingest_serial.py) | Serial/TCP/file → batch INSERT |
 | [`csi_features.py`](csi_features.py) | v4 feature builder + `FeatureConfig` (shared by train and live) |

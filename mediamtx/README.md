@@ -22,6 +22,8 @@ XIAO / webcam  →  FFmpeg (publish)  →  MediaMTX  →  viewer (you choose)
 
 Direct ESP access (no MediaMTX): open `http://<xiao-ip>/` in a browser (MJPEG on port 80 / `:81/stream`).
 
+**Firmware for Stage 2:** flash [`firmware/CameraWebServerWiFi`](../firmware/CameraWebServerWiFi/) (video-only). Do **not** need `CameraWebServerWiFiSense` (cam+mic+CSI) for MediaMTX — same `:81/stream` URL if you did flash Sense, but video-only is the safe MediaMTX target.
+
 ## Protocols — when to use which
 
 | Protocol | Port | Use when | Example URL (`cam_xiao`) |

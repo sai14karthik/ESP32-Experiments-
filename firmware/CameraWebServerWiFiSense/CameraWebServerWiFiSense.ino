@@ -3,9 +3,12 @@
 #include <WiFi.h>
 
 // ===========================
-// Video-only (MediaMTX / Stage 2). For cam+mic+CSI use CameraWebServerWiFiSense/.
+// XIAO ESP32-S3 Sense: camera + PDM mic + Wi‑Fi CSI
+// For MediaMTX video-only, flash firmware/CameraWebServerWiFi instead.
 // ===========================
 #include "board_config.h"
+#include "sense_mic.h"
+#include "sense_csi.h"
 
 // ===========================
 // Enter your WiFi credentials
@@ -21,9 +24,11 @@ void startCameraServer();
 void setupLedFlash();
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
   Serial.setDebugOutput(false);
+  Serial.setTxTimeoutMs(0);
   Serial.println();
+  Serial.println("CameraWebServerWiFiSense (cam + mic + CSI)");
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -64,7 +69,6 @@ void setup() {
   pinMode(14, INPUT_PULLUP);
 #endif
 
-  // camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
@@ -72,13 +76,11 @@ void setup() {
   }
 
   sensor_t *s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
   if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);        // flip it back
-    s->set_brightness(s, 1);   // up the brightness just a bit
-    s->set_saturation(s, -2);  // lower the saturation
+    s->set_vflip(s, 1);
+    s->set_brightness(s, 1);
+    s->set_saturation(s, -2);
   }
-  // drop down frame size for higher initial frame rate
   if (config.pixel_format == PIXFORMAT_JPEG) {
     s->set_framesize(s, FRAMESIZE_QVGA);
     s->set_quality(s, 12);
@@ -93,10 +95,11 @@ void setup() {
   s->set_vflip(s, 1);
 #endif
 
-// Setup LED FLash if LED pin is defined in camera_pins.h
 #if defined(LED_GPIO_NUM)
   setupLedFlash();
 #endif
+
+  sense_mic_start();
 
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
@@ -110,13 +113,16 @@ void setup() {
   Serial.println("WiFi connected");
 
   startCameraServer();
+  sense_csi_start();
 
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
+  Serial.println("Mic JSON: http://<ip>/mic");
+  Serial.println("Stream:   http://<ip>:81/stream");
+  Serial.println("USB:      CSI_DATA + rms: lines for cam_mic_preview.py");
 }
 
 void loop() {
-  // Do nothing. Everything is done in another task by the web server
   delay(10000);
 }

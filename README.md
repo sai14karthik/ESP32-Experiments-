@@ -6,6 +6,7 @@
 | **CSI methods** 4.1 / 4.2 / 4.3 | [docs/CSI_METHODS.md](docs/CSI_METHODS.md) |
 | **CSI pipeline** (Mini ingest / detect) | [csi_pipeline_new/README.md](csi_pipeline_new/README.md) |
 | **MediaMTX** (webcam / XIAO → VLC / browser) | [mediamtx/README.md](mediamtx/README.md) |
+| **S3 Sense multimodal** (cam+mic+CSI flash) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md) |
 | **Papers / reading** | [materials/](materials/) |
 
 ## Common commands
