@@ -50,17 +50,17 @@ from sklearn.preprocessing import StandardScaler
 
 try:
     from xgboost import XGBClassifier
-except ImportError:  # optional until uv sync --group csi
+except Exception:  # ImportError, or missing libomp on macOS (XGBoostError)
     XGBClassifier = None  # type: ignore[misc, assignment]
 
 try:
     from lightgbm import LGBMClassifier
-except ImportError:
+except Exception:
     LGBMClassifier = None  # type: ignore[misc, assignment]
 
 try:
     from catboost import CatBoostClassifier
-except ImportError:
+except Exception:
     CatBoostClassifier = None  # type: ignore[misc, assignment]
 
 from csi_features import (
