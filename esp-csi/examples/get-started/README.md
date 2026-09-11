@@ -5,11 +5,11 @@ Maps to Espressif **How to get CSI** ([`esp-csi/README.md`](../../README.md)):
 
 | § | Example | Repo helper (from camera_module root) |
 |---|---------|----------------------------------------|
-| **4.1** Router CSI | [`csi_recv_router`](./csi_recv_router) | `./scripts/set_csi_wifi.sh` · `./monitor_csi.sh` · `./plot_csi.sh` |
-| **4.2** Between devices | [`csi_between_devices`](./csi_between_devices) | `./scripts/flash_csi_between.sh` · `./plot_csi.sh` (sense port) |
-| **4.3** Specific sender | [`csi_send`](./csi_send) + [`csi_recv`](./csi_recv) | `./scripts/flash_csi_pair.sh` · `./plot_csi.sh` (recv port) |
+| **4.1** Router CSI | [`csi_recv_router`](./csi_recv_router) | `./scripts/set_csi_wifi.sh` · `./scripts/monitor_csi.sh` · `./scripts/plot_csi.sh` |
+| **4.2** Between devices | [`csi_between_devices`](./csi_between_devices) | `./scripts/flash_csi_between.sh` · `./scripts/plot_csi.sh` (sense port) |
+| **4.3** Specific sender | [`csi_send`](./csi_send) + [`csi_recv`](./csi_recv) | `./scripts/flash_csi_pair.sh` · `./scripts/plot_csi.sh` (recv port) |
 
-Full notes (ports, baud **115200**, switching): [`CSI_METHODS.md`](../../../CSI_METHODS.md).
+Full notes (ports, baud **115200**, switching): [`CSI_METHODS.md`](../../../docs/CSI_METHODS.md).
 
 ---
 
@@ -36,7 +36,7 @@ You need to prepare two development boards for espressif chips, one as the sende
     ```shell
     # from camera_module root
     ./scripts/flash_csi_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-    ./plot_csi.sh /dev/cu.usbmodem2101
+    ./scripts/plot_csi.sh /dev/cu.usbmodem2101
     ```
 
     Or manually:
@@ -57,7 +57,7 @@ You need to prepare two development boards for espressif chips, one as the sende
 
     ```shell
     # from camera_module root
-    ./plot_csi.sh /dev/cu.usbmodem2101
+    ./scripts/plot_csi.sh /dev/cu.usbmodem2101
 
     # or:
     cd esp-csi/examples/get-started/tools

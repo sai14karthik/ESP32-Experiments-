@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Official IDF CSI serial monitor. Quit with Ctrl+]
-# Usage: ./monitor_csi.sh
-#        ./monitor_csi.sh /dev/cu.usbserial-10
-#        ./monitor_csi.sh /dev/ttyUSB0
+# Usage: ./scripts/monitor_csi.sh
+#        ./scripts/monitor_csi.sh /dev/cu.usbserial-10
+#        ./scripts/monitor_csi.sh /dev/ttyUSB0
 # Optional: export IDF_ACTIVATE=/path/to/activate_idf_v6.0.2.sh
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/serial_helpers.sh
 source "$ROOT/scripts/serial_helpers.sh"
 

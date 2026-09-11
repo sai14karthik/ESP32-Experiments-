@@ -10,3 +10,6 @@
 [submodule "ESP32-CSI-Tool"]
 	path = ESP32-CSI-Tool
 	url = https://github.com/StevenMHernandez/ESP32-CSI-Tool
+[submodule "RuView"]
+	path = RuView
+	url = https://github.com/ruvnet/RuView

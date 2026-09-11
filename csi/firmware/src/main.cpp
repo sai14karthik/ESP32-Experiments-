@@ -12,22 +12,26 @@
 static_assert(csi::kFrameLen == 517,
               "collector and firmware disagree on the CSI wire format");
 
-// ── Output mode (both default on — set to 0 in secrets.h to disable) ────
+// ── Output mode (serial on for viz; UDP off by default — set 1 in secrets.h) ─
 #ifndef CSI_OUTPUT_UDP
-#define CSI_OUTPUT_UDP 1
+#define CSI_OUTPUT_UDP 0
 #endif
 #ifndef CSI_OUTPUT_SERIAL
 #define CSI_OUTPUT_SERIAL 1
 #endif
 
+#if CSI_OUTPUT_UDP
 #include "udp_sender.h"
+#endif
+
+#include <WiFiUdp.h>
 
 // ── XIAO ESP32-C6 — WiFi CSI capture (connected STA) ─────────────────────
 // Connects to 2.4 GHz WiFi, then streams Channel State Information to serial.
 //
 // CSI is only produced when the radio RECEIVES a packet, so we continuously
-// ping the gateway: every echo reply is an RX frame that fires the CSI
-// callback. Each validated sample is printed as one "CSI_DATA" CSV line.
+// ping the gateway and poke it with UDP: ACKs / echo replies fire the CSI
+// callback. Each sample is printed as one "CSI_DATA" CSV line.
 //
 // IMPORTANT — this is an 802.11ax (WiFi-6 / HE) chip. The CSI API here is the
 // HE variant (wifi_csi_config_t == wifi_csi_acquire_config_t, rx_ctrl ==
@@ -42,18 +46,31 @@ static_assert(csi::kFrameLen == 517,
 static const uint32_t CONNECT_TIMEOUT_MS      = 20000;
 static const uint32_t LED_BLINK_CONNECTING_MS = 1000;
 static const uint32_t LED_BLINK_CONNECTED_MS  = 50;
-static const uint32_t PING_INTERVAL_MS        = 50;   // ~20 Hz RX → ~20 CSI/s. Lower for a faster stream.
+static const uint32_t PING_INTERVAL_MS        = 20;   // 50 Hz ping cadence
+static const uint32_t PING_TIMEOUT_MS         = 1000; // must be >> RTT or every ping "fails"
+static const uint32_t STIM_INTERVAL_MS        = 10;   // UDP poke → AP ACKs → CSI
+// Prefer Mini (known reachable on LabPSK). Override in secrets.h if needed.
+#ifndef CSI_PING_HOST
+#define CSI_PING_HOST "10.128.93.23"
+#endif
 static const uint8_t  CSI_VAL_SCALE           = 2;    // I/Q fixed-point scale, range 0..3 on this chip. Raise if values clip at ±127.
 static const bool     USE_EXTERNAL_ANTENNA    = false; // false = onboard ceramic, true = U.FL connector
 
-#define CSI_QUEUE_LEN 24
+#define CSI_QUEUE_LEN 64
+#define CSI_LINE_MAX  1600
 
 static QueueHandle_t csiQueue = nullptr;
+#if CSI_OUTPUT_UDP
 static CsiUdpSender  *udpSender = nullptr;
+#endif
 static uint8_t  apBssid[6];
-static volatile uint32_t csiRx = 0, csiDropped = 0, csiInvalid = 0;
+static volatile uint32_t csiRx = 0, csiDropped = 0, csiInvalid = 0, csiOtherMac = 0;
+static volatile uint32_t csiSeq = 0;
+static volatile uint32_t pingOk = 0, pingFail = 0;
 static esp_ping_handle_t pingHandle = nullptr;
 static bool csiStarted = false;
+static WiFiUDP stimUdp;
+static IPAddress stimGw;
 
 // LED state
 static unsigned long lastLedToggle = 0;
@@ -89,6 +106,7 @@ static void printConnectionInfo() {
 
 static bool connectWiFi(uint32_t timeoutMs) {
   Serial.printf("\n# Connecting to \"%s\" ...\n", WIFI_SSID);
+  WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED) {
@@ -110,13 +128,24 @@ static bool connectWiFi(uint32_t timeoutMs) {
 // The driver frees info->buf right after we return, so copy it here. We push
 // a fixed-size record to a queue; a separate task does the slow serial print.
 static void csiRxCallback(void *ctx, wifi_csi_info_t *info) {
-  if (!info || !info->buf || info->len == 0) return;
+  if (!info || !info->buf) return;
+  if (info->len == 0) return;
 
-  // Drop the C6's intermittent stale/garbage CSI. This gate is essential.
-  if (!info->rx_ctrl.rx_channel_estimate_info_vld) { csiInvalid++; return; }
+  // Espressif csi_recv_router does not gate on rx_channel_estimate_info_vld;
+  // on LabPSK that bit often stays 0 even when buf/len are usable.
+  if (!info->rx_ctrl.rx_channel_estimate_info_vld) {
+    uint32_t v = csiInvalid;
+    csiInvalid = v + 1;
+  }
 
-  // Keep only frames from our AP (BSSID passed as ctx).
-  if (ctx && memcmp(info->mac, (const uint8_t *)ctx, 6) != 0) return;
+  // Keep only frames from our AP (BSSID passed as ctx). Optional: pass
+  // nullptr to accept any transmitter (needed on some LabPSK paths where
+  // info->mac is not the BSSID).
+  if (ctx && memcmp(info->mac, (const uint8_t *)ctx, 6) != 0) {
+    uint32_t v = csiOtherMac;
+    csiOtherMac = v + 1;
+    return;
+  }
 
   int off = info->first_word_invalid ? 4 : 0;   // first I/Q pair invalid on HW limitation
   int n = (int)info->len - off;
@@ -126,10 +155,12 @@ static void csiRxCallback(void *ctx, wifi_csi_info_t *info) {
   CsiRecord rec;
   memcpy(rec.data, info->buf + off, n);
   rec.n   = n;
-  rec.len = info->len;
+  rec.len = (uint16_t)n;  // bytes actually printed / queued (after first-word skip)
   memcpy(rec.mac, info->mac, 6);
   rec.first_word_inv = info->first_word_invalid ? 1 : 0;
-  rec.rx_seq = info->rx_seq;
+  uint32_t seq = csiSeq + 1;
+  csiSeq = seq;
+  rec.rx_seq = (uint16_t)seq;
 
   const wifi_pkt_rx_ctrl_t &c = info->rx_ctrl;
   rec.rssi        = c.rssi;
@@ -143,61 +174,129 @@ static void csiRxCallback(void *ctx, wifi_csi_info_t *info) {
   rec.rx_state    = c.rx_state;
   rec.timestamp   = c.timestamp;
 
-  csiRx++;
-  if (xQueueSend(csiQueue, &rec, 0) != pdTRUE) csiDropped++;   // never block the WiFi task
+  uint32_t rx = csiRx + 1;
+  csiRx = rx;
+  if (xQueueSend(csiQueue, &rec, 0) != pdTRUE) {
+    uint32_t d = csiDropped + 1;
+    csiDropped = d;
+  }
 }
 
 // ── Consumer task — serial + conditional UDP/serial output ───────────────
 static void csiConsumerTask(void *) {
   CsiRecord rec;
+  char line[CSI_LINE_MAX];
   unsigned long lastStats = 0;
+  uint32_t rxSnap = 0;
   for (;;) {
-    if (xQueueReceive(csiQueue, &rec, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xQueueReceive(csiQueue, &rec, pdMS_TO_TICKS(50)) == pdTRUE) {
 #if CSI_OUTPUT_UDP
       if (udpSender) udpSender->send(rec);
 #endif
 
 #if CSI_OUTPUT_SERIAL
-      // Serial.printf("CSI_DATA,%02x:%02x:%02x:%02x:%02x:%02x,%d,%u,%d,%u,%u,%u,%u,%u,%u,%lu,%u,%u,%u,[",
-      //               rec.mac[0], rec.mac[1], rec.mac[2], rec.mac[3], rec.mac[4], rec.mac[5],
-      //               (int)rec.rssi, rec.rate, (int)rec.noise_floor, rec.channel, rec.second,
-      //               rec.bb_format, rec.single_mpdu, rec.sig_len, rec.rx_state,
-      //               (unsigned long)rec.timestamp, rec.rx_seq, rec.first_word_inv, rec.len);
-      // for (int i = 0; i < rec.n; i++) {
-      //   Serial.print((int)rec.data[i]);
-      //   if (i + 1 < rec.n) Serial.print(' ');
-      // }
-      // Serial.println(']');
+      int o = snprintf(
+          line, sizeof(line),
+          "CSI_DATA,%02x:%02x:%02x:%02x:%02x:%02x,%d,%u,%d,%u,%u,%u,%u,%u,%u,%lu,%u,%u,%u,[",
+          rec.mac[0], rec.mac[1], rec.mac[2], rec.mac[3], rec.mac[4], rec.mac[5],
+          (int)rec.rssi, rec.rate, (int)rec.noise_floor, rec.channel, rec.second,
+          rec.bb_format, rec.single_mpdu, rec.sig_len, rec.rx_state,
+          (unsigned long)rec.timestamp, rec.rx_seq, rec.first_word_inv, rec.len);
+      if (o < 0) continue;
+      for (int i = 0; i < rec.n && o < (int)sizeof(line) - 12; i++) {
+        int n = snprintf(line + o, sizeof(line) - (size_t)o, i ? " %d" : "%d", (int)rec.data[i]);
+        if (n < 0) { o = -1; break; }
+        o += n;
+      }
+      if (o < 0 || o >= (int)sizeof(line) - 3) {
+        uint32_t d = csiDropped + 1;
+        csiDropped = d;
+        continue;
+      }
+      line[o++] = ']';
+      line[o++] = '\n';
+      size_t wrote = Serial.write((const uint8_t *)line, (size_t)o);
+      if (wrote != (size_t)o) {
+        Serial.write('\n');
+        uint32_t d = csiDropped + 1;
+        csiDropped = d;
+      }
 #endif
     }
-    if (millis() - lastStats >= 2000) {
+    if (millis() - lastStats >= 1000) {
       lastStats = millis();
-      // Serial.printf("# rx=%lu dropped=%lu invalid=%lu rssi=%d\n",
-      //               (unsigned long)csiRx, (unsigned long)csiDropped,
-      //               (unsigned long)csiInvalid, WiFi.RSSI());
+      uint32_t rx = csiRx;
+      uint32_t dps = rx - rxSnap;
+      rxSnap = rx;
+      Serial.printf("# csi/s=%lu rx=%lu dropped=%lu invalid=%lu ping_ok=%lu ping_fail=%lu rssi=%d\n",
+                    (unsigned long)dps, (unsigned long)rx, (unsigned long)csiDropped,
+                    (unsigned long)csiInvalid, (unsigned long)pingOk, (unsigned long)pingFail,
+                    WiFi.RSSI());
     }
   }
 }
 
-// ── Generate steady RX by pinging the gateway forever ────────────────────
+static void onPingSuccess(esp_ping_handle_t, void *) { pingOk++; }
+static void onPingTimeout(esp_ping_handle_t, void *) { pingFail++; }
+
+// ── Generate steady RX by pinging a reachable host forever ───────────────
+static bool resolvePingTarget(IPAddress *out) {
+  IPAddress host;
+  if (host.fromString(CSI_PING_HOST)) {
+    *out = host;
+    return true;
+  }
+  *out = WiFi.gatewayIP();
+  return (uint32_t)(*out) != 0;
+}
+
 static void startPing() {
-  IPAddress gw = WiFi.gatewayIP();
+  IPAddress dest;
+  if (!resolvePingTarget(&dest)) {
+    Serial.println("# WARNING: no ping target — CSI will only come from beacons/ACKs");
+    return;
+  }
   ip_addr_t target;
-  IP_ADDR4(&target, gw[0], gw[1], gw[2], gw[3]);
+  IP_ADDR4(&target, dest[0], dest[1], dest[2], dest[3]);
 
   esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
-  cfg.target_addr = target;
-  cfg.count       = ESP_PING_COUNT_INFINITE;   // 0 = run forever
-  cfg.interval_ms = PING_INTERVAL_MS;
-  cfg.data_size   = 1;
+  cfg.target_addr     = target;
+  cfg.count           = ESP_PING_COUNT_INFINITE;
+  cfg.interval_ms     = PING_INTERVAL_MS;
+  cfg.timeout_ms      = PING_TIMEOUT_MS;
+  cfg.data_size       = 32;
+  cfg.task_stack_size = 4096;
 
-  esp_ping_callbacks_t cbs = {};               // CSI arrives via the WiFi cb, not these
+  esp_ping_callbacks_t cbs = {};
+  cbs.on_ping_success = onPingSuccess;
+  cbs.on_ping_timeout = onPingTimeout;
   if (esp_ping_new_session(&cfg, &cbs, &pingHandle) == ESP_OK) {
     esp_ping_start(pingHandle);
-    Serial.printf("# Pinging gateway %s every %lu ms to drive CSI\n",
-                  gw.toString().c_str(), (unsigned long)PING_INTERVAL_MS);
+    Serial.printf("# Pinging %s every %lu ms (timeout %lu ms) to drive CSI\n",
+                  dest.toString().c_str(),
+                  (unsigned long)PING_INTERVAL_MS,
+                  (unsigned long)PING_TIMEOUT_MS);
   } else {
     Serial.println("# WARNING: failed to start ping session — CSI will only come from beacons");
+  }
+}
+
+// Extra TX → AP ACKs (dump_ack_en). Helps when ICMP replies are sparse.
+static void stimTask(void *) {
+  IPAddress dest;
+  if (!resolvePingTarget(&dest)) dest = WiFi.gatewayIP();
+  stimGw = dest;
+  stimUdp.begin(0);
+  const uint8_t payload[] = {'C', 'S', 'I'};
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      // Discard port — Mini/gw may ignore payload; AP still ACKs the 802.11 frame.
+      if (stimUdp.beginPacket(stimGw, 9)) {
+        stimUdp.write(payload, sizeof(payload));
+        stimUdp.endPacket();
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(STIM_INTERVAL_MS));
   }
 }
 
@@ -205,18 +304,30 @@ static void startPing() {
 static void startCsiCapture() {
   memcpy(apBssid, WiFi.BSSID(), 6);
 
-  // Only fields that exist in wifi_csi_acquire_config_t on the C6 (MAC v2).
+  // Match esp-csi csi_recv_router C6 config (MAC v2 / CONFIG_SOC_WIFI_MAC_VERSION_NUM==2).
   wifi_csi_config_t csi = {};
-  csi.enable             = 1;
-  csi.acquire_csi_legacy = 1;   // L-LTF from 11g/legacy frames (beacons, ACKs)
-  csi.acquire_csi_ht20   = 1;   // HT-LTF from HT20 — most single-STA 11n traffic
-  csi.acquire_csi_ht40   = 1;   // HT-LTF from HT40
-  csi.acquire_csi_su     = 1;   // HE-LTF from HE20 SU — if the router uses 11ax
-  csi.val_scale_cfg      = CSI_VAL_SCALE;
+  csi.enable                 = 1;
+  csi.acquire_csi_legacy     = 1;   // L-LTF (beacons, many data/ACK)
+  csi.acquire_csi_ht20       = 1;
+  csi.acquire_csi_ht40       = 1;
+  csi.acquire_csi_su         = 1;   // Lab AP may reply as HE-SU
+  csi.acquire_csi_mu         = 0;
+  csi.acquire_csi_dcm        = 0;
+  csi.acquire_csi_beamformed = 0;
+  csi.acquire_csi_he_stbc    = 2;
+  csi.val_scale_cfg          = CSI_VAL_SCALE;  // 0..3 on C6
+  csi.dump_ack_en            = 1;   // ping ACKs + echo replies both matter
 
   ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi));
-  ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csiRxCallback, apBssid));
+  // nullptr = no BSSID filter. LabPSK sometimes reports a non-BSSID TA in
+  // info->mac; filtering would yield zero CSI_DATA lines for the visualizer.
+  ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csiRxCallback, nullptr));
   ESP_ERROR_CHECK(esp_wifi_set_csi(true));
+  // IDF: STA alone only sees AP-directed frames; promiscuous pulls far more CSI.
+  ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  Serial.printf("# CSI filter: any MAC + promiscuous (AP BSSID %02x:%02x:%02x:%02x:%02x:%02x)\n",
+                apBssid[0], apBssid[1], apBssid[2], apBssid[3], apBssid[4], apBssid[5]);
 
   csiQueue = xQueueCreate(CSI_QUEUE_LEN, sizeof(CsiRecord));
 
@@ -228,17 +339,15 @@ static void startCsiCapture() {
     delete udpSender;
     udpSender = nullptr;
   }
-#endif
-
-#if CSI_OUTPUT_UDP
   Serial.println("# Output: serial + UDP");
 #elif CSI_OUTPUT_SERIAL
-  Serial.println("# Output: serial only");
+  Serial.println("# Output: serial only (UDP collector off)");
 #else
-  Serial.println("# Output: UDP only");
+  Serial.println("# Output: none");
 #endif
 
-  xTaskCreate(csiConsumerTask, "csiConsumer", 4096, nullptr, 1, nullptr);
+  xTaskCreate(csiConsumerTask, "csiConsumer", 6144, nullptr, 2, nullptr);
+  xTaskCreate(stimTask, "csiStim", 3072, nullptr, 1, nullptr);
 
 #if CSI_OUTPUT_SERIAL
   Serial.println("# columns: CSI_DATA,src_mac,rssi,rate,noise_floor,channel,second,"
@@ -253,7 +362,8 @@ static void startCsiCapture() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0);  // USB-CDC: don't block csiConsumerTask (and thus UDP) if the host can't keep up
+  // Prefer complete lines over never-block; corrupt CSI breaks the visualizer.
+  Serial.setTxTimeoutMs(50);
   pinMode(LED_BUILTIN, OUTPUT);
   setLed(false);
   delay(1000);

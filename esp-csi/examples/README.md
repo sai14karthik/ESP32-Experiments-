@@ -10,7 +10,7 @@ This directory contains multiple example projects for esp-csi. These examples ar
 | 4.2 | CSI between devices (same AP) | `get-started/csi_between_devices` |
 | 4.3 | CSI from a specific / broadcast sender | `get-started/csi_send` + `get-started/csi_recv` |
 
-Repo-root helpers for ESP32-C5 (baud 115200, flash scripts): see [`CSI_METHODS.md`](../../CSI_METHODS.md).
+Repo-root helpers for ESP32-C5 (baud 115200, flash scripts): see [`CSI_METHODS.md`](../../docs/CSI_METHODS.md).
 
 - `get-started/csi_recv`: A basic CSI data reception example showing how to obtain CSI information via a Wi-Fi receiver.
 - `get-started/csi_send`: A basic CSI transmission example designed to work with `csi_recv`, sending Wi-Fi packets for the receiver to extract CSI.

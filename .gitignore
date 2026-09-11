@@ -81,3 +81,4 @@ csi_pipeline/exports/*.csv
 /Hands-on Wireless Sensing/
 /docs/
 /data/
+ngrok.log

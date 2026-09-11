@@ -8,7 +8,7 @@ End-to-end guide for the **Mac Mini** as the data host: flash ESP32-C5 boards, c
 | **4.2** | Between devices | **Yes** | 2× C5 | **Sense** board (peer traffic) |
 | **4.3** | ESP-NOW pair | **No** | 2× C5 | **Recv** board (sender on power only) |
 
-Firmware flashing is documented in [`CSI_METHODS.md`](../CSI_METHODS.md) and [`install.MD`](../install.MD). This doc focuses on **running captures on the Mini** and **Postgres ingest**.
+Firmware flashing is documented in [`CSI_METHODS.md`](../docs/CSI_METHODS.md) and [`install.md`](../docs/install.md). This doc focuses on **running captures on the Mini** and **Postgres ingest**.
 
 ---
 
@@ -31,7 +31,7 @@ Firmware flashing is documented in [`CSI_METHODS.md`](../CSI_METHODS.md) and [`i
 
 **Rule:** Only the board that **prints `CSI_DATA`** needs USB on the Mini. The other board (4.2 peer, 4.3 sender) only needs power and radio range.
 
-**Do not** run `idf.py monitor`, `screen`, or `plot_csi.sh` on the same port while `run_ingest.sh` is running.
+**Do not** run `idf.py monitor`, `screen`, or `./scripts/plot_csi.sh` on the same port while `run_ingest.sh` is running.
 
 ---
 
@@ -39,7 +39,7 @@ Firmware flashing is documented in [`CSI_METHODS.md`](../CSI_METHODS.md) and [`i
 
 ### 1. Clone repo & ESP-IDF (for flashing)
 
-Follow [`install.MD`](../install.MD) — ESP-IDF **6.0.x**, flash helpers under `scripts/`.
+Follow [`install.md`](../docs/install.md) — ESP-IDF **6.0.x**, flash helpers under `scripts/`.
 
 ```bash
 cd ~/Desktop/camera_module   # or your clone path
@@ -223,7 +223,7 @@ WHERE session_id = (SELECT id FROM csi_sessions ORDER BY started_at DESC LIMIT 1
 | `mac` | Your **router / AP BSSID** (not `1a:00:…`) |
 | AP | Required and must match flash credentials |
 
-**Note:** `./monitor_csi.sh` is only for 4.1 debugging — do not use it at the same time as ingest.
+**Note:** `./scripts/monitor_csi.sh` is only for 4.1 debugging — do not use it at the same time as ingest.
 
 ---
 
@@ -357,8 +357,8 @@ Copy `exports/` to another machine via AirDrop, `scp`, or shared drive.
 | [`ingest_serial.py`](ingest_serial.py) | Serial → Postgres |
 | [`schema.sql`](schema.sql) | DB tables |
 | [`queries.sql`](queries.sql) | SQL snippets |
-| [`../CSI_METHODS.md`](../CSI_METHODS.md) | Flash & monitor details |
-| [`../install.MD`](../install.MD) | IDF & first-time toolchain |
+| [`../docs/CSI_METHODS.md`](../docs/CSI_METHODS.md) | Flash & monitor details |
+| [`../docs/install.md`](../docs/install.md) | IDF & first-time toolchain |
 
 ---
 

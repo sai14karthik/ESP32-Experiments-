@@ -148,5 +148,5 @@ bash --noprofile --norc -c '
 
 echo
 echo "Done. Turn on that Wi-Fi / hotspot, then:"
-echo "  ./monitor_csi.sh"
+echo "  ./scripts/monitor_csi.sh"
 echo "Look for: Connecting to $SSID ... connected with $SSID"

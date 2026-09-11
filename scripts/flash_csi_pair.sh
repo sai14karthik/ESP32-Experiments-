@@ -101,8 +101,8 @@ bash --noprofile --norc -c '
 
 echo
 echo "Done. Place boards >1 m apart, then:"
-echo "  ./plot_csi.sh $RECV_PORT"
-echo "  # or: ./monitor_csi.sh is for router mode — for this pair use:"
+echo "  ./scripts/plot_csi.sh $RECV_PORT"
+echo "  # or: ./scripts/monitor_csi.sh is for router mode — for this pair use:"
 echo "  # idf.py -p $RECV_PORT monitor   (from csi_recv dir, after IDF activate)"
 echo
 echo "Sender MAC expected by recv filter: 1a:00:00:00:00:00"

@@ -74,7 +74,7 @@ ipconfig getifaddr en0
 
 
 
-# ESP-IDF activate (path varies per laptop — or rely on ./monitor_csi.sh auto-detect)
+# ESP-IDF activate (path varies per laptop — or rely on ./scripts/monitor_csi.sh auto-detect)
 # source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
 # cd esp-csi/examples/get-started/csi_recv_router
 # idf.py set-target esp32c5
@@ -82,6 +82,6 @@ ipconfig getifaddr en0
 
 
 # Official IDF CSI serial. Quit with Ctrl+]
-./monitor_csi.sh
-# ./monitor_csi.sh /dev/cu.usbserial-10
-# ./monitor_csi.sh /dev/ttyUSB0
+./scripts/monitor_csi.sh
+# ./scripts/monitor_csi.sh /dev/cu.usbserial-10
+# ./scripts/monitor_csi.sh /dev/ttyUSB0

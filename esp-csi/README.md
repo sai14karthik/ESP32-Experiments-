@@ -72,7 +72,7 @@ Provides some applications using CSI data, including RainMaker cloud reporting a
 - **Disadvantages:** In addition to the ordinary ESP32, it is also necessary to add a special package issuing equipment, the cost is the same and higher.
 - **Applicable scenarios:** Suitable for scenarios that require high accuracy and multi-device cluster positioning.
 
-**Ready examples in this tree (ESP32-C5 helpers in repo root [`CSI_METHODS.md`](../CSI_METHODS.md)):**
+**Ready examples in this tree (ESP32-C5 helpers in repo root [`CSI_METHODS.md`](../docs/CSI_METHODS.md)):**
 
 | § | Example |
 |---|--------|

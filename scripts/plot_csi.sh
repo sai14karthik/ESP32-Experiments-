@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Live CSI amplitude/phase plotter. Stop with Ctrl+C.
-# Do not run this at the same time as ./monitor_csi.sh (same USB port).
-# Usage: ./plot_csi.sh
-#        ./plot_csi.sh /dev/cu.usbserial-10
-#        ./plot_csi.sh /dev/ttyUSB0
+# Do not run this at the same time as ./scripts/monitor_csi.sh (same USB port).
+# Usage: ./scripts/plot_csi.sh
+#        ./scripts/plot_csi.sh /dev/cu.usbserial-10
+#        ./scripts/plot_csi.sh /dev/ttyUSB0
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/serial_helpers.sh
 source "$ROOT/scripts/serial_helpers.sh"
 
@@ -30,7 +30,7 @@ if ! PORT="$(pick_usb_serial "${1:-}")"; then
 fi
 
 if command -v lsof >/dev/null 2>&1 && lsof "$PORT" >/dev/null 2>&1; then
-  echo "Port $PORT is already in use. Quit idf.py monitor or ./monitor_csi.sh first (Ctrl+])."
+  echo "Port $PORT is already in use. Quit idf.py monitor or ./scripts/monitor_csi.sh first (Ctrl+])."
   lsof "$PORT" || true
   exit 1
 fi

@@ -58,7 +58,7 @@ Smoke test:
 uv run python -c "import serial, numpy; print('python ok')"
 ```
 
-Use `./plot_csi.sh` or `uv run python …` — not a system-wide random Python.
+Use `./scripts/plot_csi.sh` or `uv run python …` — not a system-wide random Python.
 
 ---
 
@@ -150,17 +150,17 @@ Examples:
 ```bash
 # 4.1 — one board + hotspot/router
 ./scripts/set_csi_wifi.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101
-./monitor_csi.sh /dev/cu.usbmodem101          # quit with Ctrl+]
-./plot_csi.sh /dev/cu.usbmodem101
+./scripts/monitor_csi.sh /dev/cu.usbmodem101          # quit with Ctrl+]
+./scripts/plot_csi.sh /dev/cu.usbmodem101
 
 # 4.2 — two boards on same AP (plot sense port)
 ./scripts/flash_csi_between.sh 'SaiPhone' '123456789' \
   /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-./plot_csi.sh /dev/cu.usbmodem2101
+./scripts/plot_csi.sh /dev/cu.usbmodem2101
 
 # 4.3 — two boards, no AP (plot recv port)
 ./scripts/flash_csi_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-./plot_csi.sh /dev/cu.usbmodem2101
+./scripts/plot_csi.sh /dev/cu.usbmodem2101
 ```
 
 Wi‑Fi secrets for 4.1/4.2 are written to gitignored `sdkconfig.defaults.local` (never commit passwords).
@@ -202,7 +202,7 @@ ls /dev/cu.usb* /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
 
 ## 6. Windows notes
 
-- Prefer **Git Bash** or **WSL** for `./scripts/*.sh`, `./monitor_csi.sh`, `./plot_csi.sh`.
+- Prefer **Git Bash** or **WSL** for `./scripts/*.sh`, `./scripts/monitor_csi.sh`, `./scripts/plot_csi.sh`.
 - Or: `uv sync` then  
   `uv run python esp-csi/examples/get-started/tools/csi_data_read_parse.py -p COMx`
 - PyQt plotter needs a display (not headless).

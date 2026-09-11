@@ -9,5 +9,5 @@ This repo uses **uv** and `.venv` at the workspace root. Do not install packages
 
 - Create/update: `uv sync` from the repo root
 - Run: `uv run python …` or `${workspaceFolder}/.venv/bin/python`
-- Shell wrappers (e.g. `plot_csi.sh`) must call `.venv/bin/python`, not `python3`
+- Shell wrappers (e.g. `./scripts/plot_csi.sh`) must call `.venv/bin/python`, not `python3`
 - Add new deps in `pyproject.toml`, then `uv sync`

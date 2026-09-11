@@ -11,7 +11,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+TOOLS = Path(__file__).resolve().parent
+ROOT = TOOLS.parent.parent  # repo root (firmware/tools/ → …)
 URL_HEADER = ROOT / "firmware" / "CameraRemoteUpload" / "upload_url.h"
 NGROK_DOMAIN = "silica-cosigner-quail.ngrok-free.dev"
 
@@ -66,7 +67,7 @@ def stop_leftovers() -> None:
 def main() -> None:
     os.chdir(ROOT)
     stop_leftovers()
-    server = subprocess.Popen([sys.executable, str(ROOT / "remote_server.py")])
+    server = subprocess.Popen([sys.executable, str(TOOLS / "remote_server.py")])
     time.sleep(0.6)
     ngrok_log = open(ROOT / "ngrok.log", "w")
     ngrok = subprocess.Popen(

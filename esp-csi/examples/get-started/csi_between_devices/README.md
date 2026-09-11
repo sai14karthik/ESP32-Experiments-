@@ -15,10 +15,10 @@ Both boards join Wi‑Fi and ping the gateway. The **sense** board enables promi
 
 ```bash
 ./scripts/flash_csi_between.sh 'SSID' 'PASSWORD' [peer-port] [sense-port]
-./plot_csi.sh <sense-port>
+./scripts/plot_csi.sh <sense-port>
 ```
 
-See also [CSI_METHODS.md](../../../../CSI_METHODS.md) at the repo root.
+See also [CSI_METHODS.md](../../../../docs/CSI_METHODS.md) at the repo root.
 
 ## Manual flash
 
