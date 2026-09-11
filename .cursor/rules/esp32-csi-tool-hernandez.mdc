@@ -1,0 +1,36 @@
+---
+description: ESP32-CSI-Tool (Hernandez) — reference only, not lab path
+alwaysApply: true
+---
+
+# ESP32-CSI-Tool-master (learned)
+
+Path: submodule `ESP32-CSI-Tool/` — [StevenMHernandez/ESP32-CSI-Tool](https://github.com/StevenMHernandez/ESP32-CSI-Tool) (MIT, WoWMoM 2020). Academic **classic ESP32** CSI kit.
+
+## What it is
+
+- **IDF v4.3**, classic ESP32 (2.4 GHz) — **not** ESP32-C5, **not** your Mini TCP path
+- Three firmwares: `active_sta` (TX/UDP), `active_ap` (SoftAP RX), `passive` (promiscuous)
+- Host: `python_utils/` serial plot / parse / rate — **no Postgres**
+
+## Architecture (≠ lab 4.1)
+
+```
+active_sta ──UDP to SoftAP──► active_ap (CSI on RX)
+```
+
+- Not ESP-NOW, not router-ping method 4.1
+- SoftAP pair ≈ cousin of lab **4.2**; stock UDP targets `192.168.4.1` (SoftAP), not LabPSK
+
+## Data format (incompatible with lab)
+
+Hernandez CSV has `role` (AP/STA/PASSIVE), space-separated I/Q.  
+Lab `csi_recv_router` has `seq`, comma-separated I/Q → Postgres. **Do not mix without an adapter.**
+
+## Lab policy
+
+Keep as **literature / alternate ESP32 SoftAP reference**. Production path stays:
+
+`csi_recv_router` (C5, LabPSK, method 4.1) → TCP :9055 → Mac Mini → Postgres.
+
+Do not replace Mini ingest or C5 firmware with this tree.
