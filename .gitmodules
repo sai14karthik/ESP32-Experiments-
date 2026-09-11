@@ -13,3 +13,6 @@
 [submodule "RuView"]
 	path = RuView
 	url = https://github.com/ruvnet/RuView
+[submodule "espectre"]
+	path = espectre
+	url = https://github.com/francescopace/espectre
