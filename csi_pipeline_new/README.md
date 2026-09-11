@@ -168,6 +168,22 @@ More detail: [`MAC_MINI.md` — Wireless ingest](MAC_MINI.md#wireless-ingest-no-
 
 ---
 
+### Live CSI visualizer (this laptop + USB)
+
+Plug the ESP into **this Mac**, then:
+
+```bash
+cd csi_pipeline_new
+./run_csi_viz.sh
+# or pin port / replay without hardware:
+./run_csi_viz.sh --port /dev/cu.usbmodem2101
+./run_csi_viz.sh --from-file fixtures/sample_csi_lines.csv
+```
+
+Shows mean amplitude vs time, RSSI, and a subcarrier×time heatmap. **Do not** run ingest or `--gui` detect on the same USB port at the same time. Wireless Mini capture stays separate (`--listen-tcp`).
+
+---
+
 ## 3b. Real-time object detection (Mac Mini)
 
 Trained on `baseline_*` vs `object_*` exports. Reads the same USB serial stream as ingest (do **not** run both on one port).
@@ -354,6 +370,7 @@ Amplitude / phase are **not** stored; compute offline from `iq` when needed.
 | [`setup_mac.sh`](setup_mac.sh) | One-time machine setup |
 | [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `uv run --group csi`) |
 | [`run_detect.sh`](run_detect.sh) | Train / calibrate / ablate / self-test / live detect launcher |
+| [`run_csi_viz.sh`](run_csi_viz.sh) / [`csi_viz_gui.py`](csi_viz_gui.py) | Live CSI scope (USB): amp / RSSI / heatmap |
 | [`probe_recv_port.py`](probe_recv_port.py) | Detect recv USB port |
 | [`ingest_serial.py`](ingest_serial.py) | Serial/TCP/file → batch INSERT |
 | [`csi_features.py`](csi_features.py) | v4 feature builder + `FeatureConfig` (shared by train and live) |
