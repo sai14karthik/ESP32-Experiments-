@@ -352,6 +352,8 @@ def _ingest_stream(
     last_sample = time.monotonic()
     last_idle_warn = 0.0
     last_by_source: dict[str, float] = {}
+    last_status = time.monotonic()
+    status_s = 30.0
     total = 0
     seen_sources: set[str] = set()
     try:
@@ -363,6 +365,21 @@ def _ingest_stream(
                     batch.clear()
                     last_flush = now
                     print(f"flushed total={total}", flush=True)
+                if (
+                    last_by_source
+                    and status_s > 0
+                    and (now - last_status) >= status_s
+                ):
+                    parts = []
+                    for sid in sorted(last_by_source):
+                        age = now - last_by_source[sid]
+                        parts.append(f"{sid}({age:.0f}s ago)")
+                    print(
+                        f"status: {len(last_by_source)} source(s) "
+                        f"rows={total}  {' '.join(parts)}",
+                        flush=True,
+                    )
+                    last_status = now
                 if idle_warn_s > 0 and (now - last_idle_warn) >= idle_warn_s:
                     quiet = [
                         sid
@@ -521,7 +538,10 @@ def run(args: argparse.Namespace) -> None:
                     except Exception as exc:  # noqa: BLE001
                         print(f"final flush failed: {exc}", file=sys.stderr)
             elif listen_tcp is not None:
-                print("Ctrl+C to stop (multiple C5s may connect)")
+                print(
+                    "Ctrl+C to stop — ingesting from ALL connected C5s "
+                    "(boards reconnect on their own if Mini listens)"
+                )
                 total = _ingest_stream(
                     conn,
                     session_id,

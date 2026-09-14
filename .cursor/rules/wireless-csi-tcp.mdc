@@ -19,9 +19,10 @@ Lab room 207: **three** wall-powered C5 receivers (method 4.1), same AP, one Min
 
 - Firmware: `esp-csi/examples/get-started/csi_recv_router` (`csi_tcp_forward.c`, Kconfig `CSI_TCP_*`)
 - Flash each board: `CSI_TCP_HOST=<mini_ip> ./scripts/set_csi_wifi.sh …` (same Mini IP on all)
-- Ingest: `csi_pipeline_new/./run_ingest.sh --listen-tcp 9055 --method 4.1 --label …`
+- Ingest: `csi_pipeline_new/./run_multi_ingest.sh` (or `./run_ingest.sh --listen-tcp 9055 …`)
 - Docs: `csi_pipeline_new/README.md` (Wireless CSI over TCP) + `MAC_MINI.md`
 
+**Ops model:** flash each C5 once (`CSI_TCP_HOST=<mini_ip>`). Whenever Mini runs multi-ingest, **every powered board** that can reach `:9055` fans in automatically; no per-board start step. One board down does not stop ingest from the rest.
 ## Lab facts (room 207)
 
 - Mini LabPSK IP (Ethernet): **`10.128.93.23`**

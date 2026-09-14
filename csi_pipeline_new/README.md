@@ -98,7 +98,8 @@ ifconfig | grep -A4 'en0\|en1'
 
 ```bash
 cd ~/Desktop/ESP32-Experiments-/csi_pipeline_new   # or your clone path
-./run_ingest.sh --listen-tcp 9055 --method 4.1 --label baseline_room_empty
+./run_multi_ingest.sh --label baseline_room_empty
+# equivalent: ./run_ingest.sh --listen-tcp 9055 --method 4.1 --label …
 ```
 
 You should see:
@@ -109,7 +110,7 @@ client connected 10.128.93.29:… (active=1)
 client connected 10.128.93.31:… (active=2)
 ```
 
-Leave this running. Session `recv_port` is stored as `tcp:9055:multi`. Each board’s rows get `source_id` = its LabPSK IP. Flash **every** C5 with the same `CSI_TCP_HOST` (Mini IP).
+Leave this running. Session `recv_port` is stored as `tcp:9055:multi`. Each board’s rows get `source_id` = its LabPSK IP. Flash **every** C5 once with the same `CSI_TCP_HOST` (Mini IP); after that, any powered board auto-connects whenever this script is listening. One board offline does not stop the others.
 
 #### Step 3 — Flash C5 once (USB only for this step)
 
