@@ -45,8 +45,7 @@ hlsSegmentCount: 7
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
-# Do NOT gather 127.0.0.1 from interfaces (log showed host/udp/127.0.0.1/8189
-# → remote clients peer-connection-closed). Only advertise Mini LabPSK IP.
+# Required for LabPSK: never advertise 127.0.0.1 to remote browsers.
 webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: [10.128.93.23]
 webrtcLocalUDPAddress: :8189

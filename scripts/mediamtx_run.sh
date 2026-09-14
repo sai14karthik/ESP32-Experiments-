@@ -59,10 +59,11 @@ sed "s|__CAM_XIAO_RUN_ON_INIT__|${INIT_CMD}|" "$CONF_SRC" >"$CONF_RT"
 
 echo "MediaMTX lab config: $CONF_RT" >&2
 echo "  XIAO source: $XIAO_URL  (capture polls + MTX restart = continuous)" >&2
-echo "  RTSP   rtsp://127.0.0.1:8554/cam_xiao" >&2
 echo "  HLS    http://127.0.0.1:8888/cam_xiao/" >&2
 echo "  WebRTC http://127.0.0.1:8889/cam_xiao/" >&2
-echo "  Colleague: rtsp://10.128.93.23:8554/cam_xiao" >&2
+echo "  Colleague HLS:    http://10.128.93.23:8888/cam_xiao/" >&2
+echo "  Colleague WebRTC: http://10.128.93.23:8889/cam_xiao/" >&2
+echo "  RTSP   rtsp://10.128.93.23:8554/cam_xiao" >&2
 echo "Ctrl+C to stop (stops MTX + auto-publish)." >&2
 
 exec mediamtx "$CONF_RT"
