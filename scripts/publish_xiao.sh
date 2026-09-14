@@ -1,27 +1,36 @@
 #!/usr/bin/env bash
 # Bridge XIAO CameraWebServerWiFi into MediaMTX path cam_xiao.
 #
-# Default mode = capture (recommended):
-#   Poll http://<ip>/capture stills and encode — avoids ESP MJPEG /stream
-#   dying around ~60–90s (HLS "network timeout" / forever loading).
+# Why not "forever" on one TCP?
+#   MediaMTX can run forever (runOnInitRestart). ESP /stream MJPEG over Wi‑Fi
+#   typically dies ~60–90s — that is the camera HTTP stack, not MediaMTX.
+#   Default = poll /capture stills (fresh GET each frame) + restart on stall.
 #
-# Stream mode (legacy, flaky on XIAO):
-#   PUBLISH_MODE=stream ./scripts/publish_xiao.sh http://<ip>:81/stream
+# Preferred (one terminal — MediaMTX restarts this script):
+#   ./scripts/mediamtx_run.sh
 #
-# Terminal A: ./scripts/mediamtx_run.sh
-# Terminal B: ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
-#   (URL may be :81/stream; capture URL is derived as http://<host>/capture)
+# Manual loop:
+#   ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
+#
+# Modes:
+#   PUBLISH_MODE=capture  (default, stable)
+#   PUBLISH_MODE=stream   (legacy :81/stream — flaky)
+#   PUBLISH_ONCE=1        (one session then exit — used by MediaMTX runOnInit)
 set -uo pipefail
 
-MTX_URL="${MTX_URL:-rtsp://127.0.0.1:8554/cam_xiao}"
+# MediaMTX runOnInit sets RTSP_PORT + MTX_PATH (official hook env).
+MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
 XIAO_URL="${1:-${XIAO_MJPEG_URL:-}}"
-MODE="${PUBLISH_MODE:-capture}"   # capture | stream
+MODE="${PUBLISH_MODE:-capture}"
 FPS="${XIAO_FPS:-6}"
 BITRATE="${XIAO_BITRATE:-400k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
-STALL_S="${PUBLISH_STALL_S:-15}"
-# Proactive reconnect before the typical ~70s ESP /stream death.
-MAX_LIFE_S="${PUBLISH_MAX_LIFE_S:-45}"
+STALL_S="${PUBLISH_STALL_S:-20}"
+if [[ -z "${PUBLISH_MAX_LIFE_S:-}" ]]; then
+  MAX_LIFE_S=0
+else
+  MAX_LIFE_S="${PUBLISH_MAX_LIFE_S}"
+fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg not found. Install: brew install ffmpeg" >&2
@@ -37,13 +46,11 @@ if [[ -z "$XIAO_URL" ]]; then
 Usage:
   ./scripts/publish_xiao.sh http://<xiao-ip>:81/stream
 
-Capture mode (default) uses http://<xiao-ip>/capture
-Stream mode: PUBLISH_MODE=stream ./scripts/publish_xiao.sh http://<xiao-ip>:81/stream
+Prefer: ./scripts/mediamtx_run.sh   # MediaMTX owns forever-restart
 EOF
   exit 2
 fi
 
-# http://10.128.93.25:81/stream → http://10.128.93.25/capture
 capture_url_from() {
   local u="$1"
   u="${u%%/stream}"
@@ -54,18 +61,17 @@ capture_url_from() {
 
 CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
 
-echo "Bridging XIAO → MediaMTX (mode=$MODE, stall=${STALL_S}s, maxlife=${MAX_LIFE_S}s)" >&2
-echo "  stream : $XIAO_URL" >&2
+echo "Bridging XIAO → MediaMTX (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
 echo "  capture: $CAPTURE_URL" >&2
 echo "  dest   : $MTX_URL  fps=$FPS bitrate=$BITRATE" >&2
-echo "Ctrl+C to stop. Do not open ESP /stream in a browser while publishing." >&2
 
-kill_pid_tree() {
+kill_pgid() {
   local pid="$1"
   [[ -z "$pid" ]] && return 0
-  kill "$pid" 2>/dev/null || true
+  # Kill whole pipeline process group (curl feeder + ffmpeg).
+  kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
   sleep 0.3
-  kill -9 "$pid" 2>/dev/null || true
+  kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
 
@@ -81,12 +87,12 @@ watch_progress() {
       fi
     fi
     now=$SECONDS
-    if (( now - last_change >= STALL_S )); then
-      echo "$(date '+%H:%M:%S') stall ${STALL_S}s — killing bridge" >&2
+    if (( STALL_S > 0 && now - last_change >= STALL_S )); then
+      echo "$(date '+%H:%M:%S') stall ${STALL_S}s — exit so MediaMTX/loop can restart" >&2
       return 1
     fi
-    if (( now - started >= MAX_LIFE_S )); then
-      echo "$(date '+%H:%M:%S') max life ${MAX_LIFE_S}s — refreshing ESP link" >&2
+    if (( MAX_LIFE_S > 0 && now - started >= MAX_LIFE_S )); then
+      echo "$(date '+%H:%M:%S') max life ${MAX_LIFE_S}s — refreshing" >&2
       return 1
     fi
     sleep 1
@@ -95,19 +101,13 @@ watch_progress() {
 }
 
 run_capture() {
-  local progress fpid feeder started
+  local progress fpid started
   progress="$(mktemp -t xiao_cap_XXXXXX)"
   started=$SECONDS
-
-  # Continuous still polls — each JPEG is a fresh HTTP GET (stable on ESP).
+  set -m
   (
     while true; do
-      if curl -fsS --max-time 3 "$CAPTURE_URL"; then
-        :
-      else
-        sleep 0.4
-      fi
-      # Pace ~FPS (capture is slower than stream; 6 fps is enough for lab).
+      curl -fsS --max-time 3 "$CAPTURE_URL" || sleep 0.5
       sleep "$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
     done
   ) | ffmpeg -hide_banner -loglevel error \
@@ -132,11 +132,10 @@ run_capture() {
       -rtsp_transport tcp \
       "$MTX_URL" &
   fpid=$!
-  # shellcheck disable=SC2064
-  trap 'rm -f "$progress"; kill_pid_tree "$fpid"' RETURN
+  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
 
   if ! watch_progress "$progress" "$fpid" "$started"; then
-    kill_pid_tree "$fpid"
+    kill_pgid "$fpid"
     return 1
   fi
   wait "$fpid" 2>/dev/null || true
@@ -146,7 +145,6 @@ run_stream() {
   local progress fpid started
   progress="$(mktemp -t xiao_str_XXXXXX)"
   started=$SECONDS
-
   ffmpeg -hide_banner -loglevel error \
     -nostats \
     -progress "$progress" \
@@ -172,10 +170,10 @@ run_stream() {
     -rtsp_transport tcp \
     "$MTX_URL" &
   fpid=$!
-  trap 'rm -f "$progress"; kill_pid_tree "$fpid"' RETURN
+  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
 
   if ! watch_progress "$progress" "$fpid" "$started"; then
-    kill_pid_tree "$fpid"
+    kill_pgid "$fpid"
     return 1
   fi
   wait "$fpid" 2>/dev/null || true
@@ -189,12 +187,11 @@ run_once() {
   fi
 }
 
-# Quick sanity: can Mini reach capture?
 if [[ "$MODE" == "capture" ]]; then
-  if ! curl -fsS --max-time 3 -o /dev/null "$CAPTURE_URL"; then
-    echo "WARN: $CAPTURE_URL not reachable from Mini — check ESP / LabPSK" >&2
-  else
+  if curl -fsS --max-time 3 -o /dev/null "$CAPTURE_URL"; then
     echo "capture OK: $CAPTURE_URL" >&2
+  else
+    echo "WARN: $CAPTURE_URL not reachable" >&2
   fi
 fi
 
