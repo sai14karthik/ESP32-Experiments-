@@ -33,8 +33,8 @@ hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
 # lowLatency HLS is brittle when the publisher briefly restarts (~1 min ESP stalls).
 hlsVariant: fMP4
-hlsSegmentDuration: 2
-hlsPartDuration: 0.5
+hlsSegmentDuration: 2s
+hlsPartDuration: 500ms
 hlsSegmentCount: 7
 
 webrtc: yes
