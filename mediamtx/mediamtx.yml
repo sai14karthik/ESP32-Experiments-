@@ -45,10 +45,10 @@ hlsSegmentCount: 7
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
-# Required for LabPSK: never advertise 127.0.0.1 to remote browsers.
-webrtcIPsFromInterfaces: no
+# LabPSK: never use interface IPs (includes 127.0.0.1). TCP ICE only (UDP blocked/isolated).
+webrtcIPsFromInterfaces: false
 webrtcAdditionalHosts: [10.128.93.23]
-webrtcLocalUDPAddress: :8189
+webrtcLocalUDPAddress: ""
 webrtcLocalTCPAddress: :8189
 webrtcICEServers2: []
 
