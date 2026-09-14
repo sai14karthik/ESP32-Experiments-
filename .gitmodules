@@ -19,3 +19,6 @@
 [submodule "firmware/CameraRTSPWiFi/Micro-RTSP"]
 	path = firmware/CameraRTSPWiFi/Micro-RTSP
 	url = https://github.com/geeksville/Micro-RTSP.git
+[submodule "esp32cam-rtsp"]
+	path = esp32cam-rtsp
+	url = https://github.com/rzeldent/esp32cam-rtsp

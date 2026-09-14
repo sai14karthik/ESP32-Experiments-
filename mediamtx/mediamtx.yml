@@ -38,19 +38,11 @@ hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
 # fmp4 is more tolerant of short publisher gaps than lowLatency.
 hlsVariant: fmp4
-hlsSegmentDuration: 2s
-hlsPartDuration: 500ms
-hlsSegmentCount: 7
+hlsSegmentDuration: 4s
+hlsPartDuration: 1s
+hlsSegmentCount: 10
 
-webrtc: yes
-webrtcAddress: :8889
-webrtcAllowOrigins: ["*"]
-# LabPSK: never use interface IPs (includes 127.0.0.1). TCP ICE only (UDP blocked/isolated).
-webrtcIPsFromInterfaces: false
-webrtcAdditionalHosts: [10.128.93.23]
-webrtcLocalUDPAddress: ""
-webrtcLocalTCPAddress: :8189
-webrtcICEServers2: []
+webrtc: no
 
 ###############################################
 # Paths
