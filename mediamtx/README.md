@@ -99,39 +99,43 @@ ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam1
 
 Acceptance: video in VLC and browser; stop `publish_webcam.sh` → stream ends; restart → returns.
 
-## Stage 2 — XIAO → all protocols (browsers included)
+## Stage 2 — XIAO MJPEG bridge
 
-**Correct path (research + MediaMTX maintainer):** ESP MJPEG is not a native
-MediaMTX source — FFmpeg publishes H.264 into MediaMTX, then all protocols work.
-Full write-up: [`ESP32_MEDIAMTX.md`](ESP32_MEDIAMTX.md).
-
-Board: flash `firmware/CameraWebServerWiFi` (serial: `http://10.128.93.25`).
-
-On Mini (after syncing scripts + `mediamtx.yml`):
+1. Flash / run `firmware/CameraWebServerWiFi` so the board joins your lab Wi‑Fi (e.g. LabPSK).
+2. Confirm in a browser: `http://<xiao-ip>/` (MJPEG stream is usually `:81/stream`).
+3. Keep MediaMTX running, then:
 
 ```bash
-./scripts/mediamtx_run.sh
+./scripts/publish_xiao.sh http://<xiao-ip>:81/stream
+# Example (LabPSK):
+# ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
 ```
 
-Do **not** also run `publish_xiao.sh`.
-
-**Watch**
+**Watch** (pick one client)
 
 | Client | Protocol | URL |
 |--------|----------|-----|
-| Browser | HLS | http://10.128.93.23:8888/cam_xiao/ |
-| Browser | WebRTC | http://10.128.93.23:8889/cam_xiao/ |
-| VLC | RTSP | `rtsp://10.128.93.23:8554/cam_xiao` |
+| VLC | RTSP | `rtsp://127.0.0.1:8554/cam_xiao` |
+| Browser | HLS | http://127.0.0.1:8888/cam_xiao/ |
+| Browser | WebRTC | http://127.0.0.1:8889/cam_xiao/ |
+
+`cam1` and `cam_xiao` can run at the same time.
 
 ## End-to-end example (Mac Mini + XIAO on LabPSK)
 
 ```bash
-pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao'
+# Terminal A
 ./scripts/mediamtx_run.sh
+
+# Terminal B
+./scripts/publish_xiao.sh http://10.128.93.25:81/stream
 ```
 
-Then open HLS or WebRTC above.
+Then open **one** viewer URL:
 
+- VLC: `rtsp://127.0.0.1:8554/cam_xiao`
+- Browser (HLS): http://127.0.0.1:8888/cam_xiao/
+- Browser (WebRTC): http://127.0.0.1:8889/cam_xiao/
 
 ## Ports (localhost)
 

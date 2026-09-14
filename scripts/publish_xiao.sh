@@ -1,36 +1,54 @@
 #!/usr/bin/env bash
-# ESP CameraWebServerWiFi → H.264 → MediaMTX (cam_xiao).
+# Bridge XIAO CameraWebServerWiFi into MediaMTX path cam_xiao.
 #
-# Design (from MediaMTX docs + lab failure modes):
-# 1) ESP MJPEG is not a MediaMTX source → FFmpeg must publish
-#    https://github.com/bluenviron/mediamtx/discussions/3575
-# 2) Browsers need H.264 baseline, no B-frames (WebRTC)
-#    https://mediamtx.org/docs/features/webrtc-specific-features
-# 3) Pipe queues caused 20s lag → "latest JPEG" file, always newest frame
-# 4) On Mac Mini use VideoToolbox when available (smoother than libx264)
+# Why not "forever" on one TCP?
+#   MediaMTX can run forever (runOnInitRestart). ESP /stream MJPEG over Wi‑Fi
+#   typically dies ~60–90s — that is the camera HTTP stack, not MediaMTX.
+#   Default = poll /capture stills (fresh GET each frame) + restart on stall.
 #
-# PUBLISH_MODE=capture (default) | stream
+# Preferred (one terminal — MediaMTX restarts this script):
+#   ./scripts/mediamtx_run.sh
+#
+# Manual loop:
+#   ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
+#
+# Modes:
+#   PUBLISH_MODE=capture  (default, stable)
+#   PUBLISH_MODE=stream   (legacy :81/stream — flaky)
+#   PUBLISH_ONCE=1        (one session then exit — used by MediaMTX runOnInit)
 set -uo pipefail
 
+# MediaMTX runOnInit sets RTSP_PORT + MTX_PATH (official hook env).
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
 XIAO_URL="${1:-${XIAO_MJPEG_URL:-}}"
 MODE="${PUBLISH_MODE:-capture}"
-FPS="${XIAO_FPS:-4}"
-BITRATE="${XIAO_BITRATE:-350k}"
+FPS="${XIAO_FPS:-6}"
+BITRATE="${XIAO_BITRATE:-400k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
-STALL_S="${PUBLISH_STALL_S:-45}"
+STALL_S="${PUBLISH_STALL_S:-20}"
+if [[ -z "${PUBLISH_MAX_LIFE_S:-}" ]]; then
+  MAX_LIFE_S=0
+else
+  MAX_LIFE_S="${PUBLISH_MAX_LIFE_S}"
+fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "ffmpeg not found — brew install ffmpeg" >&2
+  echo "ffmpeg not found. Install: brew install ffmpeg" >&2
   exit 1
 fi
-if [[ -z "$XIAO_URL" ]]; then
-  echo "Usage: $0 http://<xiao-ip>:81/stream" >&2
-  exit 2
-fi
-if [[ "$MODE" == "capture" ]] && ! command -v curl >/dev/null 2>&1; then
+if ! command -v curl >/dev/null 2>&1; then
   echo "curl not found" >&2
   exit 1
+fi
+
+if [[ -z "$XIAO_URL" ]]; then
+  cat >&2 <<'EOF'
+Usage:
+  ./scripts/publish_xiao.sh http://<xiao-ip>:81/stream
+
+Prefer: ./scripts/mediamtx_run.sh   # MediaMTX owns forever-restart
+EOF
+  exit 2
 fi
 
 capture_url_from() {
@@ -40,34 +58,27 @@ capture_url_from() {
   u="${u%/}"
   echo "${u}/capture"
 }
+
 CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
 
-# Prefer Apple encoder on Mini (less CPU stutter).
-ENC=( -c:v libx264 -profile:v baseline -level 3.0 -preset ultrafast -tune zerolatency )
-if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_videotoolbox; then
-  ENC=( -c:v h264_videotoolbox -profile:v baseline -b:v "$BITRATE" -realtime 1 -bf 0 )
-  echo "encoder: h264_videotoolbox" >&2
-else
-  ENC=( -c:v libx264 -profile:v baseline -level 3.0 -preset ultrafast -tune zerolatency
-        -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize 700k
-        -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 -bf 0 )
-  echo "encoder: libx264" >&2
-fi
+echo "Bridging XIAO → MediaMTX (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
+echo "  capture: $CAPTURE_URL" >&2
+echo "  dest   : $MTX_URL  fps=$FPS bitrate=$BITRATE" >&2
 
-echo "ESP → MediaMTX (mode=$MODE fps=$FPS once=${PUBLISH_ONCE:-0})" >&2
-echo "  in : $XIAO_URL" >&2
-[[ "$MODE" == "capture" ]] && echo "  cap: $CAPTURE_URL" >&2
-echo "  out: $MTX_URL" >&2
+kill_pgid() {
+  local pid="$1"
+  [[ -z "$pid" ]] && return 0
+  # Kill whole pipeline process group (curl feeder + ffmpeg).
+  kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  sleep 0.3
+  kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
-pkill -f "ffmpeg.*${MTX_PATH:-cam_xiao}" 2>/dev/null || true
-sleep 0.3
-
-stall_watchdog() {
-  local progress="$1" target_pid="$2"
-  local last="" last_change=$SECONDS out
-  sleep 12
-  last_change=$SECONDS
-  while kill -0 "$target_pid" 2>/dev/null; do
+watch_progress() {
+  local progress="$1" fpid="$2" started="$3"
+  local last="" last_change=$SECONDS out now
+  while kill -0 "$fpid" 2>/dev/null; do
     if [[ -f "$progress" ]]; then
       out="$(grep -E '^out_time_ms=' "$progress" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
       if [[ -n "$out" && "$out" != "$last" ]]; then
@@ -75,86 +86,115 @@ stall_watchdog() {
         last_change=$SECONDS
       fi
     fi
-    if (( SECONDS - last_change >= STALL_S )); then
-      echo "$(date '+%H:%M:%S') stall — restart" >&2
-      kill "$target_pid" 2>/dev/null || true
-      sleep 0.2
-      kill -9 "$target_pid" 2>/dev/null || true
-      return 0
+    now=$SECONDS
+    if (( STALL_S > 0 && now - last_change >= STALL_S )); then
+      echo "$(date '+%H:%M:%S') stall ${STALL_S}s — exit so MediaMTX/loop can restart" >&2
+      return 1
+    fi
+    if (( MAX_LIFE_S > 0 && now - started >= MAX_LIFE_S )); then
+      echo "$(date '+%H:%M:%S') max life ${MAX_LIFE_S}s — refreshing" >&2
+      return 1
     fi
     sleep 1
   done
+  return 0
 }
 
-run_capture_fg() {
-  local progress fpid wdog poller jpgdir jpg interval
+run_capture() {
+  local progress fpid started
   progress="$(mktemp -t xiao_cap_XXXXXX)"
-  jpgdir="$(mktemp -d -t xiao_jpg_XXXXXX)"
-  jpg="$jpgdir/latest.jpg"
-  interval="$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
-
-  curl -fsS --max-time 3 -o "$jpg" "$CAPTURE_URL" 2>/dev/null || printf '\xff\xd8\xff\xd9' >"$jpg"
-
+  started=$SECONDS
+  set -m
   (
     while true; do
-      if curl -fsS --max-time 2 -o "$jpgdir/n.jpg" "$CAPTURE_URL" 2>/dev/null; then
-        mv -f "$jpgdir/n.jpg" "$jpg"
-      fi
-      sleep "$interval"
+      curl -fsS --max-time 3 "$CAPTURE_URL" || sleep 0.5
+      sleep "$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
     done
-  ) &
-  poller=$!
-
-  ffmpeg -hide_banner -loglevel error -nostats -progress "$progress" \
-    -fflags nobuffer+genpts+discardcorrupt -flags low_delay \
-    -f image2 -loop 1 -framerate "$FPS" -i "$jpg" \
-    -an -vf "format=yuv420p" \
-    "${ENC[@]}" \
-    -f rtsp -rtsp_transport tcp "$MTX_URL" &
+  ) | ffmpeg -hide_banner -loglevel error \
+      -nostats \
+      -progress "$progress" \
+      -fflags +genpts+discardcorrupt \
+      -f image2pipe \
+      -framerate "$FPS" \
+      -c:v mjpeg \
+      -i - \
+      -an \
+      -c:v libx264 \
+      -profile:v baseline \
+      -preset veryfast \
+      -tune zerolatency \
+      -pix_fmt yuv420p \
+      -b:v "$BITRATE" \
+      -maxrate "$BITRATE" \
+      -bufsize "$BITRATE" \
+      -g $((FPS * 2)) \
+      -bf 0 \
+      -f rtsp \
+      -rtsp_transport tcp \
+      "$MTX_URL" &
   fpid=$!
+  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
 
-  stall_watchdog "$progress" "$fpid" &
-  wdog=$!
-  wait "$fpid"
-  local rc=$?
-  kill "$poller" "$wdog" 2>/dev/null || true
-  wait "$poller" "$wdog" 2>/dev/null || true
-  rm -rf "$jpgdir" "$progress"
-  return "$rc"
+  if ! watch_progress "$progress" "$fpid" "$started"; then
+    kill_pgid "$fpid"
+    return 1
+  fi
+  wait "$fpid" 2>/dev/null || true
 }
 
-run_stream_fg() {
-  local progress fpid wdog
+run_stream() {
+  local progress fpid started
   progress="$(mktemp -t xiao_str_XXXXXX)"
-  # HTTP reconnect helps when :81/stream drops (ffmpeg http options).
-  ffmpeg -hide_banner -loglevel error -nostats -progress "$progress" \
+  started=$SECONDS
+  ffmpeg -hide_banner -loglevel error \
+    -nostats \
+    -progress "$progress" \
     -xerror \
-    -fflags nobuffer+genpts+discardcorrupt -flags low_delay \
-    -rw_timeout 5000000 \
-    -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 \
-    -f mjpeg -use_wallclock_as_timestamps 1 -framerate "$FPS" -i "$XIAO_URL" \
-    -an -vf "fps=${FPS},format=yuv420p" \
-    "${ENC[@]}" \
-    -f rtsp -rtsp_transport tcp "$MTX_URL" &
+    -fflags +nobuffer+genpts+discardcorrupt \
+    -flags low_delay \
+    -rw_timeout 8000000 \
+    -f mjpeg \
+    -use_wallclock_as_timestamps 1 \
+    -r "$FPS" \
+    -i "$XIAO_URL" \
+    -an \
+    -c:v libx264 \
+    -profile:v baseline \
+    -preset veryfast \
+    -tune zerolatency \
+    -pix_fmt yuv420p \
+    -b:v "$BITRATE" \
+    -maxrate "$BITRATE" \
+    -bufsize "$BITRATE" \
+    -g $((FPS * 2)) \
+    -bf 0 \
+    -f rtsp \
+    -rtsp_transport tcp \
+    "$MTX_URL" &
   fpid=$!
-  stall_watchdog "$progress" "$fpid" &
-  wdog=$!
-  wait "$fpid"
-  local rc=$?
-  kill "$wdog" 2>/dev/null || true
-  wait "$wdog" 2>/dev/null || true
-  rm -f "$progress"
-  return "$rc"
+  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
+
+  if ! watch_progress "$progress" "$fpid" "$started"; then
+    kill_pgid "$fpid"
+    return 1
+  fi
+  wait "$fpid" 2>/dev/null || true
 }
 
 run_once() {
-  if [[ "$MODE" == "stream" ]]; then run_stream_fg; else run_capture_fg; fi
+  if [[ "$MODE" == "stream" ]]; then
+    run_stream
+  else
+    run_capture
+  fi
 }
 
 if [[ "$MODE" == "capture" ]]; then
-  curl -fsS --max-time 3 -o /dev/null "$CAPTURE_URL" \
-    && echo "capture OK" >&2 \
-    || echo "WARN: capture not reachable" >&2
+  if curl -fsS --max-time 3 -o /dev/null "$CAPTURE_URL"; then
+    echo "capture OK: $CAPTURE_URL" >&2
+  else
+    echo "WARN: $CAPTURE_URL not reachable" >&2
+  fi
 fi
 
 if [[ "${PUBLISH_ONCE:-0}" == "1" ]]; then
@@ -164,6 +204,6 @@ fi
 
 while true; do
   run_once || true
-  echo "$(date '+%H:%M:%S') restart in ${RETRY_S}s…" >&2
+  echo "$(date '+%H:%M:%S') bridge restart in ${RETRY_S}s…" >&2
   sleep "$RETRY_S"
 done
