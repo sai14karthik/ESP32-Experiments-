@@ -10,7 +10,7 @@ logDestinations: [stdout]
 readTimeout: 30s
 writeTimeout: 30s
 # Keep remuxed H264 under ethernet MTU (avoids "RTP packets are too big" churn).
-udpMaxPayloadSize: 1200
+udpMaxPayloadSize: 1400
 
 ###############################################
 # Protocols
