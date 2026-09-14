@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 # Start MediaMTX with lab config → RTSP + HLS + WebRTC + RTMP for cam_xiao.
 #
-# Browsers need H.264. CameraRTSPWiFi is MJPEG, so default path is:
-#   ESP RTSP (MJPEG) → ffmpeg H.264 → MediaMTX publisher → all protocols
-#
-# Default (CameraRTSPWiFi on board — preferred):
+# Default (CameraWebServerWiFi on board — lab path):
+#   ESP MJPEG HTTP → ffmpeg H.264 → MediaMTX → all protocols
 #   ./scripts/mediamtx_run.sh
 #
-# HTTP MJPEG board (CameraWebServerWiFi):
-#   XIAO_RTSP_URL= XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
+# MediaMTX docs: cameras that are not H.264 RTSP need ffmpeg to publish
+# into MediaMTX; viewers then use RTSP/HLS/WebRTC from MediaMTX.
 #
-# Raw RTSP pull only (VLC OK; browsers will NOT work — no H.264):
-#   XIAO_RTSP_PULL=1 ./scripts/mediamtx_run.sh
+# Optional ESP RTSP board (CameraRTSPWiFi):
+#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
 #
 # External publish (two terminals):
 #   XIAO_EXTERNAL_PUBLISH=1 ./scripts/mediamtx_run.sh
-#   ./scripts/publish_xiao.sh rtsp://10.128.93.25:8554/mjpeg/1
+#   ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,8 +22,8 @@ CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
 WRAPPER="$ROOT/mediamtx/run_xiao_publish.sh"
 PUBLISH="$ROOT/scripts/publish_xiao.sh"
 XIAO_MJPEG_URL="${XIAO_MJPEG_URL:-http://10.128.93.25:81/stream}"
-# Preferred ESP source when running CameraRTSPWiFi. Empty → HTTP MJPEG path.
-XIAO_RTSP_URL="${XIAO_RTSP_URL-rtsp://10.128.93.25:8554/mjpeg/1}"
+# Empty by default = HTTP MJPEG path (CameraWebServerWiFi).
+XIAO_RTSP_URL="${XIAO_RTSP_URL:-}"
 
 if ! command -v mediamtx >/dev/null 2>&1; then
   echo "mediamtx not found. Install: brew install mediamtx" >&2
@@ -59,7 +57,6 @@ EOF
 }
 
 if [[ "${XIAO_RTSP_PULL:-0}" == "1" && -n "$XIAO_RTSP_URL" ]]; then
-  # Direct pull — RTSP clients only; HLS/WebRTC fail (MJPEG unsupported).
   SOURCE="$XIAO_RTSP_URL"
   INIT_BLOCK="    # raw RTSP pull (no browser codecs)"
   echo "cam_xiao: RAW RTSP pull $XIAO_RTSP_URL (browsers will fail)" >&2
@@ -74,18 +71,18 @@ elif [[ "${XIAO_EXTERNAL_PUBLISH:-0}" == "1" ]]; then
     echo "  PUBLISH_MODE=capture $PUBLISH $XIAO_MJPEG_URL" >&2
   fi
 elif [[ -n "$XIAO_RTSP_URL" ]]; then
-  # ESP RTSP MJPEG → H.264 → all MediaMTX protocols (browsers included).
   SOURCE="publisher"
   write_wrapper "$XIAO_RTSP_URL" "rtsp"
   INIT_BLOCK="    runOnInit: $WRAPPER
     runOnInitRestart: yes"
-  echo "cam_xiao: ESP RTSP→H.264 $XIAO_RTSP_URL (HLS/WebRTC/RTSP)" >&2
+  echo "cam_xiao: ESP RTSP→H.264 $XIAO_RTSP_URL" >&2
 else
+  # Default: CameraWebServerWiFi MJPEG → H.264 (all protocols).
   SOURCE="publisher"
   write_wrapper "$XIAO_MJPEG_URL" "${PUBLISH_MODE:-capture}"
   INIT_BLOCK="    runOnInit: $WRAPPER
     runOnInitRestart: yes"
-  echo "cam_xiao: HTTP→H.264 $XIAO_MJPEG_URL (mode=${PUBLISH_MODE:-capture})" >&2
+  echo "cam_xiao: HTTP MJPEG→H.264 $XIAO_MJPEG_URL (mode=${PUBLISH_MODE:-capture})" >&2
 fi
 
 awk -v src="$SOURCE" -v init="$INIT_BLOCK" '
@@ -100,13 +97,10 @@ awk -v src="$SOURCE" -v init="$INIT_BLOCK" '
 ' "$CONF_SRC" >"$CONF_RT"
 
 echo "MediaMTX lab config: $CONF_RT" >&2
-echo "  Browsers (colleague / Mini LAN):" >&2
+echo "  Browsers:" >&2
 echo "    HLS    http://10.128.93.23:8888/cam_xiao/" >&2
 echo "    WebRTC http://10.128.93.23:8889/cam_xiao/" >&2
-echo "  Local:" >&2
-echo "    HLS    http://127.0.0.1:8888/cam_xiao/" >&2
-echo "    WebRTC http://127.0.0.1:8889/cam_xiao/" >&2
-echo "    RTSP   rtsp://127.0.0.1:8554/cam_xiao" >&2
+echo "  Local HLS/WebRTC/RTSP: 127.0.0.1 :8888 / :8889 / :8554" >&2
 echo "Ctrl+C to stop." >&2
 
 exec mediamtx "$CONF_RT"

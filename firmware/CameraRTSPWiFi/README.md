@@ -24,27 +24,37 @@ arduino-cli upload -p "$PORT" --fqbn "$FQBN" "$SKETCH"
 Serial should print:
 
 ```text
-RTSP: rtsp://10.128.93.25:8554/mjpeg/1
+RTSP: rtsp://10.128.93.25:554/mjpeg/1
 ```
 
 ## MediaMTX on Mini (all protocols / browsers)
 
 ESP Micro-RTSP is **MJPEG**. MediaMTX HLS/WebRTC need **H.264**, so the Mini
-runs ffmpeg once: ESP RTSP → H.264 → MediaMTX, then every protocol works.
+runs ffmpeg: ESP RTSP → H.264 → MediaMTX.
+
+**After this firmware** (port **554**):
 
 ```bash
-./scripts/mediamtx_run.sh
+# Terminal A
+XIAO_EXTERNAL_PUBLISH=1 ./scripts/mediamtx_run.sh
+
+# Terminal B — one line; auto-restart on stall
+while true; do
+  ffmpeg -rtsp_transport tcp -i rtsp://10.128.93.25:554/mjpeg/1 \
+    -an -c:v libx264 -profile:v baseline -preset veryfast -tune zerolatency \
+    -pix_fmt yuv420p -bf 0 -g 12 \
+    -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_xiao
+  echo "ffmpeg exited — restart in 2s"; sleep 2
+done
 ```
 
 Colleague / browser:
 
 | Protocol | URL |
 |----------|-----|
-| **HLS** (Safari/Chrome) | http://10.128.93.23:8888/cam_xiao/ |
-| **WebRTC** (lower delay) | http://10.128.93.23:8889/cam_xiao/ |
-| RTSP (VLC) | `rtsp://10.128.93.23:8554/cam_xiao` |
-
-One terminal only — do not also run `publish_xiao.sh`.
+| **HLS** | http://10.128.93.23:8888/cam_xiao/ |
+| **WebRTC** | http://10.128.93.23:8889/cam_xiao/ |
+| RTSP | `rtsp://10.128.93.23:8554/cam_xiao` |
 
 ## vs CameraWebServerWiFi
 

@@ -11,8 +11,9 @@
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
-static const uint16_t kRtspPort = 8554;
-static const uint32_t kMsecPerFrame = 100;  // ~10 fps
+// Port 554 matches esp32cam-rtsp / CCTV convention (was 8554).
+static const uint16_t kRtspPort = 554;
+static const uint32_t kMsecPerFrame = 150;  // ~6–7 fps — steadier on Wi‑Fi
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -43,7 +44,7 @@ static camera_config_t xiao_cam_config() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
+  config.jpeg_quality = 15;  // slightly smaller packets
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
@@ -53,12 +54,34 @@ static camera_config_t xiao_cam_config() {
   return config;
 }
 
+static void ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+  Serial.println("WiFi lost — reconnecting");
+  WiFi.disconnect();
+  WiFi.begin(ssid, password);
+  WiFi.setSleep(false);
+  for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi OK ");
+    Serial.println(WiFi.localIP());
+    if (streamer) {
+      streamer->setURI(String(WiFi.localIP().toString()) + ":" + String(kRtspPort));
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(false);
   delay(200);
   Serial.println();
-  Serial.println("CameraRTSPWiFi (XIAO S3 Sense → Micro-RTSP)");
+  Serial.println("CameraRTSPWiFi (XIAO S3 Sense → Micro-RTSP, hardened)");
 
   esp_err_t err = cam.init(xiao_cam_config());
   if (err != ESP_OK) {
@@ -67,8 +90,8 @@ void setup() {
   }
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
   WiFi.setSleep(false);
+  WiFi.begin(ssid, password);
   Serial.print("WiFi connecting");
   while (WiFi.status() != WL_CONNECTED) {
     delay(400);
@@ -83,13 +106,19 @@ void setup() {
 
   rtspServer.begin();
   Serial.printf("RTSP: rtsp://%s:%u/mjpeg/1\n", WiFi.localIP().toString().c_str(), kRtspPort);
-  Serial.println("VLC / MediaMTX pull that URL (no ffmpeg publish needed)");
+  Serial.println("Mini: ffmpeg that URL → H.264 → MediaMTX (browsers need H.264)");
 }
 
 void loop() {
   if (!streamer) {
     delay(500);
     return;
+  }
+
+  static uint32_t lastWifiCheck = 0;
+  if (millis() - lastWifiCheck > 5000) {
+    lastWifiCheck = millis();
+    ensureWifi();
   }
 
   streamer->handleRequests(0);
@@ -105,9 +134,9 @@ void loop() {
 
   WiFiClient accepted = rtspServer.accept();
   if (accepted) {
+    accepted.setNoDelay(true);
     Serial.print("RTSP client: ");
     Serial.println(accepted.remoteIP());
-    // Micro-RTSP SOCKET = WiFiClient*
     WiFiClient *rtspClient = new WiFiClient(accepted);
     streamer->addSession(rtspClient);
   }

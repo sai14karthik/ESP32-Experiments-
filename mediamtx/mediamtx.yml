@@ -2,8 +2,9 @@
 # Local MediaMTX lab config (this Mac / Mini)
 # Paths: cam1 = Mac webcam, cam_xiao = XIAO camera
 #
-# Browsers (HLS/WebRTC) need H.264. ESP CameraRTSPWiFi is MJPEG, so default is:
-#   ESP RTSP → ffmpeg H.264 publish → MediaMTX → RTSP + HLS + WebRTC + RTMP
+# Lab default (CameraWebServerWiFi):
+#   ESP MJPEG HTTP → ffmpeg H.264 publish → MediaMTX
+#   → viewers use RTSP / HLS / WebRTC / RTMP
 #   ./scripts/mediamtx_run.sh
 #
 # Do NOT also run publish_xiao.sh by hand unless XIAO_EXTERNAL_PUBLISH=1.
