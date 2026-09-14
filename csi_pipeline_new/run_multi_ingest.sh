@@ -65,8 +65,15 @@ echo "multi-C5 ingest → 0.0.0.0:$PORT  method=$METHOD  label=$LABEL"
 echo "any powered C5 with CSI_TCP_HOST=<this host> will fan in; Ctrl+C stops"
 echo
 
-exec "$ROOT/run_ingest.sh" \
-  --listen-tcp "$PORT" \
-  --method "$METHOD" \
-  --label "$LABEL" \
-  "${PASSTHRU[@]}"
+if [[ ${#PASSTHRU[@]} -gt 0 ]]; then
+  exec "$ROOT/run_ingest.sh" \
+    --listen-tcp "$PORT" \
+    --method "$METHOD" \
+    --label "$LABEL" \
+    "${PASSTHRU[@]}"
+else
+  exec "$ROOT/run_ingest.sh" \
+    --listen-tcp "$PORT" \
+    --method "$METHOD" \
+    --label "$LABEL"
+fi
