@@ -17,7 +17,7 @@ logDestinations: [stdout]
 # Publisher can pause briefly on ESP Wi‑Fi; keep sessions alive.
 readTimeout: 60s
 writeTimeout: 60s
-udpMaxPayloadSize: 1400
+udpMaxPayloadSize: 1200
 
 ###############################################
 # Protocols
@@ -45,8 +45,11 @@ hlsSegmentCount: 7
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
+# Do NOT gather 127.0.0.1 from interfaces (log showed host/udp/127.0.0.1/8189
+# → remote clients peer-connection-closed). Only advertise Mini LabPSK IP.
+webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: [10.128.93.23]
-# LabPSK often blocks UDP ICE → peer connection closed; TCP ICE is the fix.
+webrtcLocalUDPAddress: :8189
 webrtcLocalTCPAddress: :8189
 webrtcICEServers2: []
 
