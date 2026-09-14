@@ -194,6 +194,8 @@ Remove object → should say **EMPTY**. Put object back → **OBJECT** (~2 s fir
 
 **No Wi‑Fi AP.** Sender and receiver on **channel 11**, HT40.
 
+**Later (parked):** same idea at scale — **1 sender + N receivers**, each recv → Mini TCP fan-in (`source_id`); sender power/radio only. Today’s stock path is still **1 send + 1 recv**.
+
 ### Flash (on any Mac with IDF; both boards plugged in)
 
 ```bash

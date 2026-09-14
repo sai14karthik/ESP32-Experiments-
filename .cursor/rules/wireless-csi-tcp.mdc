@@ -41,6 +41,7 @@ Lab room 207: **three** wall-powered C5 receivers (method 4.1), same AP, one Min
 - Heap-backed send queue (fixed prior stack overflow in `csi_tcp` task)
 - USB serial print still works alongside TCP
 - **Multi-C5:** one `--listen-tcp 9055` accepts many boards; `csi_samples.source_id` = client IP
+- **One board down ≠ ingest down:** each C5 has its own TCP reader thread; disconnect only drops that client (`active` decreases). Others keep inserting; acceptor stays up for reconnect. Idle warn is per-`source_id` when some are still live.
 - **Run until Ctrl+C:** no firmware time limit; watchdog keeps CSI/TCP alive for long sessions
 - **Target ping rate:** 100 Hz (`CONFIG_SEND_FREQUENCY`); actual pkt/s limited by LabPSK AP replies (often lower)
 - **Stall recovery (flash when board available):** `WIFI_PS_NONE`, CSI watchdog (restart ping ~8s, full Wi‑Fi/CSI recycle ~20s), TCP keepalive + force reconnect. Host ingest warns after ~15s idle.
@@ -52,6 +53,7 @@ Lab room 207: **three** wall-powered C5 receivers (method 4.1), same AP, one Min
 - Live plot over TCP
 - Avoid reflash when Mini IP changes (DHCP DNS or config another way)
 - Board-stable `source_id` (STA MAC) instead of DHCP IP
+- **Method 4.3 multi-RX:** 1× ESP sender + N× ESP receivers (ESP-NOW); Mini still fan-in on `:9055`; sender has no TCP
 
 ## Do not
 

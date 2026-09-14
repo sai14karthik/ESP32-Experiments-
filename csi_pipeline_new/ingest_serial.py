@@ -187,6 +187,9 @@ def iter_lines_file(path: str):
 def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
     """Fan-in: accept multiple ESP32-C5 TCP clients; yield CSI lines concurrently.
 
+    One client disconnect/error must not stop others — each board has its own
+    reader thread; the acceptor keeps listening for reconnects.
+
     Yields None (idle) or (source_id, line) where source_id is the client IP.
     """
     q: queue.Queue[Any] = queue.Queue(maxsize=20000)
@@ -199,6 +202,12 @@ def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
         nonlocal n_clients
         source_id = addr[0]
         conn.settimeout(1.0)
+        # Fail one socket fast; do not block sibling clients on TCP wait.
+        try:
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
         buf = b""
         try:
             while not stop.is_set():
@@ -211,6 +220,13 @@ def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
                 if not chunk:
                     break
                 buf += chunk
+                if len(buf) > 2_000_000:
+                    # Corrupt/flooded client — drop this board only.
+                    print(
+                        f"client {source_id}: buffer overrun, dropping connection",
+                        flush=True,
+                    )
+                    break
                 while True:
                     nl = buf.find(b"\n")
                     if nl < 0:
@@ -221,8 +237,9 @@ def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
                     if not line:
                         continue
                     try:
-                        q.put((source_id, line), timeout=2.0)
+                        q.put((source_id, line), timeout=0.05)
                     except queue.Full:
+                        # Prefer keeping newest from any client over blocking.
                         try:
                             q.get_nowait()
                         except queue.Empty:
@@ -231,15 +248,21 @@ def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
                             q.put_nowait((source_id, line))
                         except queue.Full:
                             pass
+        except Exception as exc:  # noqa: BLE001 — isolate one bad client
+            print(f"client {source_id} error (others continue): {exc}", flush=True)
         finally:
             try:
                 conn.close()
             except OSError:
                 pass
             with clients_lock:
-                n_clients -= 1
+                n_clients = max(0, n_clients - 1)
                 left = n_clients
-            print(f"client disconnected {addr[0]}:{addr[1]} (active={left})", flush=True)
+            print(
+                f"client disconnected {addr[0]}:{addr[1]} (active={left}; "
+                f"ingest continues)",
+                flush=True,
+            )
 
     def _acceptor() -> None:
         nonlocal n_clients
@@ -328,6 +351,7 @@ def _ingest_stream(
     last_flush = time.monotonic()
     last_sample = time.monotonic()
     last_idle_warn = 0.0
+    last_by_source: dict[str, float] = {}
     total = 0
     seen_sources: set[str] = set()
     try:
@@ -339,11 +363,28 @@ def _ingest_stream(
                     batch.clear()
                     last_flush = now
                     print(f"flushed total={total}", flush=True)
-                if idle_warn_s > 0 and (now - last_sample) >= idle_warn_s:
-                    if (now - last_idle_warn) >= idle_warn_s:
+                if idle_warn_s > 0 and (now - last_idle_warn) >= idle_warn_s:
+                    quiet = [
+                        sid
+                        for sid, t in last_by_source.items()
+                        if (now - t) >= idle_warn_s
+                    ]
+                    live = [
+                        sid
+                        for sid, t in last_by_source.items()
+                        if (now - t) < idle_warn_s
+                    ]
+                    if quiet and live:
+                        print(
+                            f"warning: quiet sources {quiet} "
+                            f"(>{idle_warn_s:.0f}s); still ingesting from {live}",
+                            flush=True,
+                        )
+                        last_idle_warn = now
+                    elif (now - last_sample) >= idle_warn_s:
                         print(
                             f"warning: no CSI lines for {now - last_sample:.0f}s "
-                            f"(C5 may be stalled; watchdog should recover)",
+                            f"(all C5s idle; watchdog should recover)",
                             flush=True,
                         )
                         last_idle_warn = now
@@ -377,6 +418,8 @@ def _ingest_stream(
                     flush=True,
                 )
             last_sample = time.monotonic()
+            if source_id:
+                last_by_source[source_id] = last_sample
             now = last_sample
             if len(batch) >= batch_size or (now - last_flush) >= flush_s:
                 total += flush_batch(conn, session_id, batch)
