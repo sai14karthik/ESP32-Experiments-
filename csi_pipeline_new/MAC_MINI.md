@@ -276,9 +276,12 @@ WHERE session_id = (SELECT id FROM csi_sessions ORDER BY started_at DESC LIMIT 1
 Preferred for **room 207 / presence** capture: C5 stays on wall power; Mac Mini always-on ingest. Measure CSI from LabPSK (method 4.1); **forward** each `CSI_DATA` line over **TCP**.
 
 ```text
-LabPSK AP --CSI--> ESP32-C5 --TCP CSI_DATA--> Mac Mini (--listen-tcp) --> Postgres
+LabPSK AP --CSI--> ESP32-C5 #1 ──TCP :9055──┐
+           ├─CSI--> ESP32-C5 #2 ──TCP :9055──┼──► Mac Mini (--listen-tcp) --> Postgres
+           └─CSI--> ESP32-C5 #3 ──TCP :9055──┘     source_id = client IP
 ```
 
+Three wall-powered receivers (same as the first C5 already on power): method 4.1, same LabPSK AP, one Mini ingest. Flash each with the **same** `CSI_TCP_HOST` (Mini LabPSK IP).
 ### LabPSK peer reachability (critical)
 
 LabPSK **client isolation** has blocked Mac↔ESP before. The C5 must reach the Mini’s LabPSK IP on TCP **9055**.
@@ -329,7 +332,7 @@ cd csi_pipeline_new
 ./run_ingest.sh --listen-tcp 9055 --method 4.1 --label occupied_person
 ```
 
-Session `recv_port` is stored as `tcp:9055`. USB serial still prints `CSI_DATA` if you plug in for debug — do not run USB ingest and TCP ingest for the same capture.
+Session `recv_port` is stored as `tcp:9055:multi`. Rows include `source_id` (client IP) so multiple C5 receivers can share one ingest. USB serial still prints `CSI_DATA` if you plug in for debug — do not run USB ingest and TCP ingest for the same capture.
 
 ---
 

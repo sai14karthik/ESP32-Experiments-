@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS csi_samples (
     rx_format     INTEGER,
     len           INTEGER,
     first_word    INTEGER,
-    iq            INTEGER[] NOT NULL     -- imag,real interleaved; array_length = byte/count from firmware (often 234 → 117 pairs)
+    iq            INTEGER[] NOT NULL,    -- imag,real interleaved; array_length = byte/count from firmware (often 234 → 117 pairs)
+    source_id     TEXT                   -- TCP client IP (or board id) for multi-C5 fan-in; NULL for USB/single
 );
 
 CREATE INDEX IF NOT EXISTS csi_samples_session_host_ts_idx
@@ -41,3 +42,9 @@ CREATE INDEX IF NOT EXISTS csi_samples_session_host_ts_idx
 
 CREATE INDEX IF NOT EXISTS csi_samples_session_seq_idx
     ON csi_samples (session_id, seq);
+
+CREATE INDEX IF NOT EXISTS csi_samples_session_source_idx
+    ON csi_samples (session_id, source_id);
+
+-- Existing DBs created before source_id:
+ALTER TABLE csi_samples ADD COLUMN IF NOT EXISTS source_id TEXT;

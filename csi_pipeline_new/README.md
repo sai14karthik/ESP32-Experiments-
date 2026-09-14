@@ -9,8 +9,8 @@ This README is the short reference; [`MAC_MINI.md`](MAC_MINI.md) is the complete
 ```
 csi_send  --ESP-NOW ch11-->  csi_recv  --USB 115200-->  run_ingest.sh  -->  Postgres (csi DB)
 
-# Wireless 4.1 (USB only for flash/power):
-csi_recv_router --TCP CSI_DATA-->  run_ingest.sh --listen-tcp  -->  Postgres
+# Wireless 4.1 (USB only for flash/power; N wall-powered C5 receivers):
+csi_recv_router × N --TCP CSI_DATA-->  run_ingest.sh --listen-tcp  -->  Postgres
 ```
 
 | Table | What it holds |
@@ -104,10 +104,12 @@ cd ~/Desktop/ESP32-Experiments-/csi_pipeline_new   # or your clone path
 You should see:
 
 ```text
-listening tcp://0.0.0.0:9055 (waiting for ESP32-C5…)
+listening tcp://0.0.0.0:9055 (multi-C5 fan-in, backlog=8)
+client connected 10.128.93.29:… (active=1)
+client connected 10.128.93.31:… (active=2)
 ```
 
-Leave this running. Session `recv_port` is stored as `tcp:9055`.
+Leave this running. Session `recv_port` is stored as `tcp:9055:multi`. Each board’s rows get `source_id` = its LabPSK IP. Flash **every** C5 with the same `CSI_TCP_HOST` (Mini IP).
 
 #### Step 3 — Flash C5 once (USB only for this step)
 

@@ -5,16 +5,20 @@ alwaysApply: true
 
 # Wireless CSI ingest (TCP 9055) — keep in mind
 
-**Status (Sep 2026):** Working end-to-end. Treat as production-ready for lab room capture. Do not rebuild unless something breaks or we need multi-C5 / hardening.
+**Status (Sep 2026):** Working end-to-end. Multi-C5 TCP fan-in supported on `:9055`.
 
 ## Architecture
 
 ```
-LabPSK AP --CSI--> ESP32-C5 --TCP :9055--> Mac Mini (run_ingest) --> Postgres
+LabPSK AP --CSI--> ESP32-C5 #1 ──TCP :9055──┐
+           ├─CSI--> ESP32-C5 #2 ──TCP :9055──┼──► Mac Mini (run_ingest) --> Postgres
+           └─CSI--> ESP32-C5 #3 ──TCP :9055──┘     samples.source_id = client IP
 ```
 
+Lab room 207: **three** wall-powered C5 receivers (method 4.1), same AP, one Mini ingest. Add more the same way (backlog=8).
+
 - Firmware: `esp-csi/examples/get-started/csi_recv_router` (`csi_tcp_forward.c`, Kconfig `CSI_TCP_*`)
-- Flash: `CSI_TCP_HOST=<mini_ip> ./scripts/set_csi_wifi.sh …` or `./scripts/set_csi_tcp_host.sh`
+- Flash each board: `CSI_TCP_HOST=<mini_ip> ./scripts/set_csi_wifi.sh …` (same Mini IP on all)
 - Ingest: `csi_pipeline_new/./run_ingest.sh --listen-tcp 9055 --method 4.1 --label …`
 - Docs: `csi_pipeline_new/README.md` (Wireless CSI over TCP) + `MAC_MINI.md`
 
@@ -36,18 +40,18 @@ LabPSK AP --CSI--> ESP32-C5 --TCP :9055--> Mac Mini (run_ingest) --> Postgres
 - TCP (not UDP) for long CSI lines
 - Heap-backed send queue (fixed prior stack overflow in `csi_tcp` task)
 - USB serial print still works alongside TCP
-- One client at a time is fine for now
+- **Multi-C5:** one `--listen-tcp 9055` accepts many boards; `csi_samples.source_id` = client IP
 - **Run until Ctrl+C:** no firmware time limit; watchdog keeps CSI/TCP alive for long sessions
 - **Target ping rate:** 100 Hz (`CONFIG_SEND_FREQUENCY`); actual pkt/s limited by LabPSK AP replies (often lower)
 - **Stall recovery (flash when board available):** `WIFI_PS_NONE`, CSI watchdog (restart ping ~8s, full Wi‑Fi/CSI recycle ~20s), TCP keepalive + force reconnect. Host ingest warns after ~15s idle.
 
 ## Later improvements (only when needed)
 
-- Multi-C5 fan-in
 - Queue-drop metrics / backpressure
 - Auth/TLS
 - Live plot over TCP
 - Avoid reflash when Mini IP changes (DHCP DNS or config another way)
+- Board-stable `source_id` (STA MAC) instead of DHCP IP
 
 ## Do not
 

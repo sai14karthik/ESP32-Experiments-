@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import queue
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 from uuid import UUID
@@ -89,6 +91,21 @@ def end_session(conn: Connection, session_id: UUID) -> None:
     conn.commit()
 
 
+def ensure_source_id_column(conn: Connection) -> None:
+    """Idempotent migration for multi-C5 fan-in."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE csi_samples ADD COLUMN IF NOT EXISTS source_id TEXT"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS csi_samples_session_source_idx
+            ON csi_samples (session_id, source_id)
+            """
+        )
+    conn.commit()
+
+
 def flush_batch(conn: Connection, session_id: UUID, batch: list[dict[str, Any]]) -> int:
     if not batch:
         return 0
@@ -110,6 +127,7 @@ def flush_batch(conn: Connection, session_id: UUID, batch: list[dict[str, Any]])
             s["len"],
             s["first_word"],
             s["iq"],
+            s.get("source_id"),
         )
         for s in batch
     ]
@@ -118,10 +136,12 @@ def flush_batch(conn: Connection, session_id: UUID, batch: list[dict[str, Any]])
             """
             INSERT INTO csi_samples (
                 session_id, seq, mac, rssi, rate, noise_floor, fft_gain, agc_gain,
-                channel, device_ts, host_ts, sig_len, rx_format, len, first_word, iq
+                channel, device_ts, host_ts, sig_len, rx_format, len, first_word, iq,
+                source_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s
             )
             """,
             rows,
@@ -164,49 +184,123 @@ def iter_lines_file(path: str):
             yield line.strip()
 
 
-def iter_lines_tcp(port: int, bind: str = "0.0.0.0"):
-    """Accept one CSI TCP client at a time; reconnect loop on disconnect."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((bind, port))
-    srv.listen(1)
-    srv.settimeout(1.0)
-    print(f"listening tcp://{bind}:{port} (waiting for ESP32-C5…)", flush=True)
+def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
+    """Fan-in: accept multiple ESP32-C5 TCP clients; yield CSI lines concurrently.
+
+    Yields None (idle) or (source_id, line) where source_id is the client IP.
+    """
+    q: queue.Queue[Any] = queue.Queue(maxsize=20000)
+    stop = threading.Event()
+    clients_lock = threading.Lock()
+    n_clients = 0
+    sentinel = object()
+
+    def _client_reader(conn: socket.socket, addr: tuple[str, int]) -> None:
+        nonlocal n_clients
+        source_id = addr[0]
+        conn.settimeout(1.0)
+        buf = b""
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = conn.recv(65536)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    nl = buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    raw = buf[:nl]
+                    buf = buf[nl + 1 :]
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        q.put((source_id, line), timeout=2.0)
+                    except queue.Full:
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            q.put_nowait((source_id, line))
+                        except queue.Full:
+                            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            with clients_lock:
+                n_clients -= 1
+                left = n_clients
+            print(f"client disconnected {addr[0]}:{addr[1]} (active={left})", flush=True)
+
+    def _acceptor() -> None:
+        nonlocal n_clients
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((bind, port))
+        srv.listen(backlog)
+        srv.settimeout(1.0)
+        print(
+            f"listening tcp://{bind}:{port} (multi-C5 fan-in, backlog={backlog})",
+            flush=True,
+        )
+        try:
+            while not stop.is_set():
+                try:
+                    conn, addr = srv.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                with clients_lock:
+                    n_clients += 1
+                    active = n_clients
+                print(
+                    f"client connected {addr[0]}:{addr[1]} (active={active})",
+                    flush=True,
+                )
+                threading.Thread(
+                    target=_client_reader,
+                    args=(conn, addr),
+                    name=f"csi-tcp-{addr[0]}-{addr[1]}",
+                    daemon=True,
+                ).start()
+        finally:
+            try:
+                srv.close()
+            except OSError:
+                pass
+            q.put(sentinel)
+
+    threading.Thread(target=_acceptor, name="csi-tcp-accept", daemon=True).start()
     try:
         while True:
             try:
-                conn, addr = srv.accept()
-            except TimeoutError:
+                item = q.get(timeout=1.0)
+            except queue.Empty:
                 yield None
                 continue
-            print(f"client connected {addr[0]}:{addr[1]}", flush=True)
-            conn.settimeout(1.0)
-            buf = b""
-            try:
-                while True:
-                    try:
-                        chunk = conn.recv(65536)
-                    except TimeoutError:
-                        yield None
-                        continue
-                    if not chunk:
-                        break
-                    buf += chunk
-                    while True:
-                        nl = buf.find(b"\n")
-                        if nl < 0:
-                            break
-                        raw = buf[:nl]
-                        buf = buf[nl + 1 :]
-                        yield raw.decode("utf-8", errors="replace").strip()
-            finally:
-                conn.close()
-                print(f"client disconnected {addr[0]}:{addr[1]}", flush=True)
+            if item is sentinel:
+                break
+            yield item
     finally:
-        srv.close()
+        stop.set()
 
 
-def process_line(line: str | None, batch: list[dict[str, Any]]) -> dict[str, Any] | None:
+def process_line(
+    line: str | None,
+    batch: list[dict[str, Any]],
+    *,
+    source_id: str | None = None,
+) -> dict[str, Any] | None:
     if not line or line.startswith("#") or line.startswith("type,"):
         return None
     sample = parse_csi_line(line)
@@ -215,6 +309,7 @@ def process_line(line: str | None, batch: list[dict[str, Any]]) -> dict[str, Any
     iq = sample.get("iq") or []
     if len(iq) < 2 or len(iq) % 2 != 0:
         return None
+    sample["source_id"] = source_id
     batch.append(sample)
     return sample
 
@@ -228,16 +323,16 @@ def _ingest_stream(
     flush_s: float,
     idle_warn_s: float = 15.0,
 ) -> int:
-    """Shared flush loop for serial / TCP (yields None on idle)."""
+    """Flush loop for serial / TCP. TCP multi yields (source_id, line)."""
     batch: list[dict[str, Any]] = []
     last_flush = time.monotonic()
     last_sample = time.monotonic()
     last_idle_warn = 0.0
     total = 0
-    saw_format = False
+    seen_sources: set[str] = set()
     try:
-        for line in lines:
-            if line is None:
+        for item in lines:
+            if item is None:
                 now = time.monotonic()
                 if batch and (now - last_flush) >= flush_s:
                     total += flush_batch(conn, session_id, batch)
@@ -253,11 +348,27 @@ def _ingest_stream(
                         )
                         last_idle_warn = now
                 continue
-            sample = process_line(line, batch)
+
+            source_id: str | None = None
+            if isinstance(item, tuple) and len(item) == 2:
+                source_id, line = item
+            else:
+                line = item  # type: ignore[assignment]
+
+            sample = process_line(line, batch, source_id=source_id)
             if sample is None:
                 continue
-            if not saw_format:
-                saw_format = True
+            if source_id and source_id not in seen_sources:
+                seen_sources.add(source_id)
+                n_iq = len(sample.get("iq") or [])
+                print(
+                    f"first CSI from {source_id}: format={sample.get('format')}  "
+                    f"mac={sample.get('mac')}  rssi={sample.get('rssi')}  "
+                    f"iq_len={n_iq}  sources={sorted(seen_sources)}",
+                    flush=True,
+                )
+            elif not source_id and not seen_sources:
+                seen_sources.add("usb")
                 n_iq = len(sample.get("iq") or [])
                 print(
                     f"first CSI: format={sample.get('format')}  "
@@ -272,7 +383,8 @@ def _ingest_stream(
                 batch.clear()
                 last_flush = now
                 print(
-                    f"inserted total={total} last_seq={sample['seq']}",
+                    f"inserted total={total} last_seq={sample['seq']} "
+                    f"source={source_id or '?'}",
                     flush=True,
                 )
     except KeyboardInterrupt:
@@ -280,7 +392,7 @@ def _ingest_stream(
     finally:
         try:
             total += flush_batch(conn, session_id, batch)
-        except Exception as exc:  # noqa: BLE001 — best-effort final flush
+        except Exception as exc:  # noqa: BLE001
             print(f"final flush failed: {exc}", file=sys.stderr)
     return total
 
@@ -303,7 +415,7 @@ def run(args: argparse.Namespace) -> None:
         recv_port = f"file:{from_file}"
         session_baud: int | None = None
     elif listen_tcp is not None:
-        recv_port = f"tcp:{listen_tcp}"
+        recv_port = f"tcp:{listen_tcp}:multi"
         session_baud = None
     else:
         port = port or find_port()
@@ -314,12 +426,13 @@ def run(args: argparse.Namespace) -> None:
     if from_file:
         print(f"source file {from_file}")
     elif listen_tcp is not None:
-        print(f"listen tcp 0.0.0.0:{listen_tcp}")
+        print(f"listen tcp 0.0.0.0:{listen_tcp} (multi-C5)")
     else:
         print(f"port {port} @ {baud}")
     print(f"method {args.method} label={args.label!r}")
 
     with Connection.connect(database_url) as conn:
+        ensure_source_id_column(conn)
         session_id = create_session(
             conn,
             method=args.method,
@@ -365,7 +478,7 @@ def run(args: argparse.Namespace) -> None:
                     except Exception as exc:  # noqa: BLE001
                         print(f"final flush failed: {exc}", file=sys.stderr)
             elif listen_tcp is not None:
-                print("Ctrl+C to stop")
+                print("Ctrl+C to stop (multiple C5s may connect)")
                 total = _ingest_stream(
                     conn,
                     session_id,
@@ -392,14 +505,18 @@ def run(args: argparse.Namespace) -> None:
             print(f"stopped session_id={session_id} rows={total}")
             print(
                 "verify:\n"
-                f"  SELECT count(*), min(host_ts), max(host_ts)\n"
-                f"  FROM csi_samples WHERE session_id = '{session_id}';"
+                f"  SELECT source_id, count(*), min(host_ts), max(host_ts)\n"
+                f"  FROM csi_samples WHERE session_id = '{session_id}'\n"
+                f"  GROUP BY 1 ORDER BY 1;"
             )
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Ingest ESP32 CSI_DATA lines (USB serial or TCP) into PostgreSQL."
+        description=(
+            "Ingest ESP32 CSI_DATA (USB or TCP) into PostgreSQL. "
+            "TCP accepts multiple C5 clients (fan-in) on one port."
+        )
     )
     p.add_argument(
         "--port",
@@ -413,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="PORT",
-        help="Listen for CSI_DATA over TCP (default port 9055). Skips USB serial.",
+        help="Listen for CSI_DATA over TCP (default 9055). Multi-C5 fan-in.",
     )
     p.add_argument(
         "--method",
@@ -439,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--from-file",
         default=None,
-        help="Replay CSI_DATA lines from a text/CSV file (no serial; for local dry-run)",
+        help="Replay CSI_DATA lines from a text/CSV file (no serial)",
     )
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     p.add_argument(
