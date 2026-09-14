@@ -1,26 +1,30 @@
 ###############################################
-# Local MediaMTX lab config (this Mac / Mini)
-# Paths: cam1 = Mac webcam, cam_xiao = XIAO camera
+# MediaMTX lab — ESP32-CAM / XIAO → all protocols
 #
-# Preferred (forever): CameraRTSPWiFi on board → MediaMTX pulls RTSP.
-#   XIAO_RTSP_URL=rtsp://10.128.93.25:8554/mjpeg/1 ./scripts/mediamtx_run.sh
+# Official pattern (MediaMTX maintainer, discussion #3575):
+#   ESP MJPEG HTTP is NOT a native MediaMTX source.
+#   Use FFmpeg in runOnInit to ingest, then viewers use
+#   RTSP / HLS / WebRTC / RTMP from MediaMTX.
 #
-# Fallback (MJPEG + ffmpeg): CameraWebServerWiFi → runOnInit publish_xiao.
-#   mediamtx_run.sh fills rtsp://10.128.93.25:8554/mjpeg/1 / __CAM_XIAO_RUN_ON_INIT__.
-#   Do NOT also run publish_xiao.sh by hand unless XIAO_EXTERNAL_PUBLISH=1.
+#   https://github.com/bluenviron/mediamtx/discussions/3575
+#   https://mediamtx.org/docs/usage/hooks
+#   https://mediamtx.org/docs/publish/ffmpeg
+#
+# Browsers need H.264 (HLS/WebRTC do not support MJPEG):
+#   https://mediamtx.org/docs/read/hls
+#   https://mediamtx.org/docs/read/webrtc
+#
+# Start: ./scripts/mediamtx_run.sh
+# Do NOT also run publish_xiao.sh unless XIAO_EXTERNAL_PUBLISH=1.
 ###############################################
 
 logLevel: info
 logDestinations: [stdout]
 
-# Publisher can pause briefly on ESP Wi‑Fi; keep sessions alive.
 readTimeout: 60s
 writeTimeout: 60s
+writeQueueSize: 1024
 udpMaxPayloadSize: 1400
-
-###############################################
-# Protocols
-###############################################
 
 rtsp: yes
 rtspAddress: :8554
@@ -35,7 +39,7 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
-# fmp4 is more tolerant of short publisher gaps than lowLatency.
+# fmp4 tolerates short publisher gaps better than lowLatency.
 hlsVariant: fmp4
 hlsSegmentDuration: 2s
 hlsPartDuration: 500ms
@@ -47,18 +51,12 @@ webrtcAllowOrigins: ["*"]
 webrtcAdditionalHosts: [10.128.93.23]
 webrtcICEServers2: []
 
-###############################################
-# Paths
-###############################################
-
 paths:
   cam1:
     source: publisher
 
   cam_xiao:
-    # Replaced by mediamtx_run.sh:
-    #   RTSP pull: source: rtsp://…  (no runOnInit)
-    #   MJPEG push: source: publisher + runOnInit publish_xiao
-    source: rtsp://10.128.93.25:8554/mjpeg/1
-    sourceProtocol: tcp
-# RTSP pull mode (no ffmpeg runOnInit)
+    source: publisher
+    # Filled by mediamtx_run.sh → absolute path to bridge script.
+    runOnInit: /Users/saikarthik/Desktop/camera_module/mediamtx/run_xiao_publish.sh
+    runOnInitRestart: yes

@@ -101,45 +101,36 @@ Acceptance: video in VLC and browser; stop `publish_webcam.sh` → stream ends; 
 
 ## Stage 2 — XIAO → all protocols (browsers included)
 
-Board: flash `firmware/CameraRTSPWiFi` (serial shows `rtsp://10.128.93.25:8554/mjpeg/1`).
+**Correct path (research + MediaMTX maintainer):** ESP MJPEG is not a native
+MediaMTX source — FFmpeg publishes H.264 into MediaMTX, then all protocols work.
+Full write-up: [`ESP32_MEDIAMTX.md`](ESP32_MEDIAMTX.md).
 
-ESP outputs **MJPEG**; browsers need **H.264**. One command on the Mini does both:
+Board: flash `firmware/CameraWebServerWiFi` (serial: `http://10.128.93.25`).
+
+On Mini (after syncing scripts + `mediamtx.yml`):
 
 ```bash
 ./scripts/mediamtx_run.sh
-# ESP RTSP → ffmpeg H.264 → MediaMTX → RTSP + HLS + WebRTC + RTMP
 ```
 
-Do **not** also run `publish_xiao.sh` (MediaMTX already starts it via `runOnInit`).
+Do **not** also run `publish_xiao.sh`.
 
-**Watch** (pick one)
+**Watch**
 
-| Client | Protocol | URL (on Mini / colleague) |
-|--------|----------|---------------------------|
+| Client | Protocol | URL |
+|--------|----------|-----|
 | Browser | HLS | http://10.128.93.23:8888/cam_xiao/ |
 | Browser | WebRTC | http://10.128.93.23:8889/cam_xiao/ |
 | VLC | RTSP | `rtsp://10.128.93.23:8554/cam_xiao` |
 
-Localhost variants use `127.0.0.1` instead of `10.128.93.23`.
-
-Fallback if board still has CameraWebServerWiFi (HTTP MJPEG):
-
-```bash
-XIAO_RTSP_URL= ./scripts/mediamtx_run.sh
-```
-
 ## End-to-end example (Mac Mini + XIAO on LabPSK)
 
 ```bash
-# One terminal on Mini (after syncing this repo)
+pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao'
 ./scripts/mediamtx_run.sh
 ```
 
-Then open **one** viewer URL:
-
-- Browser (HLS): http://10.128.93.23:8888/cam_xiao/
-- Browser (WebRTC): http://10.128.93.23:8889/cam_xiao/
-- VLC: `rtsp://10.128.93.23:8554/cam_xiao`
+Then open HLS or WebRTC above.
 
 
 ## Ports (localhost)
