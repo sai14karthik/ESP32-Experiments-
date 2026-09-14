@@ -24,10 +24,10 @@ set -uo pipefail
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
 XIAO_URL="${1:-${XIAO_MJPEG_URL:-}}"
 MODE="${PUBLISH_MODE:-capture}"
-FPS="${XIAO_FPS:-6}"
-BITRATE="${XIAO_BITRATE:-400k}"
+FPS="${XIAO_FPS:-5}"
+BITRATE="${XIAO_BITRATE:-250k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
-STALL_S="${PUBLISH_STALL_S:-25}"
+STALL_S="${PUBLISH_STALL_S:-40}"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg not found — brew install ffmpeg" >&2
@@ -87,18 +87,25 @@ stall_watchdog() {
 run_capture_fg() {
   local progress fpid wdog
   progress="$(mktemp -t xiao_cap_XXXXXX)"
+  # Poll /capture a bit faster than output fps so the fps filter never starves
+  # (starvation stretches HLS segments → Safari "network timeout").
+  local poll_s
+  poll_s="$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/(f+1)}')"
   (
     while true; do
-      curl -fsS --max-time 3 "$CAPTURE_URL" 2>/dev/null || sleep 0.5
-      sleep "$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
+      curl -fsS --max-time 2 "$CAPTURE_URL" 2>/dev/null || true
+      sleep "$poll_s"
     done
   ) | ffmpeg -hide_banner -loglevel error -nostats -progress "$progress" \
       -fflags +genpts+discardcorrupt \
       -f image2pipe -framerate "$FPS" -c:v mjpeg -i - \
-      -an -c:v libx264 -profile:v baseline -level 3.0 -preset ultrafast \
-      -tune zerolatency -pix_fmt yuv420p \
-      -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$BITRATE" \
+      -an \
+      -vf "fps=${FPS},format=yuv420p" -fps_mode cfr \
+      -c:v libx264 -profile:v baseline -level 3.0 -preset ultrafast \
+      -tune zerolatency \
+      -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$((${BITRATE%k} * 2))k" \
       -g $((FPS * 2)) -keyint_min "$FPS" -sc_threshold 0 -bf 0 \
+      -x264-params "nal-hrd=cbr:force-cfr=1" \
       -f rtsp -rtsp_transport tcp "$MTX_URL" &
   fpid=$!
   stall_watchdog "$progress" "$fpid" &
@@ -121,10 +128,13 @@ run_stream_fg() {
     -fflags +nobuffer+genpts+discardcorrupt -flags low_delay \
     -rw_timeout 8000000 \
     -f mjpeg -use_wallclock_as_timestamps 1 -r "$FPS" -i "$XIAO_URL" \
-    -an -c:v libx264 -profile:v baseline -level 3.0 -preset ultrafast \
-    -tune zerolatency -pix_fmt yuv420p \
-    -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$BITRATE" \
+    -an \
+    -vf "fps=${FPS},format=yuv420p" -fps_mode cfr \
+    -c:v libx264 -profile:v baseline -level 3.0 -preset ultrafast \
+    -tune zerolatency \
+    -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$((${BITRATE%k} * 2))k" \
     -g $((FPS * 2)) -keyint_min "$FPS" -sc_threshold 0 -bf 0 \
+    -x264-params "nal-hrd=cbr:force-cfr=1" \
     -f rtsp -rtsp_transport tcp "$MTX_URL" &
   fpid=$!
   stall_watchdog "$progress" "$fpid" &
