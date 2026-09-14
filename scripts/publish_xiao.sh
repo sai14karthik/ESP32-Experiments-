@@ -48,16 +48,14 @@ echo "  fps=$FPS bitrate=$BITRATE  (PUBLISH_ONCE=1 to disable restart)" >&2
 echo "Ctrl+C to stop." >&2
 
 run_once() {
-  # HTTP reconnect flags help when LabPSK / ESP briefly drops the MJPEG socket.
-  # Bitrate cap keeps RTP under MediaMTX's UDP payload limit (avoids remux churn).
+  # Do NOT use ffmpeg HTTP reconnect here — after ESP EOF it often sits half-dead
+  # with no frames while MediaMTX still thinks a publisher is connected.
+  # Exit cleanly instead; the bash loop starts a fresh ffmpeg.
   ffmpeg -hide_banner -loglevel warning \
-    -fflags +nobuffer+genpts \
+    -xerror \
+    -fflags +nobuffer+genpts+discardcorrupt \
     -flags low_delay \
-    -reconnect 1 \
-    -reconnect_at_eof 1 \
-    -reconnect_streamed 1 \
-    -reconnect_delay_max 5 \
-    -rw_timeout 15000000 \
+    -rw_timeout 10000000 \
     -f mjpeg \
     -r "$FPS" \
     -i "$XIAO_URL" \
