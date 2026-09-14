@@ -31,7 +31,11 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
-hlsVariant: lowLatency
+# lowLatency HLS is brittle when the publisher briefly restarts (~1 min ESP stalls).
+hlsVariant: fMP4
+hlsSegmentDuration: 2
+hlsPartDuration: 0.5
+hlsSegmentCount: 7
 
 webrtc: yes
 webrtcAddress: :8889
