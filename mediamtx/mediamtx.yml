@@ -6,13 +6,20 @@
 logLevel: info
 logDestinations: [stdout]
 
+# ESP→ffmpeg can stall for seconds; default 10s drops the publisher and kills viewers.
+readTimeout: 30s
+writeTimeout: 30s
+# Keep remuxed H264 under ethernet MTU (avoids "RTP packets are too big" churn).
+udpMaxPayloadSize: 1200
+
 ###############################################
 # Protocols
 ###############################################
 
 rtsp: yes
 rtspAddress: :8554
-rtspTransports: [tcp, udp]
+# TCP only for lab publish/play — UDP ICE/RTP was flaky across LabPSK clients.
+rtspTransports: [tcp]
 # Avoid clash with anything already bound on :8000
 rtpAddress: :8002
 rtcpAddress: :8003
@@ -29,7 +36,8 @@ hlsVariant: lowLatency
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
-# Local lab — no STUN required for 127.0.0.1
+# Advertise Mini LabPSK IP so remote WebRTC clients don't get 127.0.0.1 ICE.
+webrtcAdditionalHosts: [10.128.93.23]
 webrtcICEServers2: []
 
 ###############################################
