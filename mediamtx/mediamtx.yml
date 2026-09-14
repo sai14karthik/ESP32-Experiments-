@@ -39,11 +39,11 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
-# Longer segments: ESP capture jitter was stretching 2s→3s and killing Safari/iOS.
+# Prefer WebRTC for low lag. HLS keeps a short playlist.
 hlsVariant: fmp4
-hlsSegmentDuration: 4s
-hlsPartDuration: 1s
-hlsSegmentCount: 10
+hlsSegmentDuration: 2s
+hlsPartDuration: 500ms
+hlsSegmentCount: 3
 
 webrtc: yes
 webrtcAddress: :8889
