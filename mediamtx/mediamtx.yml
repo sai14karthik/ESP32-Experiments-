@@ -1,21 +1,17 @@
 ###############################################
-# MediaMTX lab — ESP32-CAM / XIAO → all protocols
+# MediaMTX lab — ESP / XIAO → RTSP + HLS + WebRTC
 #
-# Official pattern (MediaMTX maintainer, discussion #3575):
-#   ESP MJPEG HTTP is NOT a native MediaMTX source.
-#   Use FFmpeg in runOnInit to ingest, then viewers use
-#   RTSP / HLS / WebRTC / RTMP from MediaMTX.
-#
+# Official ESP MJPEG ingest (maintainer):
+#   FFmpeg runOnInit → publish H.264 into MediaMTX
 #   https://github.com/bluenviron/mediamtx/discussions/3575
 #   https://mediamtx.org/docs/usage/hooks
 #   https://mediamtx.org/docs/publish/ffmpeg
 #
-# Browsers need H.264 (HLS/WebRTC do not support MJPEG):
-#   https://mediamtx.org/docs/read/hls
-#   https://mediamtx.org/docs/read/webrtc
+# WebRTC on LabPSK: UDP ICE often fails (client isolation / firewall)
+# → "peer connection closed". MediaMTX fix = ICE over TCP:
+#   https://mediamtx.org/docs/features/webrtc-specific-features
 #
 # Start: ./scripts/mediamtx_run.sh
-# Do NOT also run publish_xiao.sh unless XIAO_EXTERNAL_PUBLISH=1.
 ###############################################
 
 logLevel: info
@@ -24,13 +20,11 @@ logDestinations: [stdout]
 readTimeout: 60s
 writeTimeout: 60s
 writeQueueSize: 1024
-udpMaxPayloadSize: 1400
+udpMaxPayloadSize: 1200
 
 rtsp: yes
 rtspAddress: :8554
 rtspTransports: [tcp]
-rtpAddress: :8002
-rtcpAddress: :8003
 
 rtmp: yes
 rtmpAddress: :1935
@@ -39,16 +33,20 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
-# Prefer WebRTC for low lag. HLS keeps a short playlist.
+# fmp4 + short playlist; use HLS when WebRTC ICE fails on LabPSK.
 hlsVariant: fmp4
 hlsSegmentDuration: 2s
 hlsPartDuration: 500ms
-hlsSegmentCount: 3
+hlsSegmentCount: 5
 
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
+# LAN IP clients must use (Mini Ethernet on LabPSK).
 webrtcAdditionalHosts: [10.128.93.23]
+# LabPSK / isolation: prefer TCP ICE (official when UDP is blocked).
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
 webrtcICEServers2: []
 
 paths:
@@ -57,6 +55,5 @@ paths:
 
   cam_xiao:
     source: publisher
-    # Filled by mediamtx_run.sh → absolute path to bridge script.
     runOnInit: __CAM_XIAO_RUN_ON_INIT__
     runOnInitRestart: yes
