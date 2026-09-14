@@ -42,7 +42,15 @@ hlsSegmentDuration: 4s
 hlsPartDuration: 1s
 hlsSegmentCount: 10
 
-webrtc: no
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ["*"]
+webrtcIPsFromInterfaces: false
+# Filled by mediamtx_run.sh with this Mac's LAN IP (home Wi‑Fi).
+webrtcAdditionalHosts: [__WEBRTC_HOST__]
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcICEServers2: []
 
 ###############################################
 # Paths
