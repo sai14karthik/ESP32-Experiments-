@@ -99,43 +99,48 @@ ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam1
 
 Acceptance: video in VLC and browser; stop `publish_webcam.sh` → stream ends; restart → returns.
 
-## Stage 2 — XIAO MJPEG bridge
+## Stage 2 — XIAO → all protocols (browsers included)
 
-1. Flash / run `firmware/CameraWebServerWiFi` so the board joins your lab Wi‑Fi (e.g. LabPSK).
-2. Confirm in a browser: `http://<xiao-ip>/` (MJPEG stream is usually `:81/stream`).
-3. Keep MediaMTX running, then:
+Board: flash `firmware/CameraRTSPWiFi` (serial shows `rtsp://10.128.93.25:8554/mjpeg/1`).
+
+ESP outputs **MJPEG**; browsers need **H.264**. One command on the Mini does both:
 
 ```bash
-./scripts/publish_xiao.sh http://<xiao-ip>:81/stream
-# Example (LabPSK):
-# ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
+./scripts/mediamtx_run.sh
+# ESP RTSP → ffmpeg H.264 → MediaMTX → RTSP + HLS + WebRTC + RTMP
 ```
 
-**Watch** (pick one client)
+Do **not** also run `publish_xiao.sh` (MediaMTX already starts it via `runOnInit`).
 
-| Client | Protocol | URL |
-|--------|----------|-----|
-| VLC | RTSP | `rtsp://127.0.0.1:8554/cam_xiao` |
-| Browser | HLS | http://127.0.0.1:8888/cam_xiao/ |
-| Browser | WebRTC | http://127.0.0.1:8889/cam_xiao/ |
+**Watch** (pick one)
 
-`cam1` and `cam_xiao` can run at the same time.
+| Client | Protocol | URL (on Mini / colleague) |
+|--------|----------|---------------------------|
+| Browser | HLS | http://10.128.93.23:8888/cam_xiao/ |
+| Browser | WebRTC | http://10.128.93.23:8889/cam_xiao/ |
+| VLC | RTSP | `rtsp://10.128.93.23:8554/cam_xiao` |
+
+Localhost variants use `127.0.0.1` instead of `10.128.93.23`.
+
+Fallback if board still has CameraWebServerWiFi (HTTP MJPEG):
+
+```bash
+XIAO_RTSP_URL= ./scripts/mediamtx_run.sh
+```
 
 ## End-to-end example (Mac Mini + XIAO on LabPSK)
 
 ```bash
-# Terminal A
+# One terminal on Mini (after syncing this repo)
 ./scripts/mediamtx_run.sh
-
-# Terminal B
-./scripts/publish_xiao.sh http://10.128.93.25:81/stream
 ```
 
 Then open **one** viewer URL:
 
-- VLC: `rtsp://127.0.0.1:8554/cam_xiao`
-- Browser (HLS): http://127.0.0.1:8888/cam_xiao/
-- Browser (WebRTC): http://127.0.0.1:8889/cam_xiao/
+- Browser (HLS): http://10.128.93.23:8888/cam_xiao/
+- Browser (WebRTC): http://10.128.93.23:8889/cam_xiao/
+- VLC: `rtsp://10.128.93.23:8554/cam_xiao`
+
 
 ## Ports (localhost)
 

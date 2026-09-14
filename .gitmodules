@@ -16,3 +16,6 @@
 [submodule "espectre"]
 	path = espectre
 	url = https://github.com/francescopace/espectre
+[submodule "firmware/CameraRTSPWiFi/Micro-RTSP"]
+	path = firmware/CameraRTSPWiFi/Micro-RTSP
+	url = https://github.com/geeksville/Micro-RTSP.git

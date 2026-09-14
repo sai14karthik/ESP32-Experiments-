@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Bridge XIAO → MediaMTX path cam_xiao (capture polls by default).
+# Bridge XIAO → MediaMTX path cam_xiao as H.264 (needed for HLS / WebRTC browsers).
+#
+# Modes (PUBLISH_MODE):
+#   rtsp     — pull CameraRTSPWiFi rtsp://…/mjpeg/1 → H.264 (preferred / continuous)
+#   capture  — poll CameraWebServerWiFi /capture → H.264
+#   stream   — HTTP MJPEG :81/stream → H.264 (flaky long-lived)
 #
 # When MediaMTX runOnInit calls this (PUBLISH_ONCE=1), ffmpeg runs in the
 # FOREGROUND so MTX tracks one publisher. Backgrounding ffmpeg caused a
@@ -7,8 +12,8 @@
 set -uo pipefail
 
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
-XIAO_URL="${1:-${XIAO_MJPEG_URL:-}}"
-MODE="${PUBLISH_MODE:-capture}"
+XIAO_URL="${1:-${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-}}}"
+MODE="${PUBLISH_MODE:-rtsp}"
 FPS="${XIAO_FPS:-6}"
 BITRATE="${XIAO_BITRATE:-400k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
@@ -18,13 +23,22 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg not found" >&2
   exit 1
 fi
-if ! command -v curl >/dev/null 2>&1; then
+if [[ -z "$XIAO_URL" ]]; then
+  echo "Usage: $0 rtsp://<xiao-ip>:8554/mjpeg/1" >&2
+  echo "   or: $0 http://<xiao-ip>:81/stream   (PUBLISH_MODE=capture|stream)" >&2
+  exit 2
+fi
+
+# Auto-pick mode from URL if still default-ish
+if [[ "$XIAO_URL" == rtsp://* ]]; then
+  MODE=rtsp
+elif [[ "$MODE" == "rtsp" ]]; then
+  MODE=capture
+fi
+
+if [[ "$MODE" != "rtsp" ]] && ! command -v curl >/dev/null 2>&1; then
   echo "curl not found" >&2
   exit 1
-fi
-if [[ -z "$XIAO_URL" ]]; then
-  echo "Usage: $0 http://<xiao-ip>:81/stream" >&2
-  exit 2
 fi
 
 capture_url_from() {
@@ -34,11 +48,16 @@ capture_url_from() {
   u="${u%/}"
   echo "${u}/capture"
 }
-CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
+CAPTURE_URL=""
+if [[ "$MODE" != "rtsp" ]]; then
+  CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
+fi
 
-echo "Bridging XIAO → MediaMTX (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
-echo "  capture: $CAPTURE_URL" >&2
+echo "Bridging XIAO → MediaMTX H.264 (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
+echo "  source : $XIAO_URL" >&2
+[[ -n "$CAPTURE_URL" ]] && echo "  capture: $CAPTURE_URL" >&2
 echo "  dest   : $MTX_URL  fps=$FPS bitrate=$BITRATE" >&2
+echo "  browsers: HLS :8888/cam_xiao/  WebRTC :8889/cam_xiao/" >&2
 
 # Kill any OTHER stray publishers to this path (old manual publish_xiao).
 pkill -f "ffmpeg.*${MTX_PATH:-cam_xiao}" 2>/dev/null || true
@@ -150,12 +169,49 @@ run_stream_fg() {
   return "$rc"
 }
 
+# ESP Micro-RTSP is MJPEG — remux alone is not enough for HLS/WebRTC; re-encode H.264.
+run_rtsp_fg() {
+  local progress wdog
+  progress="$(mktemp -t xiao_rtsp_XXXXXX)"
+  set -m
+  ffmpeg -hide_banner -loglevel error \
+    -nostats \
+    -progress "$progress" \
+    -fflags +genpts+discardcorrupt \
+    -flags low_delay \
+    -rtsp_transport tcp \
+    -timeout 8000000 \
+    -i "$XIAO_URL" \
+    -an \
+    -c:v libx264 \
+    -preset veryfast \
+    -tune zerolatency \
+    -pix_fmt yuv420p \
+    -b:v "$BITRATE" \
+    -maxrate "$BITRATE" \
+    -bufsize "$BITRATE" \
+    -g $((FPS * 2)) \
+    -bf 0 \
+    -f rtsp \
+    -rtsp_transport tcp \
+    "$MTX_URL" &
+  local fpid=$!
+  stall_watchdog "$progress" "$fpid" &
+  wdog=$!
+  wait "$fpid"
+  local rc=$?
+  kill "$wdog" 2>/dev/null || true
+  wait "$wdog" 2>/dev/null || true
+  rm -f "$progress"
+  return "$rc"
+}
+
 run_once() {
-  if [[ "$MODE" == "stream" ]]; then
-    run_stream_fg
-  else
-    run_capture_fg
-  fi
+  case "$MODE" in
+    rtsp) run_rtsp_fg ;;
+    stream) run_stream_fg ;;
+    *) run_capture_fg ;;
+  esac
 }
 
 if [[ "$MODE" == "capture" ]]; then
