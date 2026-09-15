@@ -2,17 +2,12 @@
 # Bridge ESP camera → MediaMTX path cam_xiao.
 #
 # Canonical pattern (MediaMTX official webcam docs, adapted for ESP MJPEG):
-#   ESP outputs MJPEG (HTTP or Micro-RTSP). MediaMTX needs H.264 for WebRTC/HLS.
-#   Mini ffmpeg re-encodes and publishes RTSP into MediaMTX.
-#   Docs: https://mediamtx.org/docs/publish/generic-webcams
-#         Espressif: ESP32-S3 has no HW H.264 — host must transcode MJPEG.
+#   https://mediamtx.org/docs/publish/generic-webcams
+#   Espressif: ESP32-S3 has no HW H.264 — host must transcode MJPEG.
 #
 # Prefer:
 #   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
-# Watch live:
-#   http://<MINI_IP>:8889/cam_xiao/   (WebRTC — use this)
-# Backup:
-#   http://<MINI_IP>:8888/cam_xiao/   (HLS — multi-second lag by design)
+# Watch live: http://<MINI_IP>:8889/cam_xiao/
 set -uo pipefail
 
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
@@ -29,11 +24,12 @@ else
   MODE="${PUBLISH_MODE}"
 fi
 
-# Keep bitrate near MediaMTX webcam example (-b:v 600k).
 FPS="${XIAO_FPS:-10}"
 BITRATE="${XIAO_BITRATE:-600k}"
-RETRY_S="${PUBLISH_RETRY_S:-2}"
-STALL_S="${PUBLISH_STALL_S:-60}"
+RETRY_S="${PUBLISH_RETRY_S:-3}"
+STALL_S="${PUBLISH_STALL_S:-45}"
+# Wait this long for the first encoded frame before declaring stall.
+CONNECT_S="${PUBLISH_CONNECT_S:-90}"
 HOLD_LAST="${PUBLISH_HOLD_LAST:-0}"
 CURL_MAX_S="${PUBLISH_CURL_MAX_S:-8}"
 MAX_LIFE_S="${PUBLISH_MAX_LIFE_S:-0}"
@@ -47,7 +43,6 @@ if [[ -z "$XIAO_URL" ]]; then
   cat >&2 <<'EOF'
 Usage:
   ./scripts/publish_xiao.sh rtsp://10.128.93.25:554/mjpeg/1
-  ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
 Prefer: XIAO_RTSP_URL=rtsp://… ./scripts/mediamtx_run.sh
 EOF
   exit 2
@@ -66,12 +61,12 @@ if [[ "$MODE" == "capture" || "$MODE" == "stream" ]]; then
   CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
 fi
 
-echo "Bridging XIAO → MediaMTX (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
+echo "Bridging XIAO → MediaMTX (mode=$MODE connect=${CONNECT_S}s stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
 echo "  source : $XIAO_URL" >&2
 echo "  dest   : $MTX_URL  fps=$FPS bitrate=$BITRATE" >&2
 
 kill_pgid() {
-  local pid="$1"
+  local pid="${1:-}"
   [[ -z "$pid" ]] && return 0
   kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
   sleep 0.3
@@ -81,17 +76,26 @@ kill_pgid() {
 
 watch_progress() {
   local progress="$1" fpid="$2" started="$3"
-  local last="" last_change=$SECONDS out now
+  local last="" last_change=$SECONDS out now got_frame=0
   while kill -0 "$fpid" 2>/dev/null; do
     if [[ -f "$progress" ]]; then
       out="$(grep -E '^out_time_ms=' "$progress" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
       if [[ -n "$out" && "$out" != "$last" ]]; then
         last="$out"
         last_change=$SECONDS
+        if [[ "$got_frame" -eq 0 ]]; then
+          got_frame=1
+          echo "$(date '+%H:%M:%S') first frame OK" >&2
+        fi
       fi
     fi
     now=$SECONDS
-    if (( STALL_S > 0 && now - last_change >= STALL_S )); then
+    if [[ "$got_frame" -eq 0 ]]; then
+      if (( now - started >= CONNECT_S )); then
+        echo "$(date '+%H:%M:%S') no frames in ${CONNECT_S}s — restart" >&2
+        return 1
+      fi
+    elif (( STALL_S > 0 && now - last_change >= STALL_S )); then
       echo "$(date '+%H:%M:%S') stall ${STALL_S}s — restart" >&2
       return 1
     fi
@@ -104,21 +108,25 @@ watch_progress() {
   return 0
 }
 
-# Official MediaMTX publish shape (webcam doc) + MJPEG→H.264 for ESP.
-# -c:v libx264 -pix_fmt yuv420p -preset ultrafast -b:v 600k -f rtsp …
-# Extra: -tune zerolatency, -vf fps=N (CFR — stops encode flood), -an, TCP.
+# MediaMTX webcam recipe + ESP MJPEG input.
+# Do NOT use fps= filter here — Micro-RTSP timestamps can make fps= hang with no output.
+# Output -r paces encode; ESP RTP timestamps pace input.
 ffmpeg_h264_out() {
+  local prog="$1"
+  shift
   ffmpeg -hide_banner -loglevel warning \
     -nostats \
-    -progress "$1" \
-    "${@:2}" \
+    -progress "$prog" \
+    "$@" \
     -an \
-    -vf "fps=${FPS},format=yuv420p" \
-    -c:v libx264 \
     -pix_fmt yuv420p \
+    -c:v libx264 \
     -preset ultrafast \
     -tune zerolatency \
     -b:v "$BITRATE" \
+    -maxrate "$BITRATE" \
+    -bufsize "$BITRATE" \
+    -r "$FPS" \
     -g $((FPS * 2)) \
     -bf 0 \
     -f rtsp \
@@ -130,13 +138,15 @@ run_rtsp() {
   local progress fpid started
   progress="$(mktemp -t xiao_rtsp_XXXXXX)"
   started=$SECONDS
+  # Capture paths into trap now — locals vanish on RETURN with set -u.
+  trap "rm -f '$progress'; kill_pgid \"\${fpid:-}\"" RETURN
   set -m
   ffmpeg_h264_out "$progress" \
     -fflags +genpts+discardcorrupt \
     -rtsp_transport tcp \
+    -timeout 10000000 \
     -i "$XIAO_URL" &
   fpid=$!
-  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
@@ -148,13 +158,13 @@ run_stream() {
   local progress fpid started
   progress="$(mktemp -t xiao_str_XXXXXX)"
   started=$SECONDS
+  trap "rm -f '$progress'; kill_pgid \"\${fpid:-}\"" RETURN
   set -m
   ffmpeg_h264_out "$progress" \
     -fflags +genpts+discardcorrupt \
     -f mjpeg \
     -i "$XIAO_URL" &
   fpid=$!
-  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
@@ -168,6 +178,7 @@ run_capture() {
   jpgdir="$(mktemp -d -t xiao_hold_XXXXXX)"
   lastjpg="$jpgdir/last.jpg"
   started=$SECONDS
+  trap "rm -rf '$jpgdir'; rm -f '$progress'; kill_pgid \"\${fpid:-}\"" RETURN
   set -m
   (
     interval="$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
@@ -190,7 +201,6 @@ run_capture() {
       -c:v mjpeg \
       -i - &
   fpid=$!
-  trap 'rm -rf "$jpgdir"; rm -f "$progress"; kill_pgid "$fpid"' RETURN
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
@@ -217,12 +227,15 @@ if [[ "$MODE" == "capture" ]]; then
     echo "WARN: $CAPTURE_URL not reachable — will keep trying" >&2
   fi
 elif [[ "$MODE" == "rtsp" ]]; then
-  echo "RTSP pull (MediaMTX webcam pattern + fps=${FPS})" >&2
+  echo "RTSP pull (MediaMTX webcam pattern, no fps= filter)" >&2
 fi
 
 if [[ "${PUBLISH_ONCE:-0}" == "1" ]]; then
   run_once
-  exit $?
+  ec=$?
+  # Brief pause so ESP RTSP session can close before MediaMTX restarts us.
+  sleep 2
+  exit "$ec"
 fi
 
 while true; do
