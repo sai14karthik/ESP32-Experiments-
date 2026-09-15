@@ -29,6 +29,8 @@ RETRY_S="${PUBLISH_RETRY_S:-2}"
 STALL_S="${PUBLISH_STALL_S:-90}"
 # 0 = never freeze on a stale JPEG (better motion); 1 = hold last frame on ESP blips
 HOLD_LAST="${PUBLISH_HOLD_LAST:-0}"
+# VGA JPEGs over LabPSK often need >3s; too-low → false "not reachable" / stalled pipe
+CURL_MAX_S="${PUBLISH_CURL_MAX_S:-8}"
 if [[ -z "${PUBLISH_MAX_LIFE_S:-}" ]]; then
   MAX_LIFE_S=0
 else
@@ -117,7 +119,7 @@ run_capture() {
     while true; do
       t0="$(python3 -c 'import time; print(time.time())')"
       got=0
-      if curl -fsS --max-time 2 -o "$jpgdir/n.jpg" "$CAPTURE_URL" 2>/dev/null; then
+      if curl -fsS --max-time "$CURL_MAX_S" -o "$jpgdir/n.jpg" "$CAPTURE_URL" 2>/dev/null; then
         mv -f "$jpgdir/n.jpg" "$lastjpg"
         got=1
       fi
@@ -212,10 +214,10 @@ run_once() {
 }
 
 if [[ "$MODE" == "capture" ]]; then
-  if curl -fsS --max-time 3 -o /dev/null "$CAPTURE_URL"; then
+  if curl -fsS --max-time "$CURL_MAX_S" -o /dev/null "$CAPTURE_URL"; then
     echo "capture OK: $CAPTURE_URL" >&2
   else
-    echo "WARN: $CAPTURE_URL not reachable" >&2
+    echo "WARN: $CAPTURE_URL not reachable (timeout ${CURL_MAX_S}s) — bridge will keep trying" >&2
   fi
 fi
 
