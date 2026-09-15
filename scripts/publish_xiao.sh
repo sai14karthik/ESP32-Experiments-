@@ -32,8 +32,8 @@ if [[ -z "${PUBLISH_MODE:-}" ]]; then
 else
   MODE="${PUBLISH_MODE}"
 fi
-FPS="${XIAO_FPS:-10}"
-BITRATE="${XIAO_BITRATE:-1000k}"
+FPS="${XIAO_FPS:-12}"
+BITRATE="${XIAO_BITRATE:-1200k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
 # Only restart if ffmpeg truly stops producing (was 20s → HLS "network timeout" every ~30s).
 STALL_S="${PUBLISH_STALL_S:-90}"
@@ -236,22 +236,25 @@ run_rtsp() {
     -progress "$progress" \
     -fflags +genpts+discardcorrupt+nobuffer \
     -flags low_delay \
+    -probesize 32 \
+    -analyzeduration 0 \
     -rtsp_transport tcp \
     -i "$XIAO_URL" \
     -an \
     -c:v libx264 \
     -profile:v baseline \
-    -preset veryfast \
+    -preset ultrafast \
     -tune zerolatency \
     -pix_fmt yuv420p \
+    -fps_mode cfr \
     -r "$FPS" \
     -b:v "$BITRATE" \
     -maxrate "$BITRATE" \
-    -bufsize 2000k \
-    -g $((FPS * 2)) \
-    -keyint_min $((FPS * 2)) \
+    -bufsize "$BITRATE" \
+    -g "$FPS" \
+    -keyint_min "$FPS" \
     -bf 0 \
-    -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=$((FPS * 2))" \
+    -x264-params "repeat-headers=1:keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL" &

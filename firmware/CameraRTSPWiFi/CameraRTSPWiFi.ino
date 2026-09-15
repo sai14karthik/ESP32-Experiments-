@@ -13,7 +13,7 @@ const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 // Port 554 matches esp32cam-rtsp / CCTV convention (was 8554).
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 100;  // ~10 fps — continuous live to Mini
+static const uint32_t kMsecPerFrame = 80;  // ~12.5 fps — smoother HLS on Mini
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -44,7 +44,7 @@ static camera_config_t xiao_cam_config() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
+  config.jpeg_quality = 14;  // smaller JPEGs → fewer Wi‑Fi stalls
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
@@ -87,6 +87,13 @@ void setup() {
   if (err != ESP_OK) {
     Serial.printf("Camera init failed 0x%x\n", (unsigned)err);
     return;
+  }
+
+  // XIAO Sense cam is mounted upside-down relative to the board silkscreen.
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    s->set_vflip(s, 1);
+    s->set_hmirror(s, 1);
   }
 
   WiFi.mode(WIFI_STA);
