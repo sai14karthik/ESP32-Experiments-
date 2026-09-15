@@ -1,30 +1,19 @@
 ###############################################
-# Local MediaMTX lab config (this Mac only)
-# Paths: cam1 = Mac webcam, cam_xiao = XIAO via FFmpeg
-#
-# Official MediaMTX pattern for continuous publish:
-#   runOnInit + runOnInitRestart
-#   https://mediamtx.org/docs → hooks / generic webcams
-#
-# mediamtx_run.sh fills __CAM_XIAO_RUN_ON_INIT__ with run_xiao_publish.sh
-# (publish_xiao.sh). Prefer XIAO_RTSP_URL=rtsp://… for continuous live;
-# XIAO_MJPEG_URL=http://… falls back to /capture polls. One terminal —
-# do NOT also run publish_xiao.sh by hand unless XIAO_EXTERNAL_PUBLISH=1.
+# MediaMTX lab config — aligned with official docs
+# https://mediamtx.org/docs/publish/generic-webcams
+# https://mediamtx.org/docs/features/decrease-packet-loss
+# https://mediamtx.org/docs/references/configuration-file
 ###############################################
 
 logLevel: info
 logDestinations: [stdout]
 
-# Publisher can pause briefly on ESP Wi‑Fi; keep sessions alive.
-readTimeout: 60s
-writeTimeout: 60s
-# Small queue = drop late frames instead of buffering 3–4s of lag on WebRTC.
-writeQueueSize: 32
+readTimeout: 20s
+writeTimeout: 20s
+# Official fix for "reader is too slow, discarding N frames"
+# https://mediamtx.org/docs/features/decrease-packet-loss
+writeQueueSize: 1024
 udpMaxPayloadSize: 1200
-
-###############################################
-# Protocols
-###############################################
 
 rtsp: yes
 rtspAddress: :8554
@@ -38,8 +27,10 @@ rtmpAddress: :1935
 hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
-hlsAlwaysRemux: yes
-# HLS is backup only (~2–4s lag). For live feel use WebRTC :8889 — not :8888.
+# Default in MediaMTX is false — only remux when someone opens HLS.
+# Keeping this true caused HLS muxer lag → discarded frames for WebRTC too.
+hlsAlwaysRemux: no
+# lowLatency requires hlsSegmentCount >= 7 (MediaMTX validates this).
 hlsVariant: lowLatency
 hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
@@ -50,15 +41,10 @@ webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
 webrtcIPsFromInterfaces: false
-# Filled by mediamtx_run.sh with this Mac's LAN IP (home Wi‑Fi).
 webrtcAdditionalHosts: [__WEBRTC_HOST__]
 webrtcLocalUDPAddress: :8189
 webrtcLocalTCPAddress: :8189
 webrtcICEServers2: []
-
-###############################################
-# Paths
-###############################################
 
 paths:
   cam1:
@@ -66,6 +52,7 @@ paths:
 
   cam_xiao:
     source: publisher
-    # Replaced by mediamtx_run.sh (MediaMTX restarts this forever if it exits).
+    # Filled by mediamtx_run.sh — official pattern: runOnInit + runOnInitRestart
+    # https://mediamtx.org/docs/features/hooks
     runOnInit: __CAM_XIAO_RUN_ON_INIT__
     runOnInitRestart: yes

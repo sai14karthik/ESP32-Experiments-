@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# MediaMTX + ESP bridge — all protocols (RTSP / HLS / WebRTC / RTMP).
+# Start MediaMTX with ESP → ffmpeg → cam_xiao (official hook pattern).
 #
-# Preferred (continuous live — CameraRTSPWiFi / esp32cam-rtsp on the board):
+# Canonical (locked) lab command:
 #   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
 #
-# Legacy (HTTP /capture polls — choppy HLS "growing clock"):
-#   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
+# Watch (live):     http://<MINI_IP>:8889/cam_xiao/
+# Watch (backup):   http://<MINI_IP>:8888/cam_xiao/
+# Watch (VLC):      rtsp://<MINI_IP>:8554/cam_xiao
 #
-# WEBRTC_HOST can be set; otherwise auto-detect this Mac's LAN IP.
+# Refs:
+#   https://mediamtx.org/docs/publish/generic-webcams
+#   https://mediamtx.org/docs/features/hooks
+#   https://mediamtx.org/docs/features/decrease-packet-loss
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,7 +19,6 @@ CONF_SRC="$ROOT/mediamtx/mediamtx.yml"
 CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
 WRAPPER="$ROOT/mediamtx/run_xiao_publish.sh"
 PUBLISH="$ROOT/scripts/publish_xiao.sh"
-# Prefer on-board RTSP if set; else legacy MJPEG HTTP.
 XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-rtsp://10.128.93.25:554/mjpeg/1}}"
 
 detect_lan_ip() {
@@ -49,8 +52,7 @@ fi
 chmod +x "$PUBLISH" 2>/dev/null || true
 
 if lsof -nP -iTCP:8554 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Port 8554 is already in use." >&2
-  echo "  pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao'" >&2
+  echo "Port 8554 in use. Run: pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao'" >&2
   exit 1
 fi
 
@@ -61,10 +63,8 @@ else
   cat >"$WRAPPER" <<EOF
 #!/bin/bash
 export PUBLISH_ONCE=1
-export XIAO_FPS="\${XIAO_FPS:-12}"
-export XIAO_BITRATE="\${XIAO_BITRATE:-500k}"
-export PUBLISH_HOLD_LAST="\${PUBLISH_HOLD_LAST:-0}"
-# Mode auto-selected from URL scheme inside publish_xiao.sh (rtsp:// → continuous).
+export XIAO_FPS="\${XIAO_FPS:-10}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-600k}"
 exec "$PUBLISH" "$XIAO_URL"
 EOF
   chmod +x "$WRAPPER"
@@ -77,14 +77,11 @@ sed -e "s|__CAM_XIAO_RUN_ON_INIT__|${INIT_ESC}|" \
     -e "s|__WEBRTC_HOST__|${HOST_ESC}|" \
     "$CONF_SRC" >"$CONF_RT"
 
-echo "MediaMTX — all protocols" >&2
+echo "MediaMTX (canonical lab)" >&2
 echo "  ESP: $XIAO_URL" >&2
-echo "  LAN: $WEBRTC_HOST" >&2
-echo "  RTSP   rtsp://127.0.0.1:8554/cam_xiao" >&2
-echo "  HLS    http://127.0.0.1:8888/cam_xiao/" >&2
-echo "  WebRTC http://127.0.0.1:8889/cam_xiao/" >&2
-echo "  RTMP   rtmp://127.0.0.1:1935/cam_xiao" >&2
-echo "  Same on LAN: replace 127.0.0.1 with $WEBRTC_HOST" >&2
+echo "  LIVE WebRTC → http://${WEBRTC_HOST}:8889/cam_xiao/" >&2
+echo "  HLS backup  → http://${WEBRTC_HOST}:8888/cam_xiao/" >&2
+echo "  VLC RTSP    → rtsp://${WEBRTC_HOST}:8554/cam_xiao" >&2
 echo "Ctrl+C to stop." >&2
 
 exec mediamtx "$CONF_RT"

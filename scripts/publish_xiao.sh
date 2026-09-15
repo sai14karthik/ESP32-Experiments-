@@ -1,70 +1,53 @@
 #!/usr/bin/env bash
-# Bridge XIAO CameraWebServerWiFi into MediaMTX path cam_xiao.
+# Bridge ESP camera → MediaMTX path cam_xiao.
 #
-# Why not "forever" on one TCP?
-#   MediaMTX can run forever (runOnInitRestart). ESP /stream MJPEG over Wi‑Fi
-#   typically dies ~60–90s — that is the camera HTTP stack, not MediaMTX.
-#   Default = poll /capture stills (fresh GET each frame) + restart on stall.
+# Canonical pattern (MediaMTX official webcam docs, adapted for ESP MJPEG):
+#   ESP outputs MJPEG (HTTP or Micro-RTSP). MediaMTX needs H.264 for WebRTC/HLS.
+#   Mini ffmpeg re-encodes and publishes RTSP into MediaMTX.
+#   Docs: https://mediamtx.org/docs/publish/generic-webcams
+#         Espressif: ESP32-S3 has no HW H.264 — host must transcode MJPEG.
 #
-# Preferred (one terminal — MediaMTX restarts this script):
-#   ./scripts/mediamtx_run.sh
-#
-# Manual loop:
-#   ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
-#
-# Modes:
-#   PUBLISH_MODE=rtsp     (preferred) ESP CameraRTSPWiFi / esp32cam-rtsp → continuous H.264
-#   PUBLISH_MODE=capture  poll /capture stills (stable but choppy / "growing" HLS clock)
-#   PUBLISH_MODE=stream   HTTP :81/stream MJPEG (flaky long-lived)
-#   PUBLISH_ONCE=1        one session then exit — used by MediaMTX runOnInit
+# Prefer:
+#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
+# Watch live:
+#   http://<MINI_IP>:8889/cam_xiao/   (WebRTC — use this)
+# Backup:
+#   http://<MINI_IP>:8888/cam_xiao/   (HLS — multi-second lag by design)
 set -uo pipefail
 
-# MediaMTX runOnInit sets RTSP_PORT + MTX_PATH (official hook env).
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
 XIAO_URL="${1:-${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-}}}"
-# Auto-pick continuous RTSP pull when URL is rtsp://…
 if [[ -z "${PUBLISH_MODE:-}" ]]; then
   if [[ "${XIAO_URL}" == rtsp://* ]]; then
     MODE=rtsp
+  elif [[ "${XIAO_URL}" == http://* ]]; then
+    MODE=stream
   else
     MODE=capture
   fi
 else
   MODE="${PUBLISH_MODE}"
 fi
-FPS="${XIAO_FPS:-12}"
-BITRATE="${XIAO_BITRATE:-500k}"
+
+# Keep bitrate near MediaMTX webcam example (-b:v 600k).
+FPS="${XIAO_FPS:-10}"
+BITRATE="${XIAO_BITRATE:-600k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
-# Only restart if ffmpeg truly stops producing (was 20s → HLS "network timeout" every ~30s).
-STALL_S="${PUBLISH_STALL_S:-120}"
-# 0 = never freeze on a stale JPEG (better motion); 1 = hold last frame on ESP blips
+STALL_S="${PUBLISH_STALL_S:-60}"
 HOLD_LAST="${PUBLISH_HOLD_LAST:-0}"
-# VGA JPEGs over LabPSK often need >3s; too-low → false "not reachable" / stalled pipe
 CURL_MAX_S="${PUBLISH_CURL_MAX_S:-8}"
-if [[ -z "${PUBLISH_MAX_LIFE_S:-}" ]]; then
-  MAX_LIFE_S=0
-else
-  MAX_LIFE_S="${PUBLISH_MAX_LIFE_S}"
-fi
+MAX_LIFE_S="${PUBLISH_MAX_LIFE_S:-0}"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg not found. Install: brew install ffmpeg" >&2
-  exit 1
-fi
-if ! command -v curl >/dev/null 2>&1; then
-  echo "curl not found" >&2
   exit 1
 fi
 
 if [[ -z "$XIAO_URL" ]]; then
   cat >&2 <<'EOF'
 Usage:
-  # Continuous (CameraRTSPWiFi / esp32cam-rtsp) — preferred for live:
   ./scripts/publish_xiao.sh rtsp://10.128.93.25:554/mjpeg/1
-
-  # Legacy HTTP capture polls:
   ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
-
 Prefer: XIAO_RTSP_URL=rtsp://… ./scripts/mediamtx_run.sh
 EOF
   exit 2
@@ -84,16 +67,12 @@ if [[ "$MODE" == "capture" || "$MODE" == "stream" ]]; then
 fi
 
 echo "Bridging XIAO → MediaMTX (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
-if [[ -n "$CAPTURE_URL" ]]; then
-  echo "  capture: $CAPTURE_URL" >&2
-fi
 echo "  source : $XIAO_URL" >&2
 echo "  dest   : $MTX_URL  fps=$FPS bitrate=$BITRATE" >&2
 
 kill_pgid() {
   local pid="$1"
   [[ -z "$pid" ]] && return 0
-  # Kill whole pipeline process group (curl feeder + ffmpeg).
   kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
   sleep 0.3
   kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
@@ -113,11 +92,11 @@ watch_progress() {
     fi
     now=$SECONDS
     if (( STALL_S > 0 && now - last_change >= STALL_S )); then
-      echo "$(date '+%H:%M:%S') stall ${STALL_S}s — exit so MediaMTX/loop can restart" >&2
+      echo "$(date '+%H:%M:%S') stall ${STALL_S}s — restart" >&2
       return 1
     fi
     if (( MAX_LIFE_S > 0 && now - started >= MAX_LIFE_S )); then
-      echo "$(date '+%H:%M:%S') max life ${MAX_LIFE_S}s — refreshing" >&2
+      echo "$(date '+%H:%M:%S') max life ${MAX_LIFE_S}s — refresh" >&2
       return 1
     fi
     sleep 1
@@ -125,58 +104,39 @@ watch_progress() {
   return 0
 }
 
-run_capture() {
-  local progress fpid started jpgdir lastjpg
-  progress="$(mktemp -t xiao_cap_XXXXXX)"
-  jpgdir="$(mktemp -d -t xiao_hold_XXXXXX)"
-  lastjpg="$jpgdir/last.jpg"
+# Official MediaMTX publish shape (webcam doc) + MJPEG→H.264 for ESP.
+# -c:v libx264 -pix_fmt yuv420p -preset ultrafast -b:v 600k -f rtsp …
+# Extra: -tune zerolatency, -vf fps=N (CFR — stops encode flood), -an, TCP.
+ffmpeg_h264_out() {
+  ffmpeg -hide_banner -loglevel warning \
+    -nostats \
+    -progress "$1" \
+    "${@:2}" \
+    -an \
+    -vf "fps=${FPS},format=yuv420p" \
+    -c:v libx264 \
+    -pix_fmt yuv420p \
+    -preset ultrafast \
+    -tune zerolatency \
+    -b:v "$BITRATE" \
+    -g $((FPS * 2)) \
+    -bf 0 \
+    -f rtsp \
+    -rtsp_transport tcp \
+    "$MTX_URL"
+}
+
+run_rtsp() {
+  local progress fpid started
+  progress="$(mktemp -t xiao_rtsp_XXXXXX)"
   started=$SECONDS
   set -m
-  # Fresh /capture each tick. Default: do not re-send stale JPEGs (looks "stuck").
-  # HOLD_LAST=1 restores old freeze-frame-on-blip behavior.
-  (
-    interval="$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
-    while true; do
-      t0="$(python3 -c 'import time; print(time.time())')"
-      got=0
-      if curl -fsS --max-time "$CURL_MAX_S" -o "$jpgdir/n.jpg" "$CAPTURE_URL" 2>/dev/null; then
-        mv -f "$jpgdir/n.jpg" "$lastjpg"
-        got=1
-      fi
-      if [[ "$got" -eq 1 || ( "$HOLD_LAST" == "1" && -f "$lastjpg" ) ]]; then
-        if [[ -f "$lastjpg" ]]; then
-          cat "$lastjpg"
-        fi
-      fi
-      python3 -c "import time,sys; t0=float(sys.argv[1]); i=float(sys.argv[2]); d=i-(time.time()-t0); time.sleep(d if d>0 else 0)" "$t0" "$interval"
-    done
-  ) | ffmpeg -hide_banner -loglevel error \
-      -nostats \
-      -progress "$progress" \
-      -fflags +genpts+discardcorrupt \
-      -f image2pipe \
-      -framerate "$FPS" \
-      -c:v mjpeg \
-      -i - \
-      -an \
-      -c:v libx264 \
-      -profile:v baseline \
-      -preset veryfast \
-      -tune zerolatency \
-      -pix_fmt yuv420p \
-      -b:v "$BITRATE" \
-      -maxrate "$BITRATE" \
-      -bufsize 2000k \
-      -g $((FPS * 2)) \
-      -keyint_min $((FPS * 2)) \
-      -bf 0 \
-      -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=$((FPS * 2))" \
-      -f rtsp \
-      -rtsp_transport tcp \
-      "$MTX_URL" &
+  ffmpeg_h264_out "$progress" \
+    -fflags +genpts+discardcorrupt \
+    -rtsp_transport tcp \
+    -i "$XIAO_URL" &
   fpid=$!
-  trap 'rm -rf "$jpgdir"; rm -f "$progress"; kill_pgid "$fpid"' RETURN
-
+  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
@@ -188,36 +148,13 @@ run_stream() {
   local progress fpid started
   progress="$(mktemp -t xiao_str_XXXXXX)"
   started=$SECONDS
-  ffmpeg -hide_banner -loglevel error \
-    -nostats \
-    -progress "$progress" \
-    -xerror \
-    -fflags +nobuffer+genpts+discardcorrupt \
-    -flags low_delay \
-    -rw_timeout 8000000 \
+  set -m
+  ffmpeg_h264_out "$progress" \
+    -fflags +genpts+discardcorrupt \
     -f mjpeg \
-    -use_wallclock_as_timestamps 1 \
-    -r "$FPS" \
-    -i "$XIAO_URL" \
-    -an \
-    -c:v libx264 \
-    -profile:v baseline \
-    -preset veryfast \
-    -tune zerolatency \
-    -pix_fmt yuv420p \
-    -b:v "$BITRATE" \
-    -maxrate "$BITRATE" \
-    -bufsize "$BITRATE" \
-    -g $((FPS * 2)) \
-    -keyint_min $((FPS * 2)) \
-    -bf 0 \
-    -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=$((FPS * 2))" \
-    -f rtsp \
-    -rtsp_transport tcp \
-    "$MTX_URL" &
+    -i "$XIAO_URL" &
   fpid=$!
   trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
-
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
@@ -225,43 +162,35 @@ run_stream() {
   wait "$fpid" 2>/dev/null || true
 }
 
-run_rtsp() {
-  # Low-latency remux for WebRTC. Frequent IDRs so a Wi‑Fi hiccup doesn't "freeze" the picture.
-  local progress fpid started
-  progress="$(mktemp -t xiao_rtsp_XXXXXX)"
+run_capture() {
+  local progress fpid started jpgdir lastjpg
+  progress="$(mktemp -t xiao_cap_XXXXXX)"
+  jpgdir="$(mktemp -d -t xiao_hold_XXXXXX)"
+  lastjpg="$jpgdir/last.jpg"
   started=$SECONDS
-  ffmpeg -hide_banner -loglevel error \
-    -nostats \
-    -progress "$progress" \
-    -fflags +genpts+discardcorrupt+nobuffer \
-    -flags low_delay \
-    -avioflags direct \
-    -use_wallclock_as_timestamps 1 \
-    -rtsp_transport tcp \
-    -reorder_queue_size 0 \
-    -i "$XIAO_URL" \
-    -an \
-    -c:v libx264 \
-    -profile:v baseline \
-    -preset ultrafast \
-    -tune zerolatency \
-    -pix_fmt yuv420p \
-    -b:v "$BITRATE" \
-    -maxrate "$BITRATE" \
-    -bufsize "$((${BITRATE%k} / 2))k" \
-    -g 2 \
-    -keyint_min 1 \
-    -bf 0 \
-    -x264-params "repeat-headers=1:keyint=2:min-keyint=1:scenecut=0:sliced-threads=1:sync-lookahead=0:rc-lookahead=0:bframes=0:aud=1" \
-    -flush_packets 1 \
-    -muxdelay 0 \
-    -muxpreload 0 \
-    -f rtsp \
-    -rtsp_transport tcp \
-    "$MTX_URL" &
+  set -m
+  (
+    interval="$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
+    while true; do
+      t0="$(python3 -c 'import time; print(time.time())')"
+      got=0
+      if curl -fsS --max-time "$CURL_MAX_S" -o "$jpgdir/n.jpg" "$CAPTURE_URL" 2>/dev/null; then
+        mv -f "$jpgdir/n.jpg" "$lastjpg"
+        got=1
+      fi
+      if [[ "$got" -eq 1 || ( "$HOLD_LAST" == "1" && -f "$lastjpg" ) ]]; then
+        [[ -f "$lastjpg" ]] && cat "$lastjpg"
+      fi
+      python3 -c "import time,sys; t0=float(sys.argv[1]); i=float(sys.argv[2]); d=i-(time.time()-t0); time.sleep(d if d>0 else 0)" "$t0" "$interval"
+    done
+  ) | ffmpeg_h264_out "$progress" \
+      -fflags +genpts+discardcorrupt \
+      -f image2pipe \
+      -framerate "$FPS" \
+      -c:v mjpeg \
+      -i - &
   fpid=$!
-  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
-
+  trap 'rm -rf "$jpgdir"; rm -f "$progress"; kill_pgid "$fpid"' RETURN
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
@@ -278,18 +207,17 @@ run_once() {
 }
 
 if [[ "$MODE" == "capture" ]]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found" >&2
+    exit 1
+  fi
   if curl -fsS --max-time "$CURL_MAX_S" -o /dev/null "$CAPTURE_URL"; then
     echo "capture OK: $CAPTURE_URL" >&2
   else
-    echo "WARN: $CAPTURE_URL not reachable (timeout ${CURL_MAX_S}s) — bridge will keep trying" >&2
+    echo "WARN: $CAPTURE_URL not reachable — will keep trying" >&2
   fi
 elif [[ "$MODE" == "rtsp" ]]; then
-  echo "RTSP pull mode (continuous) — probing $XIAO_URL …" >&2
-  if ffprobe -v error -rtsp_transport tcp -i "$XIAO_URL" -show_entries stream=codec_name -of csv=p=0 >/dev/null 2>&1; then
-    echo "RTSP source OK: $XIAO_URL" >&2
-  else
-    echo "WARN: cannot probe $XIAO_URL yet — bridge will keep trying" >&2
-  fi
+  echo "RTSP pull (MediaMTX webcam pattern + fps=${FPS})" >&2
 fi
 
 if [[ "${PUBLISH_ONCE:-0}" == "1" ]]; then
