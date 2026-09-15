@@ -137,7 +137,9 @@ run_capture() {
       -maxrate "$BITRATE" \
       -bufsize 600k \
       -g $((FPS * 2)) \
+      -keyint_min $((FPS * 2)) \
       -bf 0 \
+      -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=$((FPS * 2))" \
       -f rtsp \
       -rtsp_transport tcp \
       "$MTX_URL" &
@@ -176,7 +178,9 @@ run_stream() {
     -maxrate "$BITRATE" \
     -bufsize "$BITRATE" \
     -g $((FPS * 2)) \
+    -keyint_min $((FPS * 2)) \
     -bf 0 \
+    -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=$((FPS * 2))" \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL" &
