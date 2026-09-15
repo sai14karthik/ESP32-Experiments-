@@ -109,8 +109,8 @@ watch_progress() {
 }
 
 # MediaMTX webcam recipe + ESP MJPEG input.
-# Do NOT use fps= filter here — Micro-RTSP timestamps can make fps= hang with no output.
-# Output -r paces encode; ESP RTP timestamps pace input.
+# Do NOT use fps= or -r here — both duplicate/pad frames when ESP is <10fps
+# ("More than 1000 frames duplicated") and the picture looks stuck.
 ffmpeg_h264_out() {
   local prog="$1"
   shift
@@ -126,9 +126,9 @@ ffmpeg_h264_out() {
     -b:v "$BITRATE" \
     -maxrate "$BITRATE" \
     -bufsize "$BITRATE" \
-    -r "$FPS" \
-    -g $((FPS * 2)) \
+    -g 20 \
     -bf 0 \
+    -x264-params "slice-max-size=1000" \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL"
