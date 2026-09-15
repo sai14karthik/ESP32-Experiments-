@@ -124,11 +124,8 @@ ffmpeg_h264_out() {
     -preset ultrafast \
     -tune zerolatency \
     -b:v "$BITRATE" \
-    -maxrate "$BITRATE" \
-    -bufsize "$BITRATE" \
     -g 20 \
     -bf 0 \
-    -x264-params "slice-max-size=1000" \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL"
@@ -144,14 +141,14 @@ run_rtsp() {
   ffmpeg_h264_out "$progress" \
     -fflags +genpts+discardcorrupt \
     -rtsp_transport tcp \
-    -timeout 10000000 \
     -i "$XIAO_URL" &
   fpid=$!
   if ! watch_progress "$progress" "$fpid" "$started"; then
     kill_pgid "$fpid"
     return 1
   fi
-  wait "$fpid" 2>/dev/null || true
+  wait "$fpid" 2>/dev/null
+  return $?
 }
 
 run_stream() {
@@ -233,8 +230,8 @@ fi
 if [[ "${PUBLISH_ONCE:-0}" == "1" ]]; then
   run_once
   ec=$?
-  # Brief pause so ESP RTSP session can close before MediaMTX restarts us.
-  sleep 2
+  # Longer pause so ESP Micro-RTSP can drop the old TCP session before restart.
+  sleep 5
   exit "$ec"
 fi
 
