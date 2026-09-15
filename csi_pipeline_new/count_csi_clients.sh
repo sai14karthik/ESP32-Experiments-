@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Show how many ESP32-C5 boards are connected to Mini CSI TCP ingest.
+# Live count of ESP32-C5 boards currently connected to Mini CSI ingest.
 #
-# On the Mac Mini:
-#   ./count_csi_clients.sh
-#   ./count_csi_clients.sh --watch          # refresh every 2s
-#   CSI_TCP_PORT=9055 ./count_csi_clients.sh
+# On the Mac Mini (while ingest is running):
+#   ./count_csi_clients.sh           # once
+#   ./count_csi_clients.sh --watch   # refresh every 1s — unplug a board → count drops
 #
-# Live = TCP ESTABLISHED peers on the ingest port (who is connected now).
-# DB   = source_id counts for the latest tcp:*:multi session (who has data).
+# Only ESTABLISHED TCP peers on :9055 count. Postgres history is optional (--db).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PORT="${CSI_TCP_PORT:-9055}"
 WATCH=0
+SHOW_DB=0
+INTERVAL="${WATCH_INTERVAL:-1}"
 
 if [[ -f "$ROOT/.env" ]]; then
   set -a
@@ -26,65 +26,72 @@ export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:$PATH"
 for a in "$@"; do
   case "$a" in
     --watch|-w) WATCH=1 ;;
+    --db) SHOW_DB=1 ;;
     -h|--help)
-      echo "Usage: $0 [--watch]"
+      echo "Usage: $0 [--watch] [--db]"
+      echo "  (default) live TCP clients only"
+      echo "  --watch   refresh every ${INTERVAL}s"
+      echo "  --db      also show latest session source_id history"
       exit 0
       ;;
   esac
 done
 
+live_peers() {
+  # Unique remote IPs with ESTABLISHED sockets to :PORT (connected right now)
+  lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null \
+    | awk 'NR>1 {print $NF}' \
+    | sed -nE 's/.*->([0-9.]+):[0-9]+.*/\1/p' \
+    | sort -u \
+    || true
+}
+
 show_once() {
-  echo "=== CSI TCP :$PORT ($(date '+%H:%M:%S')) ==="
-
-  if ! command -v lsof >/dev/null 2>&1; then
-    echo "lsof not found; cannot list live TCP clients"
+  local peers n
+  peers="$(live_peers)"
+  if [[ -z "${peers}" ]]; then
+    n=0
   else
-    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-      echo "listener: UP"
-    else
-      echo "listener: NOT RUNNING (start ./run_multi_ingest.sh)"
-    fi
-
-    # Unique remote IPs with ESTABLISHED sockets to :PORT
-    peers="$(
-      lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null \
-        | awk 'NR>1 {print $NF}' \
-        | sed -nE 's/.*->([0-9.]+):[0-9]+.*/\1/p' \
-        | sort -u
-    )" || true
-    if [[ -z "${peers:-}" ]]; then
-      echo "connected ESP devices (live TCP): 0"
-    else
-      n="$(printf '%s\n' "$peers" | grep -c . || true)"
-      echo "connected ESP devices (live TCP): $n"
-      printf '%s\n' "$peers" | while IFS= read -r ip; do
-        [[ -n "$ip" ]] && echo "  - $ip"
-      done
-    fi
+    n="$(printf '%s\n' "$peers" | grep -c . || true)"
   fi
 
-  echo
-  echo "=== latest multi session (Postgres) ==="
-  if ! command -v psql >/dev/null 2>&1; then
-    echo "psql not found; skip DB"
+  echo "=== live CSI clients :$PORT  $(date '+%H:%M:%S') ==="
+
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "lsof missing"
+    return 1
+  fi
+
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "ingest listener: UP"
+  else
+    echo "ingest listener: DOWN  (run ./run_multi_ingest.sh)"
+    echo "connected right now: 0"
     return 0
   fi
 
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
-SELECT
-  s.label,
-  s.recv_port,
-  s.started_at,
-  (SELECT count(DISTINCT source_id)
-     FROM csi_samples x WHERE x.session_id = s.id AND source_id IS NOT NULL) AS n_devices,
-  (SELECT count(*) FROM csi_samples x WHERE x.session_id = s.id) AS n_rows
-FROM csi_sessions s
-WHERE s.recv_port LIKE 'tcp:%:multi'
-ORDER BY s.started_at DESC
-LIMIT 1;
-" 2>/dev/null || echo "(no multi session yet or DB unreachable)"
+  echo "connected right now: $n"
+  if [[ "$n" -gt 0 ]]; then
+    printf '%s\n' "$peers" | while IFS= read -r ip; do
+      [[ -n "$ip" ]] || continue
+      # how many sockets from this IP (reconnect can briefly show 2)
+      socks="$(
+        lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null \
+          | awk 'NR>1 {print $NF}' \
+          | sed -nE 's/.*->([0-9.]+):[0-9]+.*/\1/p' \
+          | grep -c "^${ip}$" || true
+      )"
+      echo "  - $ip  (tcp sockets=$socks)"
+    done
+  else
+    echo "  (none — power a C5 or wait for reconnect)"
+  fi
 
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
+  if [[ "$SHOW_DB" -eq 1 ]]; then
+    echo
+    echo "=== DB history (not live; last multi session) ==="
+    if command -v psql >/dev/null 2>&1; then
+      psql "$DATABASE_URL" -q -c "
 SELECT source_id, count(*) AS rows, max(host_ts) AS last_sample
 FROM csi_samples
 WHERE session_id = (
@@ -95,14 +102,20 @@ WHERE session_id = (
 AND source_id IS NOT NULL
 GROUP BY source_id
 ORDER BY source_id;
-" 2>/dev/null || true
+" 2>/dev/null || echo "(no session)"
+    else
+      echo "psql not found"
+    fi
+  fi
 }
 
 if [[ "$WATCH" -eq 1 ]]; then
+  echo "watching live connections (Ctrl+C to stop); unplug a board → count should drop"
+  echo
   while true; do
-    clear 2>/dev/null || printf '\n'
-    show_once
-    sleep 2
+    clear 2>/dev/null || printf '\n----------\n'
+    show_once || true
+    sleep "$INTERVAL"
   done
 else
   show_once
