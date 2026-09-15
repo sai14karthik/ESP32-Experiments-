@@ -13,7 +13,7 @@ const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 // Port 554 matches esp32cam-rtsp / CCTV convention (was 8554).
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 125;  // 8 fps — steadier over LabPSK (fewer HLS underruns)
+static const uint32_t kMsecPerFrame = 80;  // 12.5 fps — smaller JPEG keeps Wi‑Fi fed smoothly
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -40,11 +40,11 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_HVGA;  // 480x320 — continuous over LabPSK
+  config.frame_size = FRAMESIZE_QVGA;  // 320x240
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 16;  // smaller JPEGs → fewer Wi‑Fi stalls / HLS pauses
+  config.jpeg_quality = 20;  // more compression → less TCP stall → less "stuck" WebRTC
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
@@ -98,6 +98,7 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   WiFi.begin(ssid, password);
   Serial.print("WiFi connecting");
   while (WiFi.status() != WL_CONNECTED) {

@@ -18,6 +18,8 @@ logDestinations: [stdout]
 # Publisher can pause briefly on ESP Wi‑Fi; keep sessions alive.
 readTimeout: 60s
 writeTimeout: 60s
+# Small queue = drop late frames instead of buffering 3–4s of lag on WebRTC.
+writeQueueSize: 32
 udpMaxPayloadSize: 1200
 
 ###############################################
@@ -37,11 +39,11 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
-# fmp4 + longer segments: Safari won't pause/resume every time LL parts miss a deadline.
-# (lowLatency needed parts every ~200ms; ESP Wi‑Fi hiccups → auto-pause + growing clock.)
-hlsVariant: fmp4
-hlsSegmentDuration: 2s
-hlsSegmentCount: 10
+# HLS is backup only (~2–4s lag). For live feel use WebRTC :8889 — not :8888.
+hlsVariant: lowLatency
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentCount: 4
 hlsSegmentMaxSize: 50M
 
 webrtc: yes

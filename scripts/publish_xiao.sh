@@ -32,8 +32,8 @@ if [[ -z "${PUBLISH_MODE:-}" ]]; then
 else
   MODE="${PUBLISH_MODE}"
 fi
-FPS="${XIAO_FPS:-8}"
-BITRATE="${XIAO_BITRATE:-800k}"
+FPS="${XIAO_FPS:-12}"
+BITRATE="${XIAO_BITRATE:-500k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
 # Only restart if ffmpeg truly stops producing (was 20s → HLS "network timeout" every ~30s).
 STALL_S="${PUBLISH_STALL_S:-120}"
@@ -226,34 +226,36 @@ run_stream() {
 }
 
 run_rtsp() {
-  # Continuous pull from ESP Micro-RTSP → steady H.264 CFR → MediaMTX.
-  # Lower fps + small encode queue so Safari HLS doesn't underrun/auto-pause.
+  # Low-latency remux for WebRTC. Frequent IDRs so a Wi‑Fi hiccup doesn't "freeze" the picture.
   local progress fpid started
   progress="$(mktemp -t xiao_rtsp_XXXXXX)"
   started=$SECONDS
   ffmpeg -hide_banner -loglevel error \
     -nostats \
     -progress "$progress" \
-    -fflags +genpts+discardcorrupt \
+    -fflags +genpts+discardcorrupt+nobuffer \
+    -flags low_delay \
+    -avioflags direct \
+    -use_wallclock_as_timestamps 1 \
     -rtsp_transport tcp \
-    -timeout 5000000 \
+    -reorder_queue_size 0 \
     -i "$XIAO_URL" \
     -an \
-    -vf "fps=${FPS}" \
     -c:v libx264 \
     -profile:v baseline \
     -preset ultrafast \
     -tune zerolatency \
     -pix_fmt yuv420p \
-    -fps_mode cfr \
-    -r "$FPS" \
     -b:v "$BITRATE" \
     -maxrate "$BITRATE" \
-    -bufsize "$((${BITRATE%k} * 2))k" \
-    -g $((FPS * 2)) \
-    -keyint_min "$FPS" \
+    -bufsize "$((${BITRATE%k} / 2))k" \
+    -g 2 \
+    -keyint_min 1 \
     -bf 0 \
-    -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=${FPS}:scenecut=0" \
+    -x264-params "repeat-headers=1:keyint=2:min-keyint=1:scenecut=0:sliced-threads=1:sync-lookahead=0:rc-lookahead=0:bframes=0:aud=1" \
+    -flush_packets 1 \
+    -muxdelay 0 \
+    -muxpreload 0 \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL" &
