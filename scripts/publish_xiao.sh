@@ -22,11 +22,13 @@ set -uo pipefail
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
 XIAO_URL="${1:-${XIAO_MJPEG_URL:-}}"
 MODE="${PUBLISH_MODE:-capture}"
-FPS="${XIAO_FPS:-5}"
-BITRATE="${XIAO_BITRATE:-300k}"
+FPS="${XIAO_FPS:-10}"
+BITRATE="${XIAO_BITRATE:-1000k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
 # Only restart if ffmpeg truly stops producing (was 20s → HLS "network timeout" every ~30s).
 STALL_S="${PUBLISH_STALL_S:-90}"
+# 0 = never freeze on a stale JPEG (better motion); 1 = hold last frame on ESP blips
+HOLD_LAST="${PUBLISH_HOLD_LAST:-0}"
 if [[ -z "${PUBLISH_MAX_LIFE_S:-}" ]]; then
   MAX_LIFE_S=0
 else
@@ -108,16 +110,23 @@ run_capture() {
   lastjpg="$jpgdir/last.jpg"
   started=$SECONDS
   set -m
-  # On ESP blips, re-send last good JPEG so ffmpeg/HLS never go silent.
+  # Fresh /capture each tick. Default: do not re-send stale JPEGs (looks "stuck").
+  # HOLD_LAST=1 restores old freeze-frame-on-blip behavior.
   (
+    interval="$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
     while true; do
+      t0="$(python3 -c 'import time; print(time.time())')"
+      got=0
       if curl -fsS --max-time 2 -o "$jpgdir/n.jpg" "$CAPTURE_URL" 2>/dev/null; then
         mv -f "$jpgdir/n.jpg" "$lastjpg"
+        got=1
       fi
-      if [[ -f "$lastjpg" ]]; then
-        cat "$lastjpg"
+      if [[ "$got" -eq 1 || ( "$HOLD_LAST" == "1" && -f "$lastjpg" ) ]]; then
+        if [[ -f "$lastjpg" ]]; then
+          cat "$lastjpg"
+        fi
       fi
-      sleep "$(awk -v f="$FPS" 'BEGIN{printf "%.3f", 1/f}')"
+      python3 -c "import time,sys; t0=float(sys.argv[1]); i=float(sys.argv[2]); d=i-(time.time()-t0); time.sleep(d if d>0 else 0)" "$t0" "$interval"
     done
   ) | ffmpeg -hide_banner -loglevel error \
       -nostats \
@@ -135,7 +144,7 @@ run_capture() {
       -pix_fmt yuv420p \
       -b:v "$BITRATE" \
       -maxrate "$BITRATE" \
-      -bufsize 600k \
+      -bufsize 2000k \
       -g $((FPS * 2)) \
       -keyint_min $((FPS * 2)) \
       -bf 0 \

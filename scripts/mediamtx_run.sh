@@ -58,6 +58,9 @@ else
 #!/bin/bash
 export PUBLISH_ONCE=1
 export PUBLISH_MODE="\${PUBLISH_MODE:-capture}"
+export XIAO_FPS="\${XIAO_FPS:-10}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-1000k}"
+export PUBLISH_HOLD_LAST="\${PUBLISH_HOLD_LAST:-0}"
 exec "$PUBLISH" "$XIAO_URL"
 EOF
   chmod +x "$WRAPPER"
