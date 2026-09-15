@@ -32,11 +32,11 @@ if [[ -z "${PUBLISH_MODE:-}" ]]; then
 else
   MODE="${PUBLISH_MODE}"
 fi
-FPS="${XIAO_FPS:-12}"
-BITRATE="${XIAO_BITRATE:-1200k}"
+FPS="${XIAO_FPS:-8}"
+BITRATE="${XIAO_BITRATE:-800k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
 # Only restart if ffmpeg truly stops producing (was 20s → HLS "network timeout" every ~30s).
-STALL_S="${PUBLISH_STALL_S:-90}"
+STALL_S="${PUBLISH_STALL_S:-120}"
 # 0 = never freeze on a stale JPEG (better motion); 1 = hold last frame on ESP blips
 HOLD_LAST="${PUBLISH_HOLD_LAST:-0}"
 # VGA JPEGs over LabPSK often need >3s; too-low → false "not reachable" / stalled pipe
@@ -226,21 +226,20 @@ run_stream() {
 }
 
 run_rtsp() {
-  # Continuous pull from ESP Micro-RTSP / esp32cam-rtsp (MJPEG) → H.264 → MediaMTX.
-  # This is what stops Safari's "14…19… slowly growing" clock from /capture polling.
+  # Continuous pull from ESP Micro-RTSP → steady H.264 CFR → MediaMTX.
+  # Lower fps + small encode queue so Safari HLS doesn't underrun/auto-pause.
   local progress fpid started
   progress="$(mktemp -t xiao_rtsp_XXXXXX)"
   started=$SECONDS
   ffmpeg -hide_banner -loglevel error \
     -nostats \
     -progress "$progress" \
-    -fflags +genpts+discardcorrupt+nobuffer \
-    -flags low_delay \
-    -probesize 32 \
-    -analyzeduration 0 \
+    -fflags +genpts+discardcorrupt \
     -rtsp_transport tcp \
+    -timeout 5000000 \
     -i "$XIAO_URL" \
     -an \
+    -vf "fps=${FPS}" \
     -c:v libx264 \
     -profile:v baseline \
     -preset ultrafast \
@@ -250,11 +249,11 @@ run_rtsp() {
     -r "$FPS" \
     -b:v "$BITRATE" \
     -maxrate "$BITRATE" \
-    -bufsize "$BITRATE" \
-    -g "$FPS" \
+    -bufsize "$((${BITRATE%k} * 2))k" \
+    -g $((FPS * 2)) \
     -keyint_min "$FPS" \
     -bf 0 \
-    -x264-params "repeat-headers=1:keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
+    -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=${FPS}:scenecut=0" \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL" &

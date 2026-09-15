@@ -13,7 +13,7 @@ const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 // Port 554 matches esp32cam-rtsp / CCTV convention (was 8554).
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 80;  // ~12.5 fps — smoother HLS on Mini
+static const uint32_t kMsecPerFrame = 125;  // 8 fps — steadier over LabPSK (fewer HLS underruns)
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -44,7 +44,7 @@ static camera_config_t xiao_cam_config() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 14;  // smaller JPEGs → fewer Wi‑Fi stalls
+  config.jpeg_quality = 16;  // smaller JPEGs → fewer Wi‑Fi stalls / HLS pauses
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;

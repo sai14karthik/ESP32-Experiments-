@@ -37,12 +37,11 @@ hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: yes
-# lowLatency = closer to live in Safari; fmp4 felt like a growing recording.
-hlsVariant: lowLatency
-hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
-hlsSegmentCount: 7
-# Don't let the player build a long DVR buffer of old segments.
+# fmp4 + longer segments: Safari won't pause/resume every time LL parts miss a deadline.
+# (lowLatency needed parts every ~200ms; ESP Wi‑Fi hiccups → auto-pause + growing clock.)
+hlsVariant: fmp4
+hlsSegmentDuration: 2s
+hlsSegmentCount: 10
 hlsSegmentMaxSize: 50M
 
 webrtc: yes

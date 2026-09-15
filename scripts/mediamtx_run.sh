@@ -61,8 +61,8 @@ else
   cat >"$WRAPPER" <<EOF
 #!/bin/bash
 export PUBLISH_ONCE=1
-export XIAO_FPS="\${XIAO_FPS:-12}"
-export XIAO_BITRATE="\${XIAO_BITRATE:-1200k}"
+export XIAO_FPS="\${XIAO_FPS:-8}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-800k}"
 export PUBLISH_HOLD_LAST="\${PUBLISH_HOLD_LAST:-0}"
 # Mode auto-selected from URL scheme inside publish_xiao.sh (rtsp:// → continuous).
 exec "$PUBLISH" "$XIAO_URL"
