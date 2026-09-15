@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Live count of ESP32-C5 boards currently connected to Mini CSI ingest.
+# Live count of ESP32-C5 boards currently feeding Mini CSI ingest.
 #
 # On the Mac Mini (while ingest is running):
-#   ./count_csi_clients.sh           # once
-#   ./count_csi_clients.sh --watch   # refresh every 1s — unplug a board → count drops
+#   ./count_csi_clients.sh
+#   ./count_csi_clients.sh --watch
+#   ./count_csi_clients.sh --verbose
 #
-# Only ESTABLISHED TCP peers on :9055 count. Postgres history is optional (--db).
+# Prefer: boards with samples in the last few seconds (true ingest activity).
+# Also: ESTABLISHED TCP peers on :9055 (netstat; works on macOS Mini).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PORT="${CSI_TCP_PORT:-9055}"
 WATCH=0
-SHOW_DB=0
+VERBOSE=0
 INTERVAL="${WATCH_INTERVAL:-1}"
+ACTIVE_S="${ACTIVE_WITHIN_S:-10}"
 
 if [[ -f "$ROOT/.env" ]]; then
   set -a
@@ -26,91 +29,115 @@ export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:$PATH"
 for a in "$@"; do
   case "$a" in
     --watch|-w) WATCH=1 ;;
-    --db) SHOW_DB=1 ;;
+    --verbose|-v) VERBOSE=1 ;;
     -h|--help)
-      echo "Usage: $0 [--watch] [--db]"
-      echo "  (default) live TCP clients only"
-      echo "  --watch   refresh every ${INTERVAL}s"
-      echo "  --db      also show latest session source_id history"
+      echo "Usage: $0 [--watch] [--verbose]"
+      echo "  Shows devices actively ingesting (rows in last ${ACTIVE_S}s) + live TCP."
       exit 0
       ;;
   esac
 done
 
-live_peers() {
-  # Unique remote IPs with ESTABLISHED sockets to :PORT (connected right now)
-  lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null \
-    | awk 'NR>1 {print $NF}' \
-    | sed -nE 's/.*->([0-9.]+):[0-9]+.*/\1/p' \
+listener_up() {
+  if netstat -an -p tcp 2>/dev/null | grep -E "[\.]$PORT .*LISTEN" >/dev/null 2>&1; then
+    return 0
+  fi
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+# Remote IPs with ESTABLISHED TCP to local :PORT (macOS netstat format).
+tcp_peers() {
+  # tcp4  0  0  10.128.93.23.9055  10.128.93.29.61289  ESTABLISHED
+  netstat -an -p tcp 2>/dev/null \
+    | awk -v p=".$PORT" '
+        $1 ~ /^tcp/ && $6 == "ESTABLISHED" {
+          local=$4; remote=$5
+          if (index(local, p) || index(remote, p)) {
+            # peer is the side that is NOT :PORT
+            split(local, a, ".")
+            split(remote, b, ".")
+            # last field is port; IP is fields 1..n-1
+            n=split(local, L, ".")
+            m=split(remote, R, ".")
+            lport=L[n]; rport=R[m]
+            lip=L[1]; for(i=2;i<n;i++) lip=lip "." L[i]
+            rip=R[1]; for(i=2;i<m;i++) rip=rip "." R[i]
+            if (lport == "'"$PORT"'") print rip
+            else if (rport == "'"$PORT"'") print lip
+          }
+        }' \
     | sort -u \
     || true
 }
 
 show_once() {
-  local peers n
-  peers="$(live_peers)"
-  if [[ -z "${peers}" ]]; then
-    n=0
-  else
-    n="$(printf '%s\n' "$peers" | grep -c . || true)"
-  fi
+  echo "=== CSI live devices  :$PORT  $(date '+%H:%M:%S') ==="
 
-  echo "=== live CSI clients :$PORT  $(date '+%H:%M:%S') ==="
-
-  if ! command -v lsof >/dev/null 2>&1; then
-    echo "lsof missing"
-    return 1
-  fi
-
-  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  if listener_up; then
     echo "ingest listener: UP"
   else
     echo "ingest listener: DOWN  (run ./run_multi_ingest.sh)"
-    echo "connected right now: 0"
+  fi
+
+  peers="$(tcp_peers)"
+  if [[ -z "${peers}" ]]; then
+    tcp_n=0
+  else
+    tcp_n="$(printf '%s\n' "$peers" | grep -c . || true)"
+  fi
+  echo "TCP connected right now: $tcp_n"
+  if [[ "$tcp_n" -gt 0 ]]; then
+    printf '%s\n' "$peers" | while IFS= read -r ip; do
+      [[ -n "$ip" ]] && echo "  - $ip"
+    done
+  fi
+
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    echo
+    echo "--- netstat :$PORT ---"
+    netstat -an -p tcp 2>/dev/null | grep -E "[\.]$PORT" || echo "(none)"
+    echo "--- lsof :$PORT ---"
+    lsof -nP -iTCP:"$PORT" 2>/dev/null || echo "(none)"
+  fi
+
+  echo
+  echo "actively ingesting (samples in last ${ACTIVE_S}s):"
+  if ! command -v psql >/dev/null 2>&1; then
+    echo "  (psql not found)"
     return 0
   fi
 
-  echo "connected right now: $n"
-  if [[ "$n" -gt 0 ]]; then
-    printf '%s\n' "$peers" | while IFS= read -r ip; do
-      [[ -n "$ip" ]] || continue
-      # how many sockets from this IP (reconnect can briefly show 2)
-      socks="$(
-        lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null \
-          | awk 'NR>1 {print $NF}' \
-          | sed -nE 's/.*->([0-9.]+):[0-9]+.*/\1/p' \
-          | grep -c "^${ip}$" || true
-      )"
-      echo "  - $ip  (tcp sockets=$socks)"
-    done
-  else
-    echo "  (none — power a C5 or wait for reconnect)"
-  fi
-
-  if [[ "$SHOW_DB" -eq 1 ]]; then
-    echo
-    echo "=== DB history (not live; last multi session) ==="
-    if command -v psql >/dev/null 2>&1; then
-      psql "$DATABASE_URL" -q -c "
-SELECT source_id, count(*) AS rows, max(host_ts) AS last_sample
+  # This matches "ingestion is happening" even if TCP listing fails.
+  out="$(
+    psql "$DATABASE_URL" -q -t -A -F$'\t' -c "
+SELECT source_id,
+       count(*)::text,
+       to_char(max(host_ts), 'HH24:MI:SS')
 FROM csi_samples
-WHERE session_id = (
-  SELECT id FROM csi_sessions
-  WHERE recv_port LIKE 'tcp:%:multi'
-  ORDER BY started_at DESC LIMIT 1
-)
-AND source_id IS NOT NULL
+WHERE host_ts > now() - interval '${ACTIVE_S} seconds'
+  AND source_id IS NOT NULL
 GROUP BY source_id
 ORDER BY source_id;
-" 2>/dev/null || echo "(no session)"
-    else
-      echo "psql not found"
-    fi
+" 2>/dev/null || true
+  )"
+
+  if [[ -z "${out//[[:space:]]/}" ]]; then
+    echo "  0 devices (no rows in last ${ACTIVE_S}s)"
+  else
+    active_n="$(printf '%s\n' "$out" | grep -c . || true)"
+    echo "  $active_n device(s)"
+    printf '%s\n' "$out" | while IFS=$'\t' read -r sid cnt ts; do
+      [[ -n "${sid:-}" ]] || continue
+      echo "  - $sid  (+$cnt rows, last $ts)"
+    done
   fi
 }
 
 if [[ "$WATCH" -eq 1 ]]; then
-  echo "watching live connections (Ctrl+C to stop); unplug a board → count should drop"
+  echo "watching (Ctrl+C to stop); unplug a board → active count should drop within ~${ACTIVE_S}s"
   echo
   while true; do
     clear 2>/dev/null || printf '\n----------\n'
