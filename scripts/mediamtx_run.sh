@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # MediaMTX + ESP bridge — all protocols (RTSP / HLS / WebRTC / RTMP).
 #
-# Home Wi‑Fi:
-#   XIAO_MJPEG_URL=http://<esp-ip>:81/stream ./scripts/mediamtx_run.sh
+# Preferred (continuous live — CameraRTSPWiFi / esp32cam-rtsp on the board):
+#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
+#
+# Legacy (HTTP /capture polls — choppy HLS "growing clock"):
+#   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
 #
 # WEBRTC_HOST can be set; otherwise auto-detect this Mac's LAN IP.
 set -euo pipefail
@@ -12,7 +15,8 @@ CONF_SRC="$ROOT/mediamtx/mediamtx.yml"
 CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
 WRAPPER="$ROOT/mediamtx/run_xiao_publish.sh"
 PUBLISH="$ROOT/scripts/publish_xiao.sh"
-XIAO_URL="${XIAO_MJPEG_URL:-http://10.128.93.25:81/stream}"
+# Prefer on-board RTSP if set; else legacy MJPEG HTTP.
+XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-rtsp://10.128.93.25:554/mjpeg/1}}"
 
 detect_lan_ip() {
   local ip=""
@@ -52,15 +56,15 @@ fi
 
 if [[ "${XIAO_EXTERNAL_PUBLISH:-0}" == "1" ]]; then
   INIT_CMD="/usr/bin/true"
-  echo "XIAO_EXTERNAL_PUBLISH=1 — start: $PUBLISH $XIAO_URL" >&2
+  echo "XIAO_EXTERNAL_PUBLISH=1 — start publish yourself for: $XIAO_URL" >&2
 else
   cat >"$WRAPPER" <<EOF
 #!/bin/bash
 export PUBLISH_ONCE=1
-export PUBLISH_MODE="\${PUBLISH_MODE:-capture}"
 export XIAO_FPS="\${XIAO_FPS:-10}"
 export XIAO_BITRATE="\${XIAO_BITRATE:-1000k}"
 export PUBLISH_HOLD_LAST="\${PUBLISH_HOLD_LAST:-0}"
+# Mode auto-selected from URL scheme inside publish_xiao.sh (rtsp:// → continuous).
 exec "$PUBLISH" "$XIAO_URL"
 EOF
   chmod +x "$WRAPPER"

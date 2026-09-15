@@ -6,8 +6,9 @@
 #   runOnInit + runOnInitRestart
 #   https://mediamtx.org/docs → hooks / generic webcams
 #
-# mediamtx_run.sh fills __CAM_XIAO_RUN_ON_INIT__ with an absolute
-# path to scripts/publish_xiao.sh (capture mode). One terminal only —
+# mediamtx_run.sh fills __CAM_XIAO_RUN_ON_INIT__ with run_xiao_publish.sh
+# (publish_xiao.sh). Prefer XIAO_RTSP_URL=rtsp://… for continuous live;
+# XIAO_MJPEG_URL=http://… falls back to /capture polls. One terminal —
 # do NOT also run publish_xiao.sh by hand unless XIAO_EXTERNAL_PUBLISH=1.
 ###############################################
 

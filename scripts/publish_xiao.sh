@@ -13,15 +13,25 @@
 #   ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
 #
 # Modes:
-#   PUBLISH_MODE=capture  (default, stable)
-#   PUBLISH_MODE=stream   (legacy :81/stream — flaky)
-#   PUBLISH_ONCE=1        (one session then exit — used by MediaMTX runOnInit)
+#   PUBLISH_MODE=rtsp     (preferred) ESP CameraRTSPWiFi / esp32cam-rtsp → continuous H.264
+#   PUBLISH_MODE=capture  poll /capture stills (stable but choppy / "growing" HLS clock)
+#   PUBLISH_MODE=stream   HTTP :81/stream MJPEG (flaky long-lived)
+#   PUBLISH_ONCE=1        one session then exit — used by MediaMTX runOnInit
 set -uo pipefail
 
 # MediaMTX runOnInit sets RTSP_PORT + MTX_PATH (official hook env).
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
-XIAO_URL="${1:-${XIAO_MJPEG_URL:-}}"
-MODE="${PUBLISH_MODE:-capture}"
+XIAO_URL="${1:-${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-}}}"
+# Auto-pick continuous RTSP pull when URL is rtsp://…
+if [[ -z "${PUBLISH_MODE:-}" ]]; then
+  if [[ "${XIAO_URL}" == rtsp://* ]]; then
+    MODE=rtsp
+  else
+    MODE=capture
+  fi
+else
+  MODE="${PUBLISH_MODE}"
+fi
 FPS="${XIAO_FPS:-10}"
 BITRATE="${XIAO_BITRATE:-1000k}"
 RETRY_S="${PUBLISH_RETRY_S:-2}"
@@ -49,9 +59,13 @@ fi
 if [[ -z "$XIAO_URL" ]]; then
   cat >&2 <<'EOF'
 Usage:
-  ./scripts/publish_xiao.sh http://<xiao-ip>:81/stream
+  # Continuous (CameraRTSPWiFi / esp32cam-rtsp) — preferred for live:
+  ./scripts/publish_xiao.sh rtsp://10.128.93.25:554/mjpeg/1
 
-Prefer: ./scripts/mediamtx_run.sh   # MediaMTX owns forever-restart
+  # Legacy HTTP capture polls:
+  ./scripts/publish_xiao.sh http://10.128.93.25:81/stream
+
+Prefer: XIAO_RTSP_URL=rtsp://… ./scripts/mediamtx_run.sh
 EOF
   exit 2
 fi
@@ -64,10 +78,16 @@ capture_url_from() {
   echo "${u}/capture"
 }
 
-CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
+CAPTURE_URL=""
+if [[ "$MODE" == "capture" || "$MODE" == "stream" ]]; then
+  CAPTURE_URL="$(capture_url_from "$XIAO_URL")"
+fi
 
 echo "Bridging XIAO → MediaMTX (mode=$MODE stall=${STALL_S}s once=${PUBLISH_ONCE:-0})" >&2
-echo "  capture: $CAPTURE_URL" >&2
+if [[ -n "$CAPTURE_URL" ]]; then
+  echo "  capture: $CAPTURE_URL" >&2
+fi
+echo "  source : $XIAO_URL" >&2
 echo "  dest   : $MTX_URL  fps=$FPS bitrate=$BITRATE" >&2
 
 kill_pgid() {
@@ -205,12 +225,52 @@ run_stream() {
   wait "$fpid" 2>/dev/null || true
 }
 
-run_once() {
-  if [[ "$MODE" == "stream" ]]; then
-    run_stream
-  else
-    run_capture
+run_rtsp() {
+  # Continuous pull from ESP Micro-RTSP / esp32cam-rtsp (MJPEG) → H.264 → MediaMTX.
+  # This is what stops Safari's "14…19… slowly growing" clock from /capture polling.
+  local progress fpid started
+  progress="$(mktemp -t xiao_rtsp_XXXXXX)"
+  started=$SECONDS
+  ffmpeg -hide_banner -loglevel error \
+    -nostats \
+    -progress "$progress" \
+    -fflags +genpts+discardcorrupt+nobuffer \
+    -flags low_delay \
+    -rtsp_transport tcp \
+    -i "$XIAO_URL" \
+    -an \
+    -c:v libx264 \
+    -profile:v baseline \
+    -preset veryfast \
+    -tune zerolatency \
+    -pix_fmt yuv420p \
+    -r "$FPS" \
+    -b:v "$BITRATE" \
+    -maxrate "$BITRATE" \
+    -bufsize 2000k \
+    -g $((FPS * 2)) \
+    -keyint_min $((FPS * 2)) \
+    -bf 0 \
+    -x264-params "repeat-headers=1:keyint=$((FPS * 2)):min-keyint=$((FPS * 2))" \
+    -f rtsp \
+    -rtsp_transport tcp \
+    "$MTX_URL" &
+  fpid=$!
+  trap 'rm -f "$progress"; kill_pgid "$fpid"' RETURN
+
+  if ! watch_progress "$progress" "$fpid" "$started"; then
+    kill_pgid "$fpid"
+    return 1
   fi
+  wait "$fpid" 2>/dev/null || true
+}
+
+run_once() {
+  case "$MODE" in
+    rtsp) run_rtsp ;;
+    stream) run_stream ;;
+    *) run_capture ;;
+  esac
 }
 
 if [[ "$MODE" == "capture" ]]; then
@@ -218,6 +278,13 @@ if [[ "$MODE" == "capture" ]]; then
     echo "capture OK: $CAPTURE_URL" >&2
   else
     echo "WARN: $CAPTURE_URL not reachable (timeout ${CURL_MAX_S}s) — bridge will keep trying" >&2
+  fi
+elif [[ "$MODE" == "rtsp" ]]; then
+  echo "RTSP pull mode (continuous) — probing $XIAO_URL …" >&2
+  if ffprobe -v error -rtsp_transport tcp -i "$XIAO_URL" -show_entries stream=codec_name -of csv=p=0 >/dev/null 2>&1; then
+    echo "RTSP source OK: $XIAO_URL" >&2
+  else
+    echo "WARN: cannot probe $XIAO_URL yet — bridge will keep trying" >&2
   fi
 fi
 

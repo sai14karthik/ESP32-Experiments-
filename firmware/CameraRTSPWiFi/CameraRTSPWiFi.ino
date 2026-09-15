@@ -13,7 +13,7 @@ const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 // Port 554 matches esp32cam-rtsp / CCTV convention (was 8554).
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 150;  // ~6–7 fps — steadier on Wi‑Fi
+static const uint32_t kMsecPerFrame = 100;  // ~10 fps — continuous live to Mini
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -40,11 +40,11 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;
+  config.frame_size = FRAMESIZE_HVGA;  // 480x320 — continuous over LabPSK
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 15;  // slightly smaller packets
+  config.jpeg_quality = 12;
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
