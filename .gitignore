@@ -72,8 +72,8 @@ firmware/*.bin
 csi_pipeline_new/exports/*.csv
 csi_pipeline/exports/*.csv
 
-# Local Cursor session notes
-.cursor/rules/csi-detection-parked.mdc
+# Local Cursor (rules, plans — machine / session)
+.cursor/
 
 # Local reference materials (do not publish)
 /materials/

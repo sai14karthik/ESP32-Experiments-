@@ -336,6 +336,13 @@ cd csi_pipeline_new
 
 Any powered C5 already flashed with this Mini’s `CSI_TCP_HOST` reconnects on its own; ingest takes **all** of them (`source_id` per IP). One board down does not stop the rest.
 
+Live how many CSI **forwarders** are up (any Wi‑Fi; 4.1 now, 4.3 RX later — senders not listed):
+
+```bash
+./count_csi_clients.sh
+./count_csi_clients.sh --watch
+```
+
 Session `recv_port` is stored as `tcp:9055:multi`. Rows include `source_id` (client IP) so multiple C5 receivers can share one ingest. USB serial still prints `CSI_DATA` if you plug in for debug — do not run USB ingest and TCP ingest for the same capture.
 
 ---

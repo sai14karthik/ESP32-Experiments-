@@ -112,6 +112,23 @@ client connected 10.128.93.31:… (active=2)
 
 Leave this running. Session `recv_port` is stored as `tcp:9055:multi`. Each board’s rows get `source_id` = its LabPSK IP. Flash **every** C5 once with the same `CSI_TCP_HOST` (Mini IP); after that, any powered board auto-connects whenever this script is listening. One board offline does not stop the others.
 
+#### Live connected forwarders (`count_csi_clients`)
+
+In another Mini terminal (while ingest runs):
+
+```bash
+./count_csi_clients.sh           # once
+./count_csi_clients.sh --watch   # refresh; unplug a board → count drops
+./count_csi_clients.sh --verbose # debug TCP listing
+```
+
+Counts **any** device that TCP-forwards `CSI_DATA` to Mini `:9055` (live TCP + samples in the last ~10s):
+
+- **Today (4.1):** N ESP receivers on LabPSK (or any SSID)
+- **Later (4.3):** N ESP receivers with 1+ ESP senders — only the **receivers** show up here (senders have no TCP to Mini). A **separate** sender-status script can be added later (USB serial / onboard heartbeat); keep it out of `count_csi_clients.sh`.
+
+SSID does not matter; `CSI_TCP_HOST` / reachability to Mini does.
+
 #### Step 3 — Flash C5 once (USB only for this step)
 
 From a machine with ESP-IDF (laptop or Mini), plug in the C5:
@@ -147,7 +164,11 @@ Replace `10.128.93.23` with the Mini IP from Step 1. Check port with `ls /dev/cu
 #### Check / stop (Mini or via SSH)
 
 ```bash
-# Is ingest running?
+# How many C5s are live right now?
+./count_csi_clients.sh
+./count_csi_clients.sh --watch
+
+# Is ingest listening?
 lsof -iTCP:9055 -sTCP:LISTEN
 nc -vz 127.0.0.1 9055
 
@@ -377,6 +398,8 @@ Amplitude / phase are **not** stored; compute offline from `iq` when needed.
 | [`MAC_MINI.md`](MAC_MINI.md) | **Mac Mini runbook** (4.1 / 4.2 / 4.3 + Postgres) |
 | [`setup_mac.sh`](setup_mac.sh) | One-time machine setup |
 | [`run_ingest.sh`](run_ingest.sh) | Capture launcher (loads `.env`, uses `uv run --group csi`) |
+| [`run_multi_ingest.sh`](run_multi_ingest.sh) | Multi-C5 TCP fan-in (method 4.1) — preferred room capture |
+| [`count_csi_clients.sh`](count_csi_clients.sh) | Live count of CSI TCP forwarders on `:9055` (any SSID / 4.1 or later 4.3 RX) |
 | [`run_detect.sh`](run_detect.sh) | Train / calibrate / ablate / self-test / live detect launcher |
 | [`run_csi_viz.sh`](run_csi_viz.sh) / [`csi_viz_gui.py`](csi_viz_gui.py) | Live CSI scope (USB): amp / RSSI / heatmap + optional Mic RMS |
 | [`probe_recv_port.py`](probe_recv_port.py) | Detect recv USB port |

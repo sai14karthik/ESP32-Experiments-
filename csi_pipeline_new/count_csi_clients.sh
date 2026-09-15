@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Live count of ESP32-C5 boards currently feeding Mini CSI ingest.
+# Live count of devices currently feeding Mini CSI TCP ingest.
+#
+# Counts any client that has an ESTABLISHED TCP session to :9055 and/or has
+# inserted samples recently — method 4.1 multi-RX today; later 4.3 multi-RX
+# (1+ ESP senders, N ESP receivers) the same way: only boards that *forward*
+# CSI_DATA to Mini appear here. ESP senders (power/radio only) do not.
+#
+# Works on any Wi‑Fi (LabPSK, home, hotel, …) as long as CSI_TCP_HOST points
+# at this Mini and clients can reach :9055.
 #
 # On the Mac Mini (while ingest is running):
 #   ./count_csi_clients.sh
 #   ./count_csi_clients.sh --watch
 #   ./count_csi_clients.sh --verbose
-#
-# Prefer: boards with samples in the last few seconds (true ingest activity).
-# Also: ESTABLISHED TCP peers on :9055 (netstat; works on macOS Mini).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -74,7 +79,7 @@ tcp_peers() {
 }
 
 show_once() {
-  echo "=== CSI live devices  :$PORT  $(date '+%H:%M:%S') ==="
+  echo "=== CSI live forwarders  :$PORT  $(date '+%H:%M:%S') ==="
 
   if listener_up; then
     echo "ingest listener: UP"
