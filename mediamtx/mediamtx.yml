@@ -1,10 +1,6 @@
 ###############################################
-# MediaMTX lab — RTSP only (no ffmpeg)
-# ESP Micro-RTSP MJPEG → MediaMTX TCP proxy → ffplay
-#
-# Knobs from mediamtx-repo:
-#   docs/2-features/12-proxy.md
-#   docs/2-features/28-decrease-packet-loss.md
+# MediaMTX lab — ESP MJPEG → ffmpeg H.264 → RTSP
+# (Micro-RTSP MJPEG does not decode in ffplay 9; H.264 does.)
 ###############################################
 
 logLevel: info
@@ -12,19 +8,15 @@ logDestinations: [stdout]
 
 readTimeout: 30s
 writeTimeout: 30s
-# MJPEG bursts; stops "reader is too slow" under Wi‑Fi jitter
 writeQueueSize: 4096
 udpMaxPayloadSize: 1450
-udpReadBufferSize: 1000000
 
 rtsp: yes
 rtspAddress: :8554
-# Viewers + reliability on LabPSK
 rtspTransports: [tcp]
 rtpAddress: :8002
 rtcpAddress: :8003
 
-# Parked while focusing on RTSP
 rtmp: no
 hls: no
 webrtc: no
@@ -35,8 +27,6 @@ paths:
     source: publisher
 
   cam_xiao:
-    # Direct pull from board (TCP interleaved). No ffmpeg.
-    # Same URL shape as esp32cam-rtsp / Micro-RTSP: /mjpeg/1
-    source: __XIAO_RTSP_SOURCE__
-    rtspTransport: tcp
-    sourceOnDemand: no
+    source: publisher
+    runOnInit: __CAM_XIAO_RUN_ON_INIT__
+    runOnInitRestart: yes

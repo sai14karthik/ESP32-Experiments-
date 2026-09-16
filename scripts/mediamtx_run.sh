@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# MediaMTX RTSP-only: pull ESP Micro-RTSP → re-serve on :8554/cam_xiao (no ffmpeg).
+# MediaMTX + ffmpeg: ESP MJPEG → H.264 → cam_xiao (ffplay/VLC-friendly).
 #
-#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
+#   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
 #
-# Watch (ffplay):
-#   ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay rtsp://10.128.93.23:8554/cam_xiao
-#
-# Board must run CameraRTSPWiFi (serial: RTSP: rtsp://…:554/mjpeg/1).
+# Watch: ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_xiao
+# Board: CameraWebServerWiFi (:81/stream)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONF_SRC="$ROOT/mediamtx/mediamtx.yml"
 CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
-XIAO_URL="${XIAO_RTSP_URL:-rtsp://10.128.93.25:554/mjpeg/1}"
+WRAPPER="$ROOT/mediamtx/run_xiao_publish.sh"
+PUBLISH="$ROOT/scripts/publish_xiao.sh"
+XIAO_URL="${XIAO_MJPEG_URL:-${XIAO_RTSP_URL:-http://10.128.93.25:81/stream}}"
 
 detect_lan_ip() {
   local ip=""
@@ -37,11 +37,6 @@ detect_lan_ip() {
 
 LAN_IP="${LAN_IP:-$(detect_lan_ip)}"
 
-if [[ "$XIAO_URL" != rtsp://* ]]; then
-  echo "RTSP-only mode needs XIAO_RTSP_URL=rtsp://… (got: $XIAO_URL)" >&2
-  exit 2
-fi
-
 if ! command -v mediamtx >/dev/null 2>&1; then
   echo "mediamtx not found. Install: brew install mediamtx" >&2
   exit 1
@@ -51,25 +46,33 @@ if [[ ! -f "$CONF_SRC" ]]; then
   exit 1
 fi
 
+chmod +x "$PUBLISH" 2>/dev/null || true
+
 if lsof -nP -iTCP:8554 -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Port 8554 in use. Run: pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao'" >&2
   exit 1
 fi
 
-SRC_ESC="$(printf '%s' "$XIAO_URL" | sed 's/[&/\]/\\&/g')"
-sed -e "s|__XIAO_RTSP_SOURCE__|${SRC_ESC}|" "$CONF_SRC" >"$CONF_RT"
+cat >"$WRAPPER" <<EOF
+#!/bin/bash
+export PUBLISH_ONCE=1
+export XIAO_FPS="\${XIAO_FPS:-15}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-2500k}"
+exec "$PUBLISH" "$XIAO_URL"
+EOF
+chmod +x "$WRAPPER"
 
-echo "MediaMTX (RTSP only — no ffmpeg)" >&2
-echo "  pull  : $XIAO_URL" >&2
-echo "  serve : rtsp://127.0.0.1:8554/cam_xiao" >&2
+INIT_ESC="$(printf '%s' "$WRAPPER" | sed 's/[&/\]/\\&/g')"
+sed -e "s|__CAM_XIAO_RUN_ON_INIT__|${INIT_ESC}|" "$CONF_SRC" >"$CONF_RT"
+
+echo "MediaMTX (ffmpeg H.264 — works with ffplay/VLC)" >&2
+echo "  ESP  : $XIAO_URL" >&2
+echo "  serve: rtsp://127.0.0.1:8554/cam_xiao" >&2
 if [[ "$LAN_IP" != "127.0.0.1" ]]; then
-  echo "  LAN   : rtsp://$LAN_IP:8554/cam_xiao" >&2
+  echo "  LAN  : rtsp://$LAN_IP:8554/cam_xiao" >&2
 fi
-echo "  watch : ./scripts/watch_xiao_rtsp.sh" >&2
-echo "          (or: ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_xiao)" >&2
-if [[ "$LAN_IP" != "127.0.0.1" ]]; then
-  echo "  LAN clients: ./scripts/watch_xiao_rtsp.sh rtsp://$LAN_IP:8554/cam_xiao" >&2
-fi
+echo "  watch: ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_xiao" >&2
+echo "Wait for: first frame OK" >&2
 echo "Ctrl+C to stop." >&2
 
 exec mediamtx "$CONF_RT"
