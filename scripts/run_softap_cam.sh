@@ -5,10 +5,10 @@
 # 2) Mac Wi‑Fi → join "XIAO-CAM" / password 12345678 (Mac IP becomes 192.168.4.2).
 # 3) Run this script.
 #
-# Best viewers (H.264 from MediaMTX — do NOT open ESP :554 MJPEG in VLC for "nice" RTSP):
-#   VLC / ffplay:  rtsp://127.0.0.1:8554/cam_xiao
-#   Browser live:  http://127.0.0.1:8889/cam_xiao/
-#   Browser HLS:   http://127.0.0.1:8888/cam_xiao/   (more lag)
+# Watch MediaMTX H.264 (not ESP :554 MJPEG directly):
+#   rtsp://127.0.0.1:8554/cam_xiao
+#   http://127.0.0.1:8889/cam_xiao/
+#   http://127.0.0.1:8888/cam_xiao/
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

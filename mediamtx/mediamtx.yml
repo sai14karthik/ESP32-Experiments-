@@ -1,13 +1,6 @@
 ###############################################
-# Best RTSP path (LabPSK / Orlando)
-#
-#   XIAO HTTP MJPEG :81/stream
-#     → ffmpeg (libx264 ultrafast/zerolatency) on this host
-#     → MediaMTX publisher :8554/cam_xiao
-#     → VLC: rtsp://<MINI_IP>:8554/cam_xiao  (TCP)
-#
-# Why not Micro-RTSP pull: MJPEG-over-RTSP is rough in VLC/ffplay.
-# Why ffmpeg: ESP32-S3 has no HW H.264; host remux is the MediaMTX/go2rtc pattern.
+# ESP HTTP MJPEG → ffmpeg H.264 → MediaMTX :8554/cam_xiao
+# (S3 has no HW H.264; MJPEG remux on host for VLC/colleague RTSP)
 ###############################################
 
 logLevel: info
@@ -22,10 +15,12 @@ rtspAddress: :8554
 rtspTransports: [tcp]
 
 # Optional LAN backup for browsers; primary watch path is RTSP.
+# Default hlsVariant is lowLatency → MediaMTX requires hlsSegmentCount >= 7.
 hls: yes
 hlsAddress: :8888
 hlsAlwaysRemux: yes
-hlsSegmentCount: 3
+hlsVariant: lowLatency
+hlsSegmentCount: 7
 hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
 hlsSegmentMaxSize: 10M

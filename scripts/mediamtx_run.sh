@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Best one-command RTSP pipeline (Mini):
-#   XIAO HTTP MJPEG → ffmpeg H.264 → MediaMTX → VLC
-#
+# MediaMTX + ffmpeg: ESP HTTP MJPEG → H.264 RTSP on :8554/cam_xiao
 #   ./scripts/mediamtx_run.sh
-# Optional:
 #   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
 set -euo pipefail
 
@@ -32,11 +29,9 @@ fi
 SRC_ESC="$(printf '%s' "$XIAO_URL" | sed 's/[&/\]/\\&/g')"
 sed -e "s|__XIAO_MJPEG_URL__|${SRC_ESC}|" "$CONF_SRC" >"$CONF_RT"
 
-echo "Best RTSP pipeline (HTTP MJPEG → ffmpeg H.264 → MediaMTX)" >&2
-echo "  ESP   → $XIAO_URL" >&2
-echo "  watch → rtsp://127.0.0.1:8554/cam_xiao   (VLC → TCP, cache ~50–100 ms)" >&2
-echo "  LAN   → rtsp://10.128.93.23:8554/cam_xiao" >&2
-echo "  HLS   → http://10.128.93.23:8888/cam_xiao/" >&2
-echo "Ctrl+C to stop." >&2
+echo "source $XIAO_URL" >&2
+echo "rtsp   rtsp://127.0.0.1:8554/cam_xiao" >&2
+echo "lan    rtsp://10.128.93.23:8554/cam_xiao" >&2
+echo "hls    http://10.128.93.23:8888/cam_xiao/" >&2
 
 exec mediamtx "$CONF_RT"

@@ -135,7 +135,6 @@ void setup() {
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
-  Serial.println("MJPEG stream: http://<ip>:81/stream  (ffmpeg→MediaMTX H.264)");
 }
 
 void loop() {
