@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Start MediaMTX with ESP → ffmpeg → cam_xiao (official hook pattern).
 #
-# Canonical (locked) lab command:
-#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
+# Canonical (quality / smooth — delay OK):
+#   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
 #
-# Watch (live):     http://<MINI_IP>:8889/cam_xiao/
-# Watch (backup):   http://<MINI_IP>:8888/cam_xiao/
-# Watch (VLC):      rtsp://<MINI_IP>:8554/cam_xiao
+# Watch (smooth):   http://<MINI_IP>:8888/cam_xiao/
+# Watch (WebRTC):   http://<MINI_IP>:8889/cam_xiao/
+# Watch (ffplay):   rtsp://<MINI_IP>:8554/cam_xiao
 #
 # Refs:
 #   https://mediamtx.org/docs/publish/generic-webcams
@@ -19,7 +19,7 @@ CONF_SRC="$ROOT/mediamtx/mediamtx.yml"
 CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
 WRAPPER="$ROOT/mediamtx/run_xiao_publish.sh"
 PUBLISH="$ROOT/scripts/publish_xiao.sh"
-XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-rtsp://10.128.93.25:554/mjpeg/1}}"
+XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-http://10.128.93.25:81/stream}}"
 
 detect_lan_ip() {
   local ip=""
@@ -68,8 +68,8 @@ else
   cat >"$WRAPPER" <<EOF
 #!/bin/bash
 export PUBLISH_ONCE=1
-export XIAO_FPS="\${XIAO_FPS:-10}"
-export XIAO_BITRATE="\${XIAO_BITRATE:-1200k}"
+export XIAO_FPS="\${XIAO_FPS:-12}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-2500k}"
 exec "$PUBLISH" "$XIAO_URL"
 EOF
   chmod +x "$WRAPPER"
@@ -82,13 +82,13 @@ sed -e "s|__CAM_XIAO_RUN_ON_INIT__|${INIT_ESC}|" \
     -e "s|__WEBRTC_HOST__|${HOST_ESC}|" \
     "$CONF_SRC" >"$CONF_RT"
 
-echo "MediaMTX (canonical lab)" >&2
+echo "MediaMTX (quality / smooth — a few seconds delay is OK)" >&2
 echo "  ESP: $XIAO_URL" >&2
-echo "  BEST  RTSP  → rtsp://127.0.0.1:8554/cam_xiao   (VLC / ffplay)" >&2
-echo "  LIVE  WebRTC → http://127.0.0.1:8889/cam_xiao/" >&2
-echo "  HLS   backup → http://127.0.0.1:8888/cam_xiao/" >&2
+echo "  HLS (smooth browser) → http://127.0.0.1:8888/cam_xiao/" >&2
+echo "  WebRTC               → http://127.0.0.1:8889/cam_xiao/" >&2
+echo "  RTSP (ffplay)        → rtsp://127.0.0.1:8554/cam_xiao" >&2
 if [[ "$WEBRTC_HOST" != "127.0.0.1" ]]; then
-  echo "  LAN RTSP/WebRTC also on $WEBRTC_HOST" >&2
+  echo "  LAN: replace 127.0.0.1 with $WEBRTC_HOST" >&2
 fi
 echo "Ctrl+C to stop." >&2
 

@@ -47,11 +47,11 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_HVGA;  // 480x320 — faster over LabPSK than VGA
+  config.frame_size = FRAMESIZE_VGA;  // 640x480 — quality for MediaMTX (delay OK)
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 10;
+  config.jpeg_quality = 8;
   config.fb_count = 2;
 
   if (!psramFound()) {
@@ -74,17 +74,18 @@ void setup() {
   }
 
   sensor_t *s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
   if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);        // flip it back
-    s->set_brightness(s, 1);   // up the brightness just a bit
-    s->set_saturation(s, -2);  // lower the saturation
+    s->set_vflip(s, 1);
+    s->set_brightness(s, 1);
+    s->set_saturation(s, -2);
   }
-  // drop down frame size for higher initial frame rate
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_HVGA);
-    s->set_quality(s, 10);
+    s->set_framesize(s, FRAMESIZE_VGA);
+    s->set_quality(s, 8);
   }
+  // XIAO Sense module orientation
+  s->set_vflip(s, 1);
+  s->set_hmirror(s, 1);
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
   s->set_vflip(s, 1);

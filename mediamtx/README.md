@@ -99,32 +99,28 @@ ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam1
 
 Acceptance: video in VLC and browser; stop `publish_webcam.sh` → stream ends; restart → returns.
 
-## Stage 2 — XIAO continuous live (preferred)
+## Stage 2 — XIAO quality + smooth (HLS)
 
-HTTP `/capture` polls make HLS look like a slowly growing recording (14s → 19s…).
-Use **CameraRTSPWiFi** on the board + continuous RTSP pull on the Mini.
+Prefer **CameraWebServerWiFi** (VGA q8) + continuous HTTP `:81/stream` → ffmpeg H.264
+→ MediaMTX. HLS is buffered (a few seconds delay) so playback stays smooth.
 
-1. Flash `firmware/CameraRTSPWiFi` (LabPSK, RTSP `:554/mjpeg/1`).
-2. One terminal on Mini:
+1. Flash `firmware/CameraWebServerWiFi` (LabPSK, VGA, `:81/stream`).
+2. On Mini:
 
 ```bash
-XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
+pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao' || true
+XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
 ```
 
-MediaMTX restarts `publish_xiao.sh` forever (`PUBLISH_MODE=rtsp` auto from `rtsp://`).
-
-**Fallback** (HTTP, choppy): flash `CameraWebServerWiFi`, then
-`XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh`.
-
-**Watch** (pick one client)
+**Watch** (browser — no VLC needed)
 
 | Client | Protocol | URL |
 |--------|----------|-----|
-| VLC | RTSP | `rtsp://127.0.0.1:8554/cam_xiao` |
-| Browser | HLS | http://127.0.0.1:8888/cam_xiao/ |
-| Browser | WebRTC | http://127.0.0.1:8889/cam_xiao/ |
+| Browser | **HLS (smooth)** | http://10.128.93.23:8888/cam_xiao/ |
+| Browser | WebRTC | http://10.128.93.23:8889/cam_xiao/ |
+| ffplay | RTSP | `rtsp://10.128.93.23:8554/cam_xiao` |
 
-On Mini LabPSK Ethernet (`10.128.93.23`), replace `127.0.0.1` with that IP for colleagues.
+Alt: `CameraRTSPWiFi` + `XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1` if HTTP stream stalls.
 
 ## Ports (localhost)
 

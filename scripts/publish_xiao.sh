@@ -5,9 +5,10 @@
 #   https://mediamtx.org/docs/publish/generic-webcams
 #   Espressif: ESP32-S3 has no HW H.264 — host must transcode MJPEG.
 #
-# Prefer:
-#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
-# Watch live: http://<MINI_IP>:8889/cam_xiao/
+# Prefer quality HTTP MJPEG (CameraWebServerWiFi):
+#   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
+# Watch smooth HLS: http://<MINI_IP>:8888/cam_xiao/
+# Alt RTSP pull: XIAO_RTSP_URL=rtsp://… ./scripts/mediamtx_run.sh
 set -uo pipefail
 
 MTX_URL="${MTX_URL:-rtsp://127.0.0.1:${RTSP_PORT:-8554}/${MTX_PATH:-cam_xiao}}"
@@ -24,8 +25,8 @@ else
   MODE="${PUBLISH_MODE}"
 fi
 
-FPS="${XIAO_FPS:-10}"
-BITRATE="${XIAO_BITRATE:-1200k}"
+FPS="${XIAO_FPS:-12}"
+BITRATE="${XIAO_BITRATE:-2500k}"
 RETRY_S="${PUBLISH_RETRY_S:-3}"
 STALL_S="${PUBLISH_STALL_S:-45}"
 # Wait this long for the first encoded frame before declaring stall.
@@ -108,10 +109,8 @@ watch_progress() {
   return 0
 }
 
-# MediaMTX webcam recipe + ESP MJPEG.
-# Micro-RTSP timestamps are broken → without rate-limit, ffmpeg encodes at
-# "90000 fps" (MB rate limit / frames duplicated / WebRTC discards thousands).
-# Fix: stamp frames with wall clock, then fps=N keeps real-time 10 fps.
+# Quality-first encode (delay OK). veryfast > ultrafast for clarity.
+# wallclock + fps= keeps CFR so HLS/WebRTC don't stutter or discard.
 ffmpeg_h264_out() {
   local prog="$1"
   shift
@@ -122,18 +121,17 @@ ffmpeg_h264_out() {
     -an \
     -vf "fps=${FPS},format=yuv420p" \
     -c:v libx264 \
-    -preset ultrafast \
-    -tune zerolatency \
-    -profile:v baseline \
-    -level 3.1 \
+    -preset veryfast \
+    -tune film \
+    -profile:v high \
+    -level 4.0 \
     -b:v "$BITRATE" \
+    -maxrate "$BITRATE" \
+    -bufsize "$((${BITRATE%k} * 2))k" \
     -g $((FPS * 2)) \
     -keyint_min "$FPS" \
     -bf 0 \
     -x264-params "scenecut=0:repeat-headers=1" \
-    -flush_packets 1 \
-    -muxdelay 0 \
-    -muxpreload 0 \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL"
@@ -167,6 +165,7 @@ run_stream() {
   set -m
   ffmpeg_h264_out "$progress" \
     -fflags +genpts+discardcorrupt \
+    -use_wallclock_as_timestamps 1 \
     -f mjpeg \
     -i "$XIAO_URL" &
   fpid=$!
@@ -232,7 +231,9 @@ if [[ "$MODE" == "capture" ]]; then
     echo "WARN: $CAPTURE_URL not reachable — will keep trying" >&2
   fi
 elif [[ "$MODE" == "rtsp" ]]; then
-  echo "RTSP pull (wallclock + fps=${FPS} — stops Micro-RTSP frame flood)" >&2
+  echo "RTSP pull (wallclock + fps=${FPS})" >&2
+elif [[ "$MODE" == "stream" ]]; then
+  echo "HTTP MJPEG stream (wallclock + fps=${FPS}, quality encode)" >&2
 fi
 
 if [[ "${PUBLISH_ONCE:-0}" == "1" ]]; then

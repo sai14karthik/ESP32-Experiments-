@@ -1,19 +1,14 @@
 ###############################################
-# MediaMTX lab config — aligned with official docs
-# https://mediamtx.org/docs/publish/generic-webcams
-# https://mediamtx.org/docs/features/decrease-packet-loss
-# https://mediamtx.org/docs/references/configuration-file
+# MediaMTX lab — quality + smooth (delay OK)
 ###############################################
 
 logLevel: info
 logDestinations: [stdout]
 
-readTimeout: 20s
-writeTimeout: 20s
-# Official fix for "reader is too slow, discarding N frames"
-# https://mediamtx.org/docs/features/decrease-packet-loss
+readTimeout: 30s
+writeTimeout: 30s
 writeQueueSize: 1024
-udpMaxPayloadSize: 1200
+udpMaxPayloadSize: 1450
 
 rtsp: yes
 rtspAddress: :8554
@@ -27,14 +22,11 @@ rtmpAddress: :1935
 hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
-# Default in MediaMTX is false — only remux when someone opens HLS.
-# Keeping this true caused HLS muxer lag → discarded frames for WebRTC too.
-hlsAlwaysRemux: no
-# lowLatency requires hlsSegmentCount >= 7 (MediaMTX validates this).
-hlsVariant: lowLatency
-hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
-hlsSegmentCount: 7
+# Pre-build HLS so Safari has a buffer (smoother; a few seconds delay is OK).
+hlsAlwaysRemux: yes
+hlsVariant: fmp4
+hlsSegmentDuration: 2s
+hlsSegmentCount: 10
 hlsSegmentMaxSize: 50M
 
 webrtc: yes
@@ -52,7 +44,5 @@ paths:
 
   cam_xiao:
     source: publisher
-    # Filled by mediamtx_run.sh — official pattern: runOnInit + runOnInitRestart
-    # https://mediamtx.org/docs/features/hooks
     runOnInit: __CAM_XIAO_RUN_ON_INIT__
     runOnInitRestart: yes
