@@ -7,13 +7,12 @@
 #include "OV2640Streamer.h"
 #include "CStreamer.h"
 
-// Lab Wi‑Fi (same as CameraWebServerWiFi)
+// Lab Wi‑Fi (original)
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
-// Port 554 matches esp32cam-rtsp / CCTV convention (was 8554).
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 80;  // 12.5 fps — smaller JPEG keeps Wi‑Fi fed smoothly
+static const uint32_t kMsecPerFrame = 100;  // 10 fps — steady for Mini ffmpeg → MediaMTX RTSP
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -40,11 +39,11 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;  // 320x240
+  config.frame_size = FRAMESIZE_HVGA;  // 480x320 — clear + LabPSK-friendly
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 20;  // more compression → less TCP stall → less "stuck" WebRTC
+  config.jpeg_quality = 10;
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
@@ -81,7 +80,7 @@ void setup() {
   Serial.setDebugOutput(false);
   delay(200);
   Serial.println();
-  Serial.println("CameraRTSPWiFi (XIAO S3 Sense → Micro-RTSP, hardened)");
+  Serial.println("CameraRTSPWiFi LabPSK (XIAO → Micro-RTSP → Mini MediaMTX)");
 
   esp_err_t err = cam.init(xiao_cam_config());
   if (err != ESP_OK) {
@@ -89,7 +88,6 @@ void setup() {
     return;
   }
 
-  // XIAO Sense cam is mounted upside-down relative to the board silkscreen.
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
     s->set_vflip(s, 1);
@@ -114,7 +112,8 @@ void setup() {
 
   rtspServer.begin();
   Serial.printf("RTSP: rtsp://%s:%u/mjpeg/1\n", WiFi.localIP().toString().c_str(), kRtspPort);
-  Serial.println("Mini: ffmpeg that URL → H.264 → MediaMTX (browsers need H.264)");
+  Serial.println("Mini: XIAO_RTSP_URL=that ./scripts/mediamtx_run.sh");
+  Serial.println("Watch RTSP: rtsp://<MINI_IP>:8554/cam_xiao");
 }
 
 void loop() {

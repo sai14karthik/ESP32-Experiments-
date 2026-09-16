@@ -25,7 +25,7 @@ else
 fi
 
 FPS="${XIAO_FPS:-10}"
-BITRATE="${XIAO_BITRATE:-600k}"
+BITRATE="${XIAO_BITRATE:-1200k}"
 RETRY_S="${PUBLISH_RETRY_S:-3}"
 STALL_S="${PUBLISH_STALL_S:-45}"
 # Wait this long for the first encoded frame before declaring stall.
@@ -108,24 +108,32 @@ watch_progress() {
   return 0
 }
 
-# MediaMTX webcam recipe + ESP MJPEG input.
-# Do NOT use fps= or -r here — both duplicate/pad frames when ESP is <10fps
-# ("More than 1000 frames duplicated") and the picture looks stuck.
+# MediaMTX webcam recipe + ESP MJPEG.
+# Micro-RTSP timestamps are broken → without rate-limit, ffmpeg encodes at
+# "90000 fps" (MB rate limit / frames duplicated / WebRTC discards thousands).
+# Fix: stamp frames with wall clock, then fps=N keeps real-time 10 fps.
 ffmpeg_h264_out() {
   local prog="$1"
   shift
-  ffmpeg -hide_banner -loglevel warning \
+  ffmpeg -hide_banner -loglevel error \
     -nostats \
     -progress "$prog" \
     "$@" \
     -an \
-    -pix_fmt yuv420p \
+    -vf "fps=${FPS},format=yuv420p" \
     -c:v libx264 \
     -preset ultrafast \
     -tune zerolatency \
+    -profile:v baseline \
+    -level 3.1 \
     -b:v "$BITRATE" \
-    -g 20 \
+    -g $((FPS * 2)) \
+    -keyint_min "$FPS" \
     -bf 0 \
+    -x264-params "slice-max-size=1000:scenecut=0:repeat-headers=1" \
+    -flush_packets 1 \
+    -muxdelay 0 \
+    -muxpreload 0 \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL"
@@ -135,11 +143,11 @@ run_rtsp() {
   local progress fpid started
   progress="$(mktemp -t xiao_rtsp_XXXXXX)"
   started=$SECONDS
-  # Capture paths into trap now — locals vanish on RETURN with set -u.
   trap "rm -f '$progress'; kill_pgid \"\${fpid:-}\"" RETURN
   set -m
   ffmpeg_h264_out "$progress" \
     -fflags +genpts+discardcorrupt \
+    -use_wallclock_as_timestamps 1 \
     -rtsp_transport tcp \
     -i "$XIAO_URL" &
   fpid=$!
@@ -224,7 +232,7 @@ if [[ "$MODE" == "capture" ]]; then
     echo "WARN: $CAPTURE_URL not reachable — will keep trying" >&2
   fi
 elif [[ "$MODE" == "rtsp" ]]; then
-  echo "RTSP pull (MediaMTX webcam pattern, no fps= filter)" >&2
+  echo "RTSP pull (wallclock + fps=${FPS} — stops Micro-RTSP frame flood)" >&2
 fi
 
 if [[ "${PUBLISH_ONCE:-0}" == "1" ]]; then

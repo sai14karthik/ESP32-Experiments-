@@ -23,7 +23,12 @@ XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-rtsp://10.128.93.25:554/mjpeg/1}}"
 
 detect_lan_ip() {
   local ip=""
+  # Prefer SoftAP client address when Mac is on XIAO-CAM.
   ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+  if [[ "$ip" == 192.168.4.* ]]; then
+    printf '%s' "$ip"
+    return 0
+  fi
   if [[ -z "$ip" || "$ip" == 192.0.0.* || "$ip" == 169.254.* ]]; then
     ip="$(ipconfig getifaddr en1 2>/dev/null || true)"
   fi
@@ -64,7 +69,7 @@ else
 #!/bin/bash
 export PUBLISH_ONCE=1
 export XIAO_FPS="\${XIAO_FPS:-10}"
-export XIAO_BITRATE="\${XIAO_BITRATE:-600k}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-1200k}"
 exec "$PUBLISH" "$XIAO_URL"
 EOF
   chmod +x "$WRAPPER"
@@ -79,9 +84,12 @@ sed -e "s|__CAM_XIAO_RUN_ON_INIT__|${INIT_ESC}|" \
 
 echo "MediaMTX (canonical lab)" >&2
 echo "  ESP: $XIAO_URL" >&2
-echo "  LIVE WebRTC → http://${WEBRTC_HOST}:8889/cam_xiao/" >&2
-echo "  HLS backup  → http://${WEBRTC_HOST}:8888/cam_xiao/" >&2
-echo "  VLC RTSP    → rtsp://${WEBRTC_HOST}:8554/cam_xiao" >&2
+echo "  BEST  RTSP  → rtsp://127.0.0.1:8554/cam_xiao   (VLC / ffplay)" >&2
+echo "  LIVE  WebRTC → http://127.0.0.1:8889/cam_xiao/" >&2
+echo "  HLS   backup → http://127.0.0.1:8888/cam_xiao/" >&2
+if [[ "$WEBRTC_HOST" != "127.0.0.1" ]]; then
+  echo "  LAN RTSP/WebRTC also on $WEBRTC_HOST" >&2
+fi
 echo "Ctrl+C to stop." >&2
 
 exec mediamtx "$CONF_RT"

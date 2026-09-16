@@ -1,30 +1,19 @@
 ###############################################
-# MediaMTX lab — ESP32-CAM / XIAO → all protocols
-#
-# Official pattern (MediaMTX maintainer, discussion #3575):
-#   ESP MJPEG HTTP is NOT a native MediaMTX source.
-#   Use FFmpeg in runOnInit to ingest, then viewers use
-#   RTSP / HLS / WebRTC / RTMP from MediaMTX.
-#
-#   https://github.com/bluenviron/mediamtx/discussions/3575
-#   https://mediamtx.org/docs/usage/hooks
-#   https://mediamtx.org/docs/publish/ffmpeg
-#
-# Browsers need H.264 (HLS/WebRTC do not support MJPEG):
-#   https://mediamtx.org/docs/read/hls
-#   https://mediamtx.org/docs/read/webrtc
-#
-# Start: ./scripts/mediamtx_run.sh
-# Do NOT also run publish_xiao.sh unless XIAO_EXTERNAL_PUBLISH=1.
+# MediaMTX lab config — aligned with official docs
+# https://mediamtx.org/docs/publish/generic-webcams
+# https://mediamtx.org/docs/features/decrease-packet-loss
+# https://mediamtx.org/docs/references/configuration-file
 ###############################################
 
 logLevel: info
 logDestinations: [stdout]
 
-readTimeout: 60s
-writeTimeout: 60s
+readTimeout: 20s
+writeTimeout: 20s
+# Official fix for "reader is too slow, discarding N frames"
+# https://mediamtx.org/docs/features/decrease-packet-loss
 writeQueueSize: 1024
-udpMaxPayloadSize: 1400
+udpMaxPayloadSize: 1200
 
 rtsp: yes
 rtspAddress: :8554
@@ -38,17 +27,23 @@ rtmpAddress: :1935
 hls: yes
 hlsAddress: :8888
 hlsAllowOrigins: ["*"]
-hlsAlwaysRemux: yes
-# fmp4 tolerates short publisher gaps better than lowLatency.
-hlsVariant: fmp4
-hlsSegmentDuration: 2s
-hlsPartDuration: 500ms
+# Default in MediaMTX is false — only remux when someone opens HLS.
+# Keeping this true caused HLS muxer lag → discarded frames for WebRTC too.
+hlsAlwaysRemux: no
+# lowLatency requires hlsSegmentCount >= 7 (MediaMTX validates this).
+hlsVariant: lowLatency
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
 hlsSegmentCount: 7
+hlsSegmentMaxSize: 50M
 
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ["*"]
-webrtcAdditionalHosts: [10.128.93.23]
+webrtcIPsFromInterfaces: false
+webrtcAdditionalHosts: [192.168.4.2]
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
 webrtcICEServers2: []
 
 paths:
@@ -57,6 +52,7 @@ paths:
 
   cam_xiao:
     source: publisher
-    # Filled by mediamtx_run.sh → absolute path to bridge script.
+    # Filled by mediamtx_run.sh — official pattern: runOnInit + runOnInitRestart
+    # https://mediamtx.org/docs/features/hooks
     runOnInit: /Users/saikarthik/Desktop/camera_module/mediamtx/run_xiao_publish.sh
     runOnInitRestart: yes
