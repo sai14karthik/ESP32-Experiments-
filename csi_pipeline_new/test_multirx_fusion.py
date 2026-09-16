@@ -149,9 +149,7 @@ def test_fuse_unit_n(n_rx: int) -> None:
         )
 
 
-def test_train_cli(n_rx: int) -> Path:
-    out_dir = ROOT / "exports" / "_test_multirx"
-    out_dir.mkdir(parents=True, exist_ok=True)
+def test_train_cli(n_rx: int, out_dir: Path) -> Path:
     csv_path = out_dir / f"synthetic_n{n_rx}.csv"
     model_path = out_dir / f"model_n{n_rx}.joblib"
     sources = write_synthetic_csv(csv_path, n_rx=n_rx, sessions_per_class=3)
@@ -173,7 +171,7 @@ def test_train_cli(n_rx: int) -> Path:
         "--time-blocks",
         "2",
     ]
-    print(f"  train CLI N={n_rx}: {' '.join(cmd[-8:])} …")
+    print(f"  train CLI N={n_rx}: …")
     proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
     if proc.returncode != 0:
         print(proc.stdout)
@@ -186,7 +184,6 @@ def test_train_cli(n_rx: int) -> Path:
     assert_true(bundle.get("rx_sources_order") == sources, "rx_sources_order mismatch")
     n_per = bundle.get("n_features_per_rx")
     assert_true(isinstance(n_per, int) and n_per > 0, "n_features_per_rx missing")
-    # Pipeline must accept N * per-RX features
     pipe = bundle["pipeline"]
     X = np.zeros((1, n_per * n_rx), dtype=np.float64)
     proba = pipe.predict_proba(X)
@@ -198,9 +195,7 @@ def test_train_cli(n_rx: int) -> Path:
     return model_path
 
 
-def test_train_none_and_min_all() -> None:
-    out_dir = ROOT / "exports" / "_test_multirx"
-    out_dir.mkdir(parents=True, exist_ok=True)
+def test_train_none_and_min_all(out_dir: Path) -> None:
     csv_path = out_dir / "synthetic_n3_dropout.csv"
     write_synthetic_csv(csv_path, n_rx=3, drop_rx_fraction=0.15)
 
@@ -236,8 +231,7 @@ def test_train_none_and_min_all() -> None:
         print(f"  train --rx-fusion {fusion} {' '.join(extra)}: OK → {expect}")
 
 
-def test_single_rx_auto_skips_fusion() -> None:
-    out_dir = ROOT / "exports" / "_test_multirx"
+def test_single_rx_auto_skips_fusion(out_dir: Path) -> None:
     csv_path = out_dir / "synthetic_n1.csv"
     model_path = out_dir / "model_n1.joblib"
     write_synthetic_csv(csv_path, n_rx=1)
@@ -269,10 +263,12 @@ def main() -> int:
     try:
         for n in (2, 3, 5):
             test_fuse_unit_n(n)
-        for n in (2, 3, 5):
-            test_train_cli(n)
-        test_train_none_and_min_all()
-        test_single_rx_auto_skips_fusion()
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            for n in (2, 3, 5):
+                test_train_cli(n, out_dir)
+            test_train_none_and_min_all(out_dir)
+            test_single_rx_auto_skips_fusion(out_dir)
     except Exception as exc:
         print(f"\nFAIL: {exc}")
         return 1
