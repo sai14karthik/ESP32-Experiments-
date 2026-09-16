@@ -25,11 +25,14 @@ pkill -f mediamtx 2>/dev/null; true
 
 Wait for: `stream is available and online, 1 track (M-JPEG)`
 
-## 3) Watch
+## 3) Watch (make it feel more live)
 
-VLC → Open Network Stream → **`rtsp://127.0.0.1:8554/cam_xiao`**  
-(force **RTP over RTSP (TCP)**)
+VLC → Preferences → Input/Codecs → **Network caching = 50** ms  
+(MediaMTX docs + Micro-RTSP README; 1000 ms default feels dead)  
+Open Network → **`rtsp://127.0.0.1:8554/cam_xiao`**  
+Live555 → **RTP over RTSP (TCP)**
 
 Colleague: **`rtsp://10.128.93.23:8554/cam_xiao`**
 
-Do not use ffplay for this MJPEG path.
+Ceiling without ffmpeg: ~15–20 fps MJPEG — not phone-smooth.  
+Refs used: `esp32cam-rtsp/`, `ESP32-RTSP/`, `Micro-RTSP/README`, `mediamtx-repo` VLC docs.

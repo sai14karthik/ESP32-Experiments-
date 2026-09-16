@@ -11,11 +11,13 @@
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
-// Smooth motion on LabPSK Micro-RTSP (trade a bit of still sharpness for fluid walk):
-//   VGA, JPEG q=10 (smaller frames → steadier pacing), 15 fps.
+// From repo refs (no ffmpeg path):
+//   esp32cam-rtsp: XIAO VGA-class, q~12 default; we use q=10 for steadier Wi‑Fi
+//   ESP32-RTSP: msecPerFrame=50 (~20 fps) — try that for less "robot" walk
+//   Micro-RTSP README: VLC network-caching low (50) for live feel
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 67;  // ~15 fps
-static const int kJpegQuality = 10;
+static const uint32_t kMsecPerFrame = 50;  // ~20 fps (ESP32-RTSP)
+static const int kJpegQuality = 10;       // smaller frames than q=8 → fewer stalls
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
