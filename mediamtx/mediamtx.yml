@@ -1,6 +1,5 @@
 ###############################################
-# MediaMTX lab — ESP MJPEG → ffmpeg H.264 → RTSP
-# (Micro-RTSP MJPEG does not decode in ffplay 9; H.264 does.)
+# Simple: ESP RTSP → MediaMTX → VLC (no ffmpeg)
 ###############################################
 
 logLevel: info
@@ -9,24 +8,17 @@ logDestinations: [stdout]
 readTimeout: 30s
 writeTimeout: 30s
 writeQueueSize: 4096
-udpMaxPayloadSize: 1450
 
 rtsp: yes
 rtspAddress: :8554
 rtspTransports: [tcp]
-rtpAddress: :8002
-rtcpAddress: :8003
 
-rtmp: no
 hls: no
 webrtc: no
+rtmp: no
 srt: no
 
 paths:
-  cam1:
-    source: publisher
-
   cam_xiao:
-    source: publisher
-    runOnInit: __CAM_XIAO_RUN_ON_INIT__
-    runOnInitRestart: yes
+    source: __XIAO_RTSP_SOURCE__
+    rtspTransport: tcp
