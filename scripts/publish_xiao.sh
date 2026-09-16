@@ -25,8 +25,8 @@ else
   MODE="${PUBLISH_MODE}"
 fi
 
-FPS="${XIAO_FPS:-15}"
-BITRATE="${XIAO_BITRATE:-1000k}"
+FPS="${XIAO_FPS:-12}"
+BITRATE="${XIAO_BITRATE:-2500k}"
 RETRY_S="${PUBLISH_RETRY_S:-3}"
 STALL_S="${PUBLISH_STALL_S:-45}"
 # Wait this long for the first encoded frame before declaring stall.

@@ -59,8 +59,8 @@ void setup() {
   //                      for larger pre-allocated frame buffer.
   if (config.pixel_format == PIXFORMAT_JPEG) {
     if (psramFound()) {
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
+      config.jpeg_quality = 8;
+      config.fb_count = 3;
       config.grab_mode = CAMERA_GRAB_LATEST;
     } else {
       // Limit the frame size when PSRAM is not available
@@ -94,10 +94,22 @@ void setup() {
     s->set_brightness(s, 1);   // up the brightness just a bit
     s->set_saturation(s, -2);  // lower the saturation
   }
-  // drop down frame size for higher initial frame rate
+  // Stream size: HVGA balances sharpness vs LabPSK bandwidth (QVGA soft, VGA stuttery).
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_QVGA);
-    s->set_quality(s, 12);
+    s->set_framesize(s, FRAMESIZE_HVGA);  // 480x320
+    s->set_quality(s, 8);
+    s->set_brightness(s, 1);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_gainceiling(s, GAINCEILING_2X);
+    s->set_bpc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_lenc(s, 1);
   }
 
   // XIAO Sense camera orientation
