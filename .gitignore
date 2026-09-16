@@ -76,6 +76,10 @@ csi_pipeline/exports/*.csv
 mediamtx/mediamtx.runtime.yml
 mediamtx/run_xiao_publish.sh
 
+# Local reference clones (lab uses firmware/CameraRTSPWiFi/Micro-RTSP submodule)
+/ESP32-RTSP/
+/Micro-RTSP/
+
 # Local Cursor (rules, plans — machine / session)
 .cursor/
 

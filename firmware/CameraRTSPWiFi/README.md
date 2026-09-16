@@ -23,5 +23,6 @@ XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
 | Piece | Source |
 |-------|--------|
 | Pins / PSRAM / fb_count | `esp32cam-rtsp` XIAO Sense board JSON |
-| Micro-RTSP | `Micro-RTSP/` (geeksville); JPEG RTP **type 0** |
+| Micro-RTSP | `Micro-RTSP/` submodule (geeksville) + lab TCP/timestamp/RTP-Info fixes |
+| Reference (do not flash) | Local clones `ESP32-RTSP/`, root `Micro-RTSP/` — AI-Thinker / port 8554 |
 | MediaMTX TCP proxy | `mediamtx/` + `mediamtx-repo` docs |

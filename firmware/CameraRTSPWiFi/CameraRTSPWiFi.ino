@@ -156,6 +156,11 @@ void loop() {
   if (streamer->anySessions()) {
     if (now - lastimage >= kMsecPerFrame || now < lastimage) {
       streamer->streamImage(now);
+      uint32_t took = millis() - now;
+      if (took > kMsecPerFrame) {
+        Serial.printf("frame overrun %lums > %lums (reduce q or fps)\n",
+                      (unsigned long)took, (unsigned long)kMsecPerFrame);
+      }
       lastimage = now;
     }
   }
