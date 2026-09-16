@@ -15,5 +15,6 @@ exec ffplay -hide_banner -loglevel warning \
   -fflags discardcorrupt \
   -flags low_delay \
   -framedrop \
+  -infbuf \
   -an \
   "$URL"

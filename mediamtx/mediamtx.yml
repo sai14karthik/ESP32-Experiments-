@@ -13,7 +13,7 @@ logDestinations: [stdout]
 readTimeout: 30s
 writeTimeout: 30s
 # MJPEG bursts; stops "reader is too slow" under Wi‑Fi jitter
-writeQueueSize: 2048
+writeQueueSize: 4096
 udpMaxPayloadSize: 1450
 udpReadBufferSize: 1000000
 

@@ -11,12 +11,11 @@
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
-// Tuned from esp32cam-rtsp (rzeldent) XIAO Sense board defaults + RTSP lab:
-//   boards/esp32cam_seeed_xiao_esp32s3_sense.json — pins / 20 MHz / fb_count=2 / PSRAM
-//   include/settings.h — JPEG ~12 default; we use 10 (clear + LabPSK-friendly)
-// MediaMTX pulls TCP (mediamtx-repo docs/2-features/28-decrease-packet-loss.md).
+// Tuned for best stable quality on LabPSK (esp32cam-rtsp XIAO board + Micro-RTSP):
+//   VGA 640x480, JPEG q=8 (lower = sharper), 10 fps, TCP interleaved only via MediaMTX.
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 100;  // 10 fps — steady Micro-RTSP over LabPSK TCP
+static const uint32_t kMsecPerFrame = 100;  // 10 fps
+static const int kJpegQuality = 8;
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -43,11 +42,11 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_VGA;  // 640x480 — same class as esp32cam-rtsp max-stable
+  config.frame_size = FRAMESIZE_VGA;  // 640x480 — best stable over LabPSK Micro-RTSP
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 10;
+  config.jpeg_quality = kJpegQuality;
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
@@ -98,16 +97,22 @@ void setup() {
 
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
-    // XIAO Sense module orientation (same as CameraWebServerWiFi lab)
     s->set_vflip(s, 1);
     s->set_hmirror(s, 1);
     s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
     s->set_saturation(s, 0);
+    s->set_sharpness(s, 1);
     s->set_whitebal(s, 1);
     s->set_gain_ctrl(s, 1);
     s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 1);
+    s->set_lenc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_bpc(s, 0);
     s->set_framesize(s, FRAMESIZE_VGA);
-    s->set_quality(s, 10);
+    s->set_quality(s, kJpegQuality);
   }
 
   WiFi.mode(WIFI_STA);
@@ -157,7 +162,8 @@ void loop() {
 
   WiFiClient accepted = rtspServer.accept();
   if (accepted) {
-    accepted.setNoDelay(true);  // TCP interleaved RTP — lower latency
+    accepted.setNoDelay(true);
+    accepted.setTimeout(5);  // seconds — avoid hanging a dead peer
     Serial.print("RTSP client: ");
     Serial.println(accepted.remoteIP());
     WiFiClient *rtspClient = new WiFiClient(accepted);

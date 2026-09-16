@@ -72,6 +72,10 @@ firmware/*.bin
 csi_pipeline_new/exports/*.csv
 csi_pipeline/exports/*.csv
 
+# MediaMTX generated at runtime (do not commit)
+mediamtx/mediamtx.runtime.yml
+mediamtx/run_xiao_publish.sh
+
 # Local Cursor (rules, plans — machine / session)
 .cursor/
 
