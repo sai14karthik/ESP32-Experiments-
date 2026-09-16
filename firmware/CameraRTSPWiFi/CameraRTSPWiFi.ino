@@ -11,13 +11,12 @@
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
-// From repo refs (no ffmpeg path):
-//   esp32cam-rtsp: XIAO VGA-class, q~12 default; we use q=10 for steadier Wi‑Fi
-//   ESP32-RTSP: msecPerFrame=50 (~20 fps) — try that for less "robot" walk
-//   Micro-RTSP README: VLC network-caching low (50) for live feel
+// Smoothness over sharpness (VGA was too heavy → stutter on LabPSK):
+//   HVGA 480x320, q=12, ~25 fps — smaller JPEGs, steadier pacing.
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 50;  // ~20 fps (ESP32-RTSP)
-static const int kJpegQuality = 10;       // smaller frames than q=8 → fewer stalls
+static const uint32_t kMsecPerFrame = 40;  // ~25 fps
+static const int kJpegQuality = 12;
+static const framesize_t kFrameSize = FRAMESIZE_HVGA;
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
@@ -44,7 +43,7 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_VGA;  // 640x480 — best stable over LabPSK Micro-RTSP
+  config.frame_size = kFrameSize;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -113,7 +112,7 @@ void setup() {
     s->set_wpc(s, 1);
     s->set_raw_gma(s, 1);
     s->set_bpc(s, 0);
-    s->set_framesize(s, FRAMESIZE_VGA);
+    s->set_framesize(s, kFrameSize);
     s->set_quality(s, kJpegQuality);
   }
 
