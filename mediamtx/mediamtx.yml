@@ -1,5 +1,10 @@
 ###############################################
-# MediaMTX lab — quality + smooth (delay OK)
+# MediaMTX lab — RTSP only (no ffmpeg)
+# ESP Micro-RTSP MJPEG → MediaMTX TCP proxy → ffplay
+#
+# Knobs from mediamtx-repo:
+#   docs/2-features/12-proxy.md
+#   docs/2-features/28-decrease-packet-loss.md
 ###############################################
 
 logLevel: info
@@ -7,42 +12,31 @@ logDestinations: [stdout]
 
 readTimeout: 30s
 writeTimeout: 30s
-writeQueueSize: 1024
+# MJPEG bursts; stops "reader is too slow" under Wi‑Fi jitter
+writeQueueSize: 2048
 udpMaxPayloadSize: 1450
+udpReadBufferSize: 1000000
 
 rtsp: yes
 rtspAddress: :8554
+# Viewers + reliability on LabPSK
 rtspTransports: [tcp]
 rtpAddress: :8002
 rtcpAddress: :8003
 
-rtmp: yes
-rtmpAddress: :1935
-
-hls: yes
-hlsAddress: :8888
-hlsAllowOrigins: ["*"]
-# Pre-build HLS so Safari has a buffer (smoother; a few seconds delay is OK).
-hlsAlwaysRemux: yes
-hlsVariant: fmp4
-hlsSegmentDuration: 2s
-hlsSegmentCount: 10
-hlsSegmentMaxSize: 50M
-
-webrtc: yes
-webrtcAddress: :8889
-webrtcAllowOrigins: ["*"]
-webrtcIPsFromInterfaces: false
-webrtcAdditionalHosts: [__WEBRTC_HOST__]
-webrtcLocalUDPAddress: :8189
-webrtcLocalTCPAddress: :8189
-webrtcICEServers2: []
+# Parked while focusing on RTSP
+rtmp: no
+hls: no
+webrtc: no
+srt: no
 
 paths:
   cam1:
     source: publisher
 
   cam_xiao:
-    source: publisher
-    runOnInit: __CAM_XIAO_RUN_ON_INIT__
-    runOnInitRestart: yes
+    # Direct pull from board (TCP interleaved). No ffmpeg.
+    # Same URL shape as esp32cam-rtsp / Micro-RTSP: /mjpeg/1
+    source: __XIAO_RTSP_SOURCE__
+    rtspTransport: tcp
+    sourceOnDemand: no

@@ -1,56 +1,44 @@
-Lab procedure — XIAO ESP32-S3 Sense → MediaMTX (smooth HLS)
-============================================================
+Lab procedure — best RTSP path (resources used)
+===============================================
 Board: Seeed XIAO ESP32S3 Sense
-Idea from generic guides: ESP serves RTSP (MJPEG); Mini pulls it, ffmpeg
-encodes H.264 (ESP cannot do H.264), MediaMTX serves HLS/WebRTC/RTSP.
 
-Why not “direct MediaMTX pull only”?
-  HLS/WebRTC need H.264. ESP only sends MJPEG → ffmpeg on Mini is required.
-  Path stays: ESP :554 → ffmpeg → MediaMTX :8554/cam_xiao → browser HLS.
+Sources in this repo:
+  firmware/CameraRTSPWiFi     — lab sketch (LabPSK, arduino-cli)
+  firmware/…/Micro-RTSP       — geeksville (submodule); RTP timestamp floor for 10 fps
+  esp32cam-rtsp/              — rzeldent; XIAO Sense pin/board JSON + JPEG defaults
+  mediamtx-repo/              — RTSP proxy + decrease-packet-loss knobs
+  mediamtx/mediamtx.yml       — TCP pull only (no ffmpeg / HLS / WebRTC)
+
+Path:
+  ESP :554/mjpeg/1  --TCP-->  MediaMTX :8554/cam_xiao  --TCP-->  ffplay
 
 --------------------------------------------------------------
-1) Flash CameraRTSPWiFi (this Mac, USB)
+1) Flash
 --------------------------------------------------------------
-FQBN='esp32:esp32:XIAO_ESP32S3:PSRAM=opi,PartitionScheme=default_8MB,CDCOnBoot=default,UploadSpeed=921600'
-SKETCH=firmware/CameraRTSPWiFi
-PORT=/dev/cu.usbmodem101   # adjust
-
-arduino-cli compile --fqbn "$FQBN" --library "$SKETCH/Micro-RTSP" "$SKETCH"
-arduino-cli upload -p "$PORT" --fqbn "$FQBN" "$SKETCH"
+./scripts/flash_camera_rtsp.sh /dev/cu.usbmodem101
 
 Serial must print:
   RTSP: rtsp://10.128.93.25:554/mjpeg/1
 
-(VGA q8, ~12 fps, WiFi TX boosted — LabPSK)
+Optional probe from a host that can reach LabPSK:
+  ./scripts/probe_xiao_rtsp.sh rtsp://10.128.93.25:554/mjpeg/1
 
 --------------------------------------------------------------
-2) Start MediaMTX on Mac Mini
+2) MediaMTX on Mini
 --------------------------------------------------------------
 pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao' || true
-cd ~/Desktop/ESP32-Experiments-   # or this repo path
-
+# sync this repo (mediamtx.yml + mediamtx_run.sh) onto Mini first
 XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
 
-Wait for: first frame OK
-Config: mediamtx.yml paths.cam_xiao source=publisher + runOnInit=publish_xiao
-(publish_xiao = ffmpeg MJPEG→H.264 → rtsp://127.0.0.1:8554/cam_xiao)
+--------------------------------------------------------------
+3) Watch (low delay RTSP)
+--------------------------------------------------------------
+./scripts/watch_xiao_rtsp.sh
+# or: ./scripts/watch_xiao_rtsp.sh rtsp://10.128.93.23:8554/cam_xiao
+# board direct: ./scripts/watch_xiao_rtsp.sh rtsp://10.128.93.25:554/mjpeg/1
 
 --------------------------------------------------------------
-3) Watch (browser — no VLC required)
+Why not flash esp32cam-rtsp wholesale?
 --------------------------------------------------------------
-HLS (smooth, a few seconds delay OK):
-  http://10.128.93.23:8888/cam_xiao/
-
-WebRTC:
-  http://10.128.93.23:8889/cam_xiao/
-
-RTSP (ffplay / VLC if available):
-  rtsp://10.128.93.23:8554/cam_xiao
-
---------------------------------------------------------------
-4) If connection refused on :554
---------------------------------------------------------------
-Board still has CameraWebServerWiFi (HTTP :81 only). Re-flash step 1.
-
-Alt HTTP path (no RTSP on board):
-  XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
+Same RTSP URL and XIAO pins, but PlatformIO + SoftAP web config.
+Lab keeps CameraRTSPWiFi (flash-and-go LabPSK) and cherry-picks its settings.

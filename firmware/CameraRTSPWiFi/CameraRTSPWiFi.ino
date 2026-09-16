@@ -7,12 +7,17 @@
 #include "OV2640Streamer.h"
 #include "CStreamer.h"
 
-// Lab Wi‑Fi (original)
+// Lab Wi‑Fi
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
+// Tuned from esp32cam-rtsp (rzeldent) XIAO Sense board defaults + RTSP lab:
+//   boards/esp32cam_seeed_xiao_esp32s3_sense.json — pins / 20 MHz / fb_count=2 / PSRAM
+//   include/settings.h — JPEG ~12 default; we use 10 (clear + LabPSK-friendly)
+// MediaMTX pulls TCP (mediamtx-repo docs/2-features/28-decrease-packet-loss.md).
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 83;  // ~12 fps — matches Mini ffmpeg FPS
+static const uint32_t kMsecPerFrame = 100;  // 10 fps — steady Micro-RTSP over LabPSK TCP
+
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
 CStreamer *streamer = nullptr;
@@ -38,16 +43,18 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_VGA;  // 640x480 — quality (info.text / lab)
+  config.frame_size = FRAMESIZE_VGA;  // 640x480 — same class as esp32cam-rtsp max-stable
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 8;
+  config.jpeg_quality = 10;
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 14;
   }
   return config;
 }
@@ -60,6 +67,7 @@ static void ensureWifi() {
   WiFi.disconnect();
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) {
     delay(250);
     Serial.print(".");
@@ -79,7 +87,8 @@ void setup() {
   Serial.setDebugOutput(false);
   delay(200);
   Serial.println();
-  Serial.println("CameraRTSPWiFi LabPSK (XIAO → Micro-RTSP → Mini MediaMTX)");
+  Serial.println("CameraRTSPWiFi (XIAO Sense → Micro-RTSP → MediaMTX TCP pull)");
+  Serial.println("refs: esp32cam-rtsp XIAO board + mediamtx-repo RTSP proxy");
 
   esp_err_t err = cam.init(xiao_cam_config());
   if (err != ESP_OK) {
@@ -89,8 +98,16 @@ void setup() {
 
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
+    // XIAO Sense module orientation (same as CameraWebServerWiFi lab)
     s->set_vflip(s, 1);
     s->set_hmirror(s, 1);
+    s->set_brightness(s, 0);
+    s->set_saturation(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_exposure_ctrl(s, 1);
+    s->set_framesize(s, FRAMESIZE_VGA);
+    s->set_quality(s, 10);
   }
 
   WiFi.mode(WIFI_STA);
@@ -112,7 +129,7 @@ void setup() {
   rtspServer.begin();
   Serial.printf("RTSP: rtsp://%s:%u/mjpeg/1\n", WiFi.localIP().toString().c_str(), kRtspPort);
   Serial.println("Mini: XIAO_RTSP_URL=that ./scripts/mediamtx_run.sh");
-  Serial.println("Watch RTSP: rtsp://<MINI_IP>:8554/cam_xiao");
+  Serial.println("Watch: ./scripts/watch_xiao_rtsp.sh");
 }
 
 void loop() {
@@ -140,7 +157,7 @@ void loop() {
 
   WiFiClient accepted = rtspServer.accept();
   if (accepted) {
-    accepted.setNoDelay(true);
+    accepted.setNoDelay(true);  // TCP interleaved RTP — lower latency
     Serial.print("RTSP client: ");
     Serial.println(accepted.remoteIP());
     WiFiClient *rtspClient = new WiFiClient(accepted);

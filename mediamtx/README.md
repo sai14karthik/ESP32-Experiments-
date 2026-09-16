@@ -99,28 +99,23 @@ ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam1
 
 Acceptance: video in VLC and browser; stop `publish_webcam.sh` → stream ends; restart → returns.
 
-## Stage 2 — XIAO RTSP → MediaMTX (smooth HLS)
+## Stage 2 — RTSP only (no ffmpeg)
 
-ESP runs **CameraRTSPWiFi** (Micro-RTSP MJPEG `:554/mjpeg/1`). Mini ffmpeg
-encodes H.264 into MediaMTX. HLS is buffered (a few seconds delay) for smooth play.
-
-1. Flash `firmware/CameraRTSPWiFi` (see `mediamtx/info.text`).
-2. On Mini:
+ESP **CameraRTSPWiFi** (`:554/mjpeg/1`) → MediaMTX pulls TCP RTSP → clients.
 
 ```bash
 pkill -f mediamtx; pkill -f publish_xiao; pkill -f 'ffmpeg.*cam_xiao' || true
 XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
 ```
 
-**Watch** (browser — no VLC needed)
+**Watch**
 
-| Client | Protocol | URL |
-|--------|----------|-----|
-| Browser | **HLS (smooth)** | http://10.128.93.23:8888/cam_xiao/ |
-| Browser | WebRTC | http://10.128.93.23:8889/cam_xiao/ |
-| ffplay | RTSP | `rtsp://10.128.93.23:8554/cam_xiao` |
+```bash
+ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay \
+  rtsp://10.128.93.23:8554/cam_xiao
+```
 
-Alt HTTP: flash `CameraWebServerWiFi` + `XIAO_MJPEG_URL=http://10.128.93.25:81/stream …`
+HLS/WebRTC/ffmpeg parked until we leave RTSP-only focus. See `mediamtx/info.text`.
 
 ## Ports (localhost)
 
