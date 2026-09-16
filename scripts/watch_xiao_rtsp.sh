@@ -7,13 +7,12 @@ if ! command -v ffplay >/dev/null 2>&1; then
   exit 1
 fi
 echo "watching $URL (low delay)" >&2
-exec ffplay -hide_banner -loglevel warning \
+# probesize warning / swscaler "deprecated pixel format" are cosmetic.
+exec ffplay -hide_banner -loglevel error \
   -rtsp_transport tcp \
   -fflags nobuffer+discardcorrupt \
   -flags low_delay \
   -framedrop \
   -sync ext \
-  -probesize 32 \
-  -analyzeduration 0 \
   -an \
   "$URL"
