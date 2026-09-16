@@ -114,20 +114,28 @@ Leave this running. Session `recv_port` is stored as `tcp:9055:multi`. Each boar
 
 #### Live connected forwarders (`count_csi_clients`)
 
-In another Mini terminal (while ingest runs):
-
 ```bash
 ./count_csi_clients.sh           # once
-./count_csi_clients.sh --watch   # refresh; unplug a board → count drops
-./count_csi_clients.sh --verbose # debug TCP listing
+./count_csi_clients.sh --watch   # refresh; unplug a board → TCP count drops
+./count_csi_clients.sh --verbose
 ```
 
-Counts **any** device that TCP-forwards `CSI_DATA` to Mini `:9055` (live TCP + samples in the last ~10s):
+**Live connected devices** = ESTABLISHED TCP to `:9055` (needs a listener: ingest **or** status-only).  
+**Recent samples** = Postgres rows in the last ~10s (optional — can be 0 while TCP is still up).
+
+If ingest is not running and you still want to see who would connect:
+
+```bash
+# terminal A
+./count_csi_clients.sh --status-listen
+# terminal B
+./count_csi_clients.sh --watch
+```
+
+Do not run `--status-listen` alongside `./run_multi_ingest.sh` (same port).
 
 - **Today (4.1):** N ESP receivers on LabPSK (or any SSID)
-- **Later (4.3):** N ESP receivers with 1+ ESP senders — only the **receivers** show up here (senders have no TCP to Mini). A **separate** sender-status script can be added later (USB serial / onboard heartbeat); keep it out of `count_csi_clients.sh`.
-
-SSID does not matter; `CSI_TCP_HOST` / reachability to Mini does.
+- **Later (4.3):** only **receivers** that open `:9055` appear (senders have no TCP)
 
 #### Step 3 — Flash C5 once (USB only for this step)
 
