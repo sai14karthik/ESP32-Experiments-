@@ -130,7 +130,7 @@ ffmpeg_h264_out() {
     -g $((FPS * 2)) \
     -keyint_min "$FPS" \
     -bf 0 \
-    -x264-params "slice-max-size=1000:scenecut=0:repeat-headers=1" \
+    -x264-params "scenecut=0:repeat-headers=1" \
     -flush_packets 1 \
     -muxdelay 0 \
     -muxpreload 0 \
