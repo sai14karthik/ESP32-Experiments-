@@ -97,7 +97,12 @@ void setup() {
   // drop down frame size for higher initial frame rate
   if (config.pixel_format == PIXFORMAT_JPEG) {
     s->set_framesize(s, FRAMESIZE_QVGA);
+    s->set_quality(s, 12);
   }
+
+  // XIAO Sense camera orientation
+  s->set_vflip(s, 1);
+  s->set_hmirror(s, 1);
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
   s->set_vflip(s, 1);
@@ -115,6 +120,7 @@ void setup() {
 
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
   Serial.print("WiFi connecting");
   while (WiFi.status() != WL_CONNECTED) {
@@ -129,6 +135,7 @@ void setup() {
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
+  Serial.println("MJPEG stream: http://<ip>:81/stream  (ffmpeg→MediaMTX H.264)");
 }
 
 void loop() {

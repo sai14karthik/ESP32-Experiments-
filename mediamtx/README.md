@@ -1,38 +1,38 @@
-# MediaMTX — simple RTSP (no ffmpeg)
+# MediaMTX — best RTSP path (Lab / Orlando)
 
 ```
-ESP CameraRTSPWiFi                    MediaMTX                         VLC
-rtsp://10.128.93.25:554/mjpeg/1  ──►  :8554/cam_xiao  ──►  rtsp://…/cam_xiao
+XIAO CameraWebServerWiFi
+  http://10.128.93.25:81/stream   (MJPEG)
+       │
+       ▼  ffmpeg on Mini (libx264 ultrafast / zerolatency)
+MediaMTX :8554/cam_xiao           (H.264 RTSP)
+       │
+       ▼
+VLC / colleague
+  rtsp://10.128.93.23:8554/cam_xiao   (TCP)
 ```
 
-No ffmpeg. No HLS. No WebRTC.
+ESP32-S3 has no hardware H.264. Raw Micro-RTSP MJPEG is what felt robotic in VLC.
+This remux is the same pattern MediaMTX / go2rtc use for MJPEG cameras.
 
-## 1) Board (once)
-
-Firmware: `CameraRTSPWiFi`  
-Serial must show: `RTSP: rtsp://10.128.93.25:554/mjpeg/1`
+## One command (Mini)
 
 ```bash
-./scripts/flash_camera_rtsp.sh
-```
-
-## 2) Mini (every time)
-
-```bash
-pkill -f mediamtx 2>/dev/null; true
+cd ~/Desktop/ESP32-Experiments-/   # or this repo on Mini
 ./scripts/mediamtx_run.sh
 ```
 
-Wait for: `stream is available and online, 1 track (M-JPEG)`
+Board must be flashed with **CameraWebServerWiFi** (not CameraRTSPWiFi).
 
-## 3) Watch (make it feel more live)
+## Watch
 
-VLC → Preferences → Input/Codecs → **Network caching = 50** ms  
-(MediaMTX docs + Micro-RTSP README; 1000 ms default feels dead)  
-Open Network → **`rtsp://127.0.0.1:8554/cam_xiao`**  
-Live555 → **RTP over RTSP (TCP)**
+- VLC → Open Network → `rtsp://127.0.0.1:8554/cam_xiao`  
+  Prefer **TCP**; Tools → Preferences → Input/Codecs → Network caching **50–100 ms**
+- Colleague: `rtsp://10.128.93.23:8554/cam_xiao`
+- HLS backup: `http://10.128.93.23:8888/cam_xiao/`
 
-Colleague: **`rtsp://10.128.93.23:8554/cam_xiao`**
+## Override ESP URL
 
-Ceiling without ffmpeg: ~15–20 fps MJPEG — not phone-smooth.  
-Refs used: `esp32cam-rtsp/`, `ESP32-RTSP/`, `Micro-RTSP/README`, `mediamtx-repo` VLC docs.
+```bash
+XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
+```

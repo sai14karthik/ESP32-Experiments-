@@ -25,8 +25,8 @@ else
   MODE="${PUBLISH_MODE}"
 fi
 
-FPS="${XIAO_FPS:-12}"
-BITRATE="${XIAO_BITRATE:-1500k}"
+FPS="${XIAO_FPS:-15}"
+BITRATE="${XIAO_BITRATE:-1000k}"
 RETRY_S="${PUBLISH_RETRY_S:-3}"
 STALL_S="${PUBLISH_STALL_S:-45}"
 # Wait this long for the first encoded frame before declaring stall.
@@ -169,7 +169,10 @@ run_stream() {
   trap "rm -f '$progress'; kill_pgid \"\${fpid:-}\"" RETURN
   set -m
   ffmpeg_h264_out "$progress" \
-    -fflags +genpts+discardcorrupt \
+    -fflags +genpts+discardcorrupt+nobuffer \
+    -flags low_delay \
+    -probesize 32 \
+    -analyzeduration 0 \
     -use_wallclock_as_timestamps 1 \
     -f mjpeg \
     -i "$XIAO_URL" &

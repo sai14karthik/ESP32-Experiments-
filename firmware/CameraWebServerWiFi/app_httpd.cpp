@@ -225,7 +225,8 @@ static esp_err_t capture_handler(httpd_req_t *req) {
   return res;
 }
 
-#define STREAM_MAX_FPS 25
+// Match Mini ffmpeg fps — don't flood LabPSK ahead of the encoder.
+#define STREAM_MAX_FPS 15
 
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t *fb = NULL;
@@ -258,7 +259,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   }
 
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "X-Framerate", "25");
+  httpd_resp_set_hdr(req, "X-Framerate", "15");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
 #if defined(LED_GPIO_NUM)
