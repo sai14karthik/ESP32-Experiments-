@@ -25,8 +25,8 @@ else
   MODE="${PUBLISH_MODE}"
 fi
 
-FPS="${XIAO_FPS:-15}"
-BITRATE="${XIAO_BITRATE:-2500k}"
+FPS="${XIAO_FPS:-12}"
+BITRATE="${XIAO_BITRATE:-1500k}"
 RETRY_S="${PUBLISH_RETRY_S:-3}"
 STALL_S="${PUBLISH_STALL_S:-45}"
 # Wait this long for the first encoded frame before declaring stall.
@@ -109,11 +109,11 @@ watch_progress() {
   return 0
 }
 
-# Quality-first encode (delay OK). veryfast > ultrafast for clarity.
-# wallclock + fps= keeps CFR so HLS/WebRTC don't stutter or discard.
+# Low-latency encode (H.264 for ffplay/VLC). wallclock + fps= keeps CFR.
 ffmpeg_h264_out() {
   local prog="$1"
   shift
+  local br_num="${BITRATE%k}"
   ffmpeg -hide_banner -loglevel error \
     -nostats \
     -progress "$prog" \
@@ -121,17 +121,22 @@ ffmpeg_h264_out() {
     -an \
     -vf "fps=${FPS},format=yuv420p" \
     -c:v libx264 \
-    -preset veryfast \
-    -tune film \
-    -profile:v high \
-    -level 4.0 \
+    -preset ultrafast \
+    -tune zerolatency \
+    -profile:v baseline \
+    -level 3.1 \
     -b:v "$BITRATE" \
     -maxrate "$BITRATE" \
-    -bufsize "$((${BITRATE%k} * 2))k" \
-    -g $((FPS * 2)) \
+    -bufsize "${br_num}k" \
+    -g "$FPS" \
     -keyint_min "$FPS" \
     -bf 0 \
-    -x264-params "scenecut=0:repeat-headers=1" \
+    -x264-params "scenecut=0:repeat-headers=1:nal-hrd=cbr" \
+    -flush_packets 1 \
+    -fflags +nobuffer \
+    -flags low_delay \
+    -muxdelay 0 \
+    -muxpreload 0 \
     -f rtsp \
     -rtsp_transport tcp \
     "$MTX_URL"

@@ -56,8 +56,8 @@ fi
 cat >"$WRAPPER" <<EOF
 #!/bin/bash
 export PUBLISH_ONCE=1
-export XIAO_FPS="\${XIAO_FPS:-15}"
-export XIAO_BITRATE="\${XIAO_BITRATE:-2500k}"
+export XIAO_FPS="\${XIAO_FPS:-12}"
+export XIAO_BITRATE="\${XIAO_BITRATE:-1500k}"
 exec "$PUBLISH" "$XIAO_URL"
 EOF
 chmod +x "$WRAPPER"

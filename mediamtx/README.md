@@ -28,10 +28,15 @@ XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
 ```
 Wait for: `first frame OK`
 
-**Terminal 2:**
+**Terminal 2 (low delay):**
 ```bash
-ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_xiao
+./scripts/watch_xiao_rtsp.sh
+# or:
+ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay -framedrop -sync ext \
+  rtsp://127.0.0.1:8554/cam_xiao
 ```
+
+Defaults: 12 fps, 1500k, x264 `ultrafast` + `zerolatency` (lower lag than quality preset).
 
 **Colleague (LabPSK + VLC):** `rtsp://10.128.93.23:8554/cam_xiao` (force TCP).
 
