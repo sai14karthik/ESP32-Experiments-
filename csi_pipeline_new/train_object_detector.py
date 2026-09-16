@@ -159,7 +159,7 @@ def load_packets(
         for row in reader:
             lab_raw = row["label"].strip()
             lab = lab_raw.lower()
-            if "object" in lab:
+            if "object" in lab or "occupied" in lab:
                 y.append(LABEL_OBJECT)
             elif "baseline" in lab or "empty" in lab:
                 y.append(LABEL_EMPTY)

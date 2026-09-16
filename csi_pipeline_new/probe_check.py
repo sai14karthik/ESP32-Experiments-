@@ -48,7 +48,7 @@ DEFAULT_DATABASE_URL = "postgresql:///csi"
 
 def classify(label: str) -> int | None:
     lab = label.lower()
-    if "object" in lab:
+    if "object" in lab or "occupied" in lab:
         return LABEL_OBJECT
     if "baseline" in lab or "empty" in lab:
         return LABEL_EMPTY

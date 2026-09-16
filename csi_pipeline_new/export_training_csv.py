@@ -19,6 +19,7 @@ BASE_WHERE = """(
     lower(coalesce(s.label, '')) LIKE '%baseline%'
     OR lower(coalesce(s.label, '')) LIKE '%empty%'
     OR lower(coalesce(s.label, '')) LIKE '%object%'
+    OR lower(coalesce(s.label, '')) LIKE '%occupied%'
 )"""
 
 EXPORT_SELECT = f"""
@@ -137,10 +138,10 @@ def main() -> None:
         sessions = cur.fetchall()
         if not sessions:
             sys.exit(
-                "No baseline/empty/object sessions in Postgres.\n"
+                "No baseline/empty/object/occupied sessions in Postgres.\n"
                 "Capture first:\n"
-                "  ./run_ingest.sh --method 4.3 --channel 11 --label baseline_mini\n"
-                "  ./run_ingest.sh --method 4.3 --channel 11 --label object_mini"
+                "  ./run_multi_ingest.sh --label empty_01\n"
+                "  ./run_multi_ingest.sh --label occupied_01"
             )
 
         selected = _filter_sessions(sessions, include=include, exclude=exclude)
@@ -154,10 +155,13 @@ def main() -> None:
             "baseline" in (lab or "").lower() or "empty" in (lab or "").lower()
             for lab, _ in selected
         )
-        has_object = any("object" in (lab or "").lower() for lab, _ in selected)
+        has_object = any(
+            "object" in (lab or "").lower() or "occupied" in (lab or "").lower()
+            for lab, _ in selected
+        )
         if not has_empty or not has_object:
             sys.exit(
-                f"Need at least one baseline/empty AND one object session. "
+                f"Need at least one baseline/empty AND one object/occupied session. "
                 f"After filters: {selected}"
             )
 
