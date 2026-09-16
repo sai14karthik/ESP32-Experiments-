@@ -65,7 +65,11 @@ echo "  serve : rtsp://127.0.0.1:8554/cam_xiao" >&2
 if [[ "$LAN_IP" != "127.0.0.1" ]]; then
   echo "  LAN   : rtsp://$LAN_IP:8554/cam_xiao" >&2
 fi
-echo "  watch : ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay rtsp://${LAN_IP}:8554/cam_xiao" >&2
+echo "  watch : ./scripts/watch_xiao_rtsp.sh" >&2
+echo "          (or: ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_xiao)" >&2
+if [[ "$LAN_IP" != "127.0.0.1" ]]; then
+  echo "  LAN clients: ./scripts/watch_xiao_rtsp.sh rtsp://$LAN_IP:8554/cam_xiao" >&2
+fi
 echo "Ctrl+C to stop." >&2
 
 exec mediamtx "$CONF_RT"
