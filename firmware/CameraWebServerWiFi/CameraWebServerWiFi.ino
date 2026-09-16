@@ -3,7 +3,7 @@
 #include <WiFi.h>
 
 // ===========================
-// Video-only (MediaMTX / Stage 2). For cam+mic+CSI use CameraWebServerWiFiSense/.
+// Select camera model in board_config.h
 // ===========================
 #include "board_config.h"
 
@@ -24,7 +24,7 @@ void setupLedFlash();
 
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(false);
+  Serial.setDebugOutput(true);
   Serial.println();
 
   camera_config_t config;
@@ -47,18 +47,32 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_VGA;  // 640x480 — quality for MediaMTX (delay OK)
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.grab_mode = CAMERA_GRAB_LATEST;
+  config.frame_size = FRAMESIZE_UXGA;
+  config.pixel_format = PIXFORMAT_JPEG;  // for streaming
+  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 8;
-  config.fb_count = 2;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
 
-  if (!psramFound()) {
-    config.frame_size = FRAMESIZE_QVGA;
-    config.fb_location = CAMERA_FB_IN_DRAM;
-    config.fb_count = 1;
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
+  //                      for larger pre-allocated frame buffer.
+  if (config.pixel_format == PIXFORMAT_JPEG) {
+    if (psramFound()) {
+      config.jpeg_quality = 10;
+      config.fb_count = 2;
+      config.grab_mode = CAMERA_GRAB_LATEST;
+    } else {
+      // Limit the frame size when PSRAM is not available
+      config.frame_size = FRAMESIZE_SVGA;
+      config.fb_location = CAMERA_FB_IN_DRAM;
+    }
+  } else {
+    // Best option for face detection/recognition
+    config.frame_size = FRAMESIZE_240X240;
+#if CONFIG_IDF_TARGET_ESP32S3
+    config.fb_count = 2;
+#endif
   }
 
 #if defined(CAMERA_MODEL_ESP_EYE)
@@ -74,18 +88,16 @@ void setup() {
   }
 
   sensor_t *s = esp_camera_sensor_get();
+  // initial sensors are flipped vertically and colors are a bit saturated
   if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);
-    s->set_brightness(s, 1);
-    s->set_saturation(s, -2);
+    s->set_vflip(s, 1);        // flip it back
+    s->set_brightness(s, 1);   // up the brightness just a bit
+    s->set_saturation(s, -2);  // lower the saturation
   }
+  // drop down frame size for higher initial frame rate
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_VGA);
-    s->set_quality(s, 8);
+    s->set_framesize(s, FRAMESIZE_QVGA);
   }
-  // XIAO Sense module orientation
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 1);
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
   s->set_vflip(s, 1);
