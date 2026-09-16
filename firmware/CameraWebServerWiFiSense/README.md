@@ -25,13 +25,13 @@ uv run python firmware/tools/cam_mic_preview.py --port /dev/cu.usbmodem1101
 uv run python firmware/tools/cam_mic_preview.py --port /dev/cu.usbmodem1101 --no-video
 ```
 
-## MediaMTX (same URLs)
+## MediaMTX (video)
 
-Either flash works for MJPEG:
+Prefer **CameraWebServerWiFi** for colleague RTSP. Same Mini command:
 
 ```bash
 ./scripts/mediamtx_run.sh
-./scripts/publish_xiao.sh http://<esp-ip>:81/stream
+# optional: ./scripts/publish_xiao.sh http://<esp-ip>:81/stream
 ```
 
-Prefer **CameraWebServerWiFi** when you only need video for a colleague.
+See [`mediamtx/README.md`](../../mediamtx/README.md).
