@@ -12,8 +12,7 @@ const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 100;  // 10 fps — steady for Mini ffmpeg → MediaMTX RTSP
-
+static const uint32_t kMsecPerFrame = 83;  // ~12 fps — matches Mini ffmpeg FPS
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);
 CStreamer *streamer = nullptr;
@@ -39,11 +38,11 @@ static camera_config_t xiao_cam_config() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_HVGA;  // 480x320 — clear + LabPSK-friendly
+  config.frame_size = FRAMESIZE_VGA;  // 640x480 — quality (info.text / lab)
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 10;
+  config.jpeg_quality = 8;
   config.fb_count = 2;
   if (!psramFound()) {
     config.fb_location = CAMERA_FB_IN_DRAM;

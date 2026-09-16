@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start MediaMTX with ESP → ffmpeg → cam_xiao (official hook pattern).
 #
-# Canonical (quality / smooth — delay OK):
-#   XIAO_MJPEG_URL=http://10.128.93.25:81/stream ./scripts/mediamtx_run.sh
+# Canonical (ESP Micro-RTSP → ffmpeg H.264 → MediaMTX, smooth HLS):
+#   XIAO_RTSP_URL=rtsp://10.128.93.25:554/mjpeg/1 ./scripts/mediamtx_run.sh
 #
 # Watch (smooth):   http://<MINI_IP>:8888/cam_xiao/
 # Watch (WebRTC):   http://<MINI_IP>:8889/cam_xiao/
@@ -19,7 +19,7 @@ CONF_SRC="$ROOT/mediamtx/mediamtx.yml"
 CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
 WRAPPER="$ROOT/mediamtx/run_xiao_publish.sh"
 PUBLISH="$ROOT/scripts/publish_xiao.sh"
-XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-http://10.128.93.25:81/stream}}"
+XIAO_URL="${XIAO_RTSP_URL:-${XIAO_MJPEG_URL:-rtsp://10.128.93.25:554/mjpeg/1}}"
 
 detect_lan_ip() {
   local ip=""
