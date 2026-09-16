@@ -423,6 +423,15 @@ def print_startup_banner(
             f"acc={metrics.get('accuracy', 0):.3f}",
             file=sys.stderr,
         )
+    if bundle.get("rx_fusion") == "concat":
+        order = bundle.get("rx_sources_order") or []
+        print(
+            f"WARNING: model expects multi-RX fused features "
+            f"({len(order)} boards: {', '.join(order)}). "
+            f"Single-stream live detect will not match training dims yet — "
+            f"use offline eval on multi-source CSV for now.",
+            file=sys.stderr,
+        )
     if bundle.get("evaluation_trustworthy") is False:
         print(
             f"WARNING: those metrics are confounded — {bundle.get('evaluation_note', '')}\n"

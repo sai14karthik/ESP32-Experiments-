@@ -160,7 +160,7 @@ def collect_from_lines(path: Path, config: FeatureConfig) -> list[PacketRecord]:
 
 def collect_from_csv(path: Path, config: FeatureConfig) -> list[PacketRecord]:
     """Take only the EMPTY rows of a training CSV — object rows are ignored."""
-    packets, labels, _, _ = load_packets(path, config=config)
+    packets, labels, _, _, _ = load_packets(path, config=config)
     empty = [p for p, lab in zip(packets, labels) if lab == LABEL_EMPTY]
     if not empty:
         sys.exit(f"No empty/baseline rows in {path}")

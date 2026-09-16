@@ -65,7 +65,7 @@ def main() -> int:
     config = FeatureConfig.from_dict(bundle.get("feature_config"))
     ok(f"feature config: {config.describe()}")
 
-    packets, labels, session_labels, session_keys = load_packets(csv_path, config=config)
+    packets, labels, session_labels, stream_keys, group_keys = load_packets(csv_path, config=config)
     baseline = compute_baseline_profile(packets, labels)
     baseline_phase = compute_baseline_phase_profile(packets, labels) if config.use_phase else None
     spec = WindowSpec(30, 15)
@@ -77,7 +77,8 @@ def main() -> int:
         baseline,
         baseline_phase,
         config=config,
-        session_keys=session_keys,
+        session_keys=stream_keys,
+        group_keys=group_keys,
     )
     expected_dim = feature_dim(baseline, window_size=30, config=config)
     if ws.X.shape[1] != expected_dim:

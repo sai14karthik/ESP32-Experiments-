@@ -1,54 +1,53 @@
 # Presence detection (ESP32-C5 CSI)
 
-Home for **presence / empty-vs-occupied** code. Capture still uses the Mini TCP ingest; models and detectors live here.
+Home for **presence / empty-vs-occupied** work. Capture stays in `csi_pipeline_new/`;
+train/live will move here over time.
 
 ```
-LabPSK AP --CSI--> C5 #1 ──TCP :9055──┐
-           --CSI--> C5 #2 ──TCP :9055──┼──► Mac Mini (csi_pipeline_new) → Postgres
-           --CSI--> C5 #3 ──TCP :9055──┘
-                                              │
-                                              ▼
-                                    presence_detection/  (train / live / eval)
+LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini Postgres
+                                              --> multi-RX-aware train
 ```
 
-MediaMTX / XIAO camera stay **separate**.
-
-## Lab facts (room 207)
-
-| | |
-|---|---|
-| Method | **4.1** (router CSI) |
-| Receivers | **3×** wall-powered ESP32-C5 (`csi_recv_router`) |
-| Mini IP | `10.128.93.23` |
-| Ingest | TCP `:9055` → `csi_sessions` / `csi_samples` (`source_id` = client IP) |
-
-## Capture (unchanged)
-
-On Mini — do **not** reimplement ingest here:
+## Capture
 
 ```bash
 cd csi_pipeline_new
-./run_multi_ingest.sh --label empty_01
+./run_multi_ingest.sh --label empty_01    # ~2 min, Ctrl+C
 ./run_multi_ingest.sh --label occupied_01
-./count_csi_clients.sh          # expect ~3 live forwarders
+# interleave ~15 each …
 ```
 
-Interleave empty / occupied labels so the model does not learn session geometry. Details: [`csi_pipeline_new/MAC_MINI.md`](../csi_pipeline_new/MAC_MINI.md).
+## Train (multi-RX aware — re-export includes source_id)
+
+On Mini, after syncing this repo:
+
+```bash
+cd csi_pipeline_new
+./run_detect.sh --train-from-db --include empty,occupied
+```
+
+Default **`--rx-fusion auto`**: discovers **N** boards from distinct `source_id`
+values (2, 3, 8, … — not hardcoded). Windows are time-binned and **feature-
+concatenated in sorted source_id order** (missing board in a bin → zeros).
+Train also prints a complementary **OR-vote** score. Overrides:
+`--rx-fusion none`, `--rx-fusion concat`, `--rx-min all` (require every board
+in each bin), `--rx-min 2` (default; tolerate dropouts).
+
+You should see `RX boards (N=…)`, fused dims ≈ N× single-RX, and **median span > 0**.
+If [A] session-grouped bal_acc is still ~0.5, the link geometry needs work —
+not the fan-in path. Adding/removing boards later means **retrain** (feature
+width follows N).
+
+Optional single-board ablation:
+
+```bash
+./run_detect.sh --train-from-db --include empty,occupied --source-id 10.128.93.XX --rx-fusion none
+```
 
 ## This folder
 
 | Path | Role |
 |------|------|
-| `README.md` | This runbook |
-| `models/` | Trained bundles (gitignored weights OK) |
-| `exports/` | Training CSV / feature dumps |
-| `src/` | Presence train / live / eval code (new work) |
-
-Existing reference trainers/detectors still in [`csi_pipeline_new/`](../csi_pipeline_new/) (`train_object_detector.py`, `detect_live.py`, …). New presence work lands under `src/` here; import or thin-wrap capture helpers from `csi_pipeline_new` as needed.
-
-## Next steps
-
-1. Confirm 3 C5s fan-in (`count_csi_clients.sh`).
-2. Collect interleaved labeled sessions into Postgres.
-3. Export → train presence model under `src/` → `models/`.
-4. Live infer on Mini (TCP or recent DB windows).
+| `models/` | Presence model artifacts (later) |
+| `exports/` | Training dumps (later) |
+| `src/` | Presence-specific code (later wrappers) |

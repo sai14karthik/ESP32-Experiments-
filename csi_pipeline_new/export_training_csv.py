@@ -26,6 +26,7 @@ EXPORT_SELECT = f"""
 SELECT
     s.id::text AS session_id,
     s.label,
+    coalesce(c.source_id, '') AS source_id,
     c.seq,
     c.mac,
     c.rssi,
@@ -42,16 +43,19 @@ JOIN csi_sessions s ON s.id = c.session_id
 WHERE {BASE_WHERE}
 """
 
-# Appended after every filter clause — SQL requires ORDER BY last.
-EXPORT_ORDER_BY = "\nORDER BY s.started_at, c.host_ts\n"
+# Per-board order so multi-C5 TCP fan-in does not interleave RX timelines.
+EXPORT_ORDER_BY = (
+    "\nORDER BY s.started_at, coalesce(c.source_id, ''), c.host_ts, c.seq NULLS LAST\n"
+)
 
 
 def build_export_query(
     include: list[str],
     exclude: list[str],
     session_ids: list[str],
-) -> tuple[str, list[str]]:
-    params: list[str] = []
+    source_ids: list[str] | None = None,
+) -> tuple[str, list]:
+    params: list = []
     clauses = ""
     if include:
         clauses += " AND (" + " OR ".join(["lower(s.label) LIKE %s"] * len(include)) + ")"
@@ -62,10 +66,9 @@ def build_export_query(
     if session_ids:
         clauses += " AND s.id::text = ANY(%s)"
         params.append(session_ids)
-    # psycopg scans for placeholders only when params are passed. In that mode
-    # the LIKE literals baked into BASE_WHERE ('%baseline%') are read as
-    # placeholder syntax and rejected, so they have to be escaped first — but
-    # only then, since an unparameterized execute() would leave '%%' literal.
+    if source_ids:
+        clauses += " AND c.source_id = ANY(%s)"
+        params.append(source_ids)
     head = EXPORT_SELECT.replace("%", "%%") if params else EXPORT_SELECT
     return head + clauses + EXPORT_ORDER_BY, params
 
@@ -117,10 +120,15 @@ def main() -> None:
         "--session-id",
         help="Comma-separated session UUIDs to export (e.g. from csi_sessions.id)",
     )
+    p.add_argument(
+        "--source-id",
+        help="Comma-separated TCP source_id (client IP) to keep — one RX board",
+    )
     args = p.parse_args()
     include = _parse_patterns(args.include)
     exclude = _parse_patterns(args.exclude)
     session_ids = [s.strip() for s in (args.session_id or "").split(",") if s.strip()]
+    source_ids = [s.strip() for s in (args.source_id or "").split(",") if s.strip()]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -174,14 +182,34 @@ def main() -> None:
             print(f"  (exclude filter: {exclude})")
         if session_ids:
             print(f"  (session-id filter: {session_ids})")
+        if source_ids:
+            print(f"  (source-id filter: {source_ids})")
 
-        sql, params = build_export_query(include, exclude, session_ids)
+        # Show multi-RX fan-in breakdown (helps confirm 3 C5s landed).
+        cur.execute(
+            f"""
+            SELECT coalesce(c.source_id, '(null)'), count(*)
+            FROM csi_samples c
+            JOIN csi_sessions s ON s.id = c.session_id
+            WHERE {BASE_WHERE}
+            GROUP BY 1
+            ORDER BY 1
+            """
+        )
+        sources = cur.fetchall()
+        if sources:
+            print("source_id (RX) packet totals in matched label set:")
+            for sid, n in sources:
+                print(f"  {sid}: {n}")
+
+        sql, params = build_export_query(include, exclude, session_ids, source_ids or None)
         cur.execute(sql, params)
         rows = cur.fetchall()
 
     fields = [
         "session_id",
         "label",
+        "source_id",
         "seq",
         "mac",
         "rssi",

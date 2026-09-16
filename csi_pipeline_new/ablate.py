@@ -73,12 +73,12 @@ def score(
     seed: int,
     meta_only: bool = False,
 ) -> dict[str, float]:
-    packets, labels, session_labels, session_keys = load_packets(csv_path, config=config)
+    packets, labels, session_labels, stream_keys, group_keys = load_packets(csv_path, config=config)
     baseline = compute_baseline_profile(packets, labels)
     baseline_phase = compute_baseline_phase_profile(packets, labels) if config.use_phase else None
     ws = build_windows(
         packets, labels, session_labels, spec, baseline, baseline_phase,
-        config=config, session_keys=session_keys,
+        config=config, session_keys=stream_keys, group_keys=group_keys,
     )
     if ws.y.size == 0:
         return {}
@@ -178,7 +178,7 @@ def main() -> None:
     # Same function the trainer runs as tier [D], so the two reports cannot drift.
     print("\nNegative control — empty room vs. the same empty room, later:")
     nc_config = FeatureConfig()
-    nc_packets, nc_labels, _, _ = load_packets(args.csv, config=nc_config)
+    nc_packets, nc_labels, _, _, _ = load_packets(args.csv, config=nc_config)
     nc = negative_control(
         nc_packets, nc_labels, spec,
         config=nc_config,

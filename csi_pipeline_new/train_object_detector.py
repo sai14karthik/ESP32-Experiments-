@@ -142,18 +142,31 @@ def load_packets(
     csv_path: Path,
     *,
     config: FeatureConfig | None = None,
-) -> tuple[list[PacketRecord], list[int], list[str], list[str]]:
+) -> tuple[list[PacketRecord], list[int], list[str], list[str], list[str]]:
+    """Load packets.
+
+    Returns
+    -------
+    packets, labels, session_labels, stream_keys, group_keys
+        stream_keys : session_id|source_id — contiguous RX timeline for windowing
+        group_keys  : session_id — leave-one-capture-out CV (all RXs together)
+    """
     config = config or FeatureConfig()
     configure_from_iq_len(_dominant_iq_len(csv_path))
     packets: list[PacketRecord] = []
     y: list[int] = []
     session_labels: list[str] = []
-    session_keys: list[str] = []
+    stream_keys: list[str] = []
+    group_keys: list[str] = []
     skipped_iq = 0
+    source_counts: dict[str, int] = {}
+    has_source_id = False
 
     with csv_path.open(newline="") as f:
         reader = csv.DictReader(f)
-        has_session_id = reader.fieldnames is not None and "session_id" in reader.fieldnames
+        fields = reader.fieldnames or []
+        has_session_id = "session_id" in fields
+        has_source_id = "source_id" in fields
         run = -1
         prev_label: str | None = None
         for row in reader:
@@ -187,19 +200,36 @@ def load_packets(
                 continue
             session_labels.append(lab_raw)
             if has_session_id and row.get("session_id", "").strip():
-                session_keys.append(row["session_id"].strip())
+                sid = row["session_id"].strip()
             else:
                 if lab_raw != prev_label:
                     run += 1
                     prev_label = lab_raw
-                session_keys.append(f"{lab_raw}#{run}")
+                sid = f"{lab_raw}#{run}"
+            src = ""
+            if has_source_id:
+                src = (row.get("source_id") or "").strip()
+            if not src:
+                src = "unknown"
+            source_counts[src] = source_counts.get(src, 0) + 1
+            stream_keys.append(f"{sid}|{src}")
+            group_keys.append(sid)
 
     if skipped_iq > 5:
         print(f"skip bad iq row: … ({skipped_iq} total skipped)", file=sys.stderr)
     if not packets:
         sys.exit(f"No rows loaded from {csv_path}")
-    print(f"Loaded {len(packets)} packets @ {_csi_feat.N_SUBCARRIERS} subcarriers", flush=True)
-    return packets, y, session_labels, session_keys
+    print(f"Loaded {len(packets)} packets @ {_csi_feat.N_SUBCARRIERS} subcarriers")
+    if has_source_id and any(k != "unknown" for k in source_counts):
+        print(
+            f"  RX source_id streams: {len(source_counts)}  "
+            f"({', '.join(f'{k}={v}' for k, v in sorted(source_counts.items()))})"
+        )
+    elif has_source_id:
+        print("  WARNING: source_id column present but empty — windows may interleave RXs")
+    else:
+        print("  WARNING: no source_id in CSV — re-export for multi-C5 windowing")
+    return packets, y, session_labels, stream_keys, group_keys
 
 
 # --------------------------------------------------------------------------
@@ -221,6 +251,8 @@ class WindowSet:
     dropped_mixed_label: int = 0
     median_span_s: float = float("nan")
     times: list[float] = field(default_factory=list)
+    # Per-window RX id (TCP source_id). Empty / "fused" after multi-RX concat.
+    sources: list[str] = field(default_factory=list)
 
 
 def _contiguous_runs(keys: list[str]) -> list[tuple[int, int]]:
@@ -256,15 +288,22 @@ def build_windows(
     *,
     config: FeatureConfig | None = None,
     session_keys: list[str] | None = None,
+    group_keys: list[str] | None = None,
     min_label_fraction: float = MIN_LABEL_FRACTION,
 ) -> WindowSet:
     config = config or FeatureConfig()
+    # Contiguous runs follow the RX stream (session|source). CV groups default
+    # to the same keys unless group_keys is passed (session_id for multi-RX).
     keys = session_keys if session_keys is not None else derive_session_keys(session_labels)
+    gkeys = group_keys if group_keys is not None else keys
+    if len(gkeys) != len(keys):
+        raise ValueError("group_keys length must match session_keys / packets")
     fdim = feature_dim(baseline_profile, window_size=spec.size, config=config)
 
     X: list[np.ndarray] = []
     y: list[int] = []
     groups: list[str] = []
+    sources: list[str] = []
     meta: list[np.ndarray] = []
     times: list[float] = []
     spans: list[float] = []
@@ -274,7 +313,8 @@ def build_windows(
     for seg_start, seg_end in _contiguous_runs(keys):
         seg_packets = packets[seg_start:seg_end]
         seg_labels = labels[seg_start:seg_end]
-        seg_keys = keys[seg_start:seg_end]
+        seg_gkeys = gkeys[seg_start:seg_end]
+        seg_stream = keys[seg_start:seg_end]
         if len(seg_packets) < spec.size:
             continue
 
@@ -299,7 +339,9 @@ def build_windows(
                 )
             )
             y.append(label)
-            groups.append(seg_keys[start])
+            groups.append(seg_gkeys[start])
+            sk = seg_stream[start]
+            sources.append(sk.split("|", 1)[1] if "|" in sk else sk)
             meta.append(
                 np.array(
                     [
@@ -322,6 +364,7 @@ def build_windows(
             meta=np.empty((0, 3)),
             dropped_discontiguous=dropped_gap,
             dropped_mixed_label=dropped_mixed,
+            sources=[],
         )
 
     return WindowSet(
@@ -333,7 +376,169 @@ def build_windows(
         dropped_mixed_label=dropped_mixed,
         median_span_s=float(np.median(spans)) if spans else float("nan"),
         times=times,
+        sources=sources,
     )
+
+
+def fuse_multirx_windows(
+    ws: WindowSet,
+    *,
+    bin_s: float = 1.0,
+    min_rx: int = 2,
+) -> tuple[WindowSet, list[str]]:
+    """Time-align per-RX windows and concatenate features (best multi-RX path).
+
+    For each capture session, bucket windows by ``floor(host_ts / bin_s)``.
+    When ≥ ``min_rx`` boards have a window in the same bucket with the same
+    label, concatenate features in sorted ``source_id`` order (zeros if a
+    board is briefly missing). CV groups stay session_id.
+    """
+    real = sorted({s for s in ws.sources if s and s != "unknown" and s != "fused"})
+    if len(real) < 2 or ws.y.size == 0:
+        return ws, real
+
+    fdim = int(ws.X.shape[1])
+    # (session, bin) -> source -> best window index (closest to bin center)
+    buckets: dict[tuple[str, int], dict[str, tuple[float, int]]] = {}
+    for i, (g, src, t) in enumerate(zip(ws.groups, ws.sources, ws.times)):
+        if src not in real:
+            continue
+        if t is None or t != t:  # NaN
+            continue
+        b = int(t // bin_s)
+        center = b * bin_s + 0.5 * bin_s
+        dist = abs(float(t) - center)
+        slot = buckets.setdefault((g, b), {})
+        prev = slot.get(src)
+        if prev is None or dist < prev[0]:
+            slot[src] = (dist, i)
+
+    Xf: list[np.ndarray] = []
+    yf: list[int] = []
+    gf: list[str] = []
+    mf: list[np.ndarray] = []
+    tf: list[float] = []
+    sf: list[str] = []
+    skipped_mixed = 0
+    skipped_sparse = 0
+
+    for (g, b), by_src in sorted(buckets.items()):
+        if len(by_src) < min_rx:
+            skipped_sparse += 1
+            continue
+        idxs = [by_src[s][1] for s in by_src]
+        labs = {int(ws.y[i]) for i in idxs}
+        if len(labs) != 1:
+            skipped_mixed += 1
+            continue
+        lab = next(iter(labs))
+        parts: list[np.ndarray] = []
+        metas: list[np.ndarray] = []
+        for src in real:
+            if src in by_src:
+                i = by_src[src][1]
+                parts.append(ws.X[i])
+                metas.append(ws.meta[i])
+            else:
+                parts.append(np.zeros(fdim, dtype=np.float64))
+                metas.append(np.zeros(3, dtype=np.float64))
+        Xf.append(np.concatenate(parts))
+        yf.append(lab)
+        gf.append(g)
+        mf.append(np.mean(np.stack(metas, axis=0), axis=0))
+        tf.append(b * bin_s + 0.5 * bin_s)
+        sf.append("fused")
+
+    if not Xf:
+        print(
+            f"  multi-RX fusion produced 0 windows "
+            f"(sparse_bins={skipped_sparse}, mixed_label={skipped_mixed}) "
+            f"— keeping per-RX windows",
+            flush=True,
+        )
+        return ws, real
+
+    fused = WindowSet(
+        X=np.asarray(Xf, dtype=np.float64),
+        y=np.asarray(yf, dtype=np.int32),
+        groups=gf,
+        meta=np.asarray(mf, dtype=np.float64),
+        median_span_s=bin_s,
+        times=tf,
+        sources=sf,
+        dropped_discontiguous=ws.dropped_discontiguous,
+        dropped_mixed_label=ws.dropped_mixed_label + skipped_mixed,
+    )
+    print(
+        f"  multi-RX fusion: {len(real)} RX → concat dims={fused.X.shape[1]}  "
+        f"windows={len(fused.y)}  bin={bin_s:.1f}s  min_rx={min_rx}  "
+        f"(dropped sparse={skipped_sparse} mixed={skipped_mixed})",
+        flush=True,
+    )
+    return fused, real
+
+
+def vote_or_session_score(
+    ws: WindowSet,
+    *,
+    model_name: str = "logreg",
+    bin_s: float = 1.0,
+) -> dict[str, float]:
+    """Per-RX windows + session-level OR vote (complementary to feature fusion).
+
+    Leave-one-session-out: train on other sessions' per-RX windows, predict each
+    held-out window, then OR within (session, time-bin) — presence if any RX
+    fires. Reports balanced accuracy on session-bins.
+    """
+    from collections import defaultdict
+
+    real = sorted({s for s in ws.sources if s and s != "unknown" and s != "fused"})
+    if len(real) < 2 or ws.y.size == 0:
+        return {}
+
+    sessions = sorted(set(ws.groups))
+    if len(sessions) < 2:
+        return {}
+
+    y_true_bins: list[int] = []
+    y_pred_bins: list[int] = []
+
+    for hold in sessions:
+        tr = [i for i, g in enumerate(ws.groups) if g != hold]
+        te = [i for i, g in enumerate(ws.groups) if g == hold]
+        if not tr or not te:
+            continue
+        y_tr = ws.y[tr]
+        if len(np.unique(y_tr)) < 2:
+            continue
+        pipe = build_pipeline(model_name)
+        pipe.fit(ws.X[tr], y_tr)
+        thr, _ = tune_threshold(y_tr, pipe.predict_proba(ws.X[tr])[:, LABEL_OBJECT])
+        proba = pipe.predict_proba(ws.X[te])[:, LABEL_OBJECT]
+        pred = (proba >= thr).astype(int)
+
+        # OR within time bins on the held-out session
+        bins: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for j, i in enumerate(te):
+            t = ws.times[i]
+            if t != t:
+                continue
+            bins[int(t // bin_s)].append((int(ws.y[i]), int(pred[j])))
+        for items in bins.values():
+            if not items:
+                continue
+            labs = {a for a, _ in items}
+            if len(labs) != 1:
+                continue
+            y_true_bins.append(next(iter(labs)))
+            y_pred_bins.append(1 if any(p == 1 for _, p in items) else 0)
+
+    if len(y_true_bins) < 4 or len(set(y_true_bins)) < 2:
+        return {}
+    return {
+        "balanced_accuracy": float(balanced_accuracy_score(y_true_bins, y_pred_bins)),
+        "bins": float(len(y_true_bins)),
+    }
 
 
 def subdivide_groups(ws: WindowSet, n_blocks: int) -> list[str]:
@@ -809,6 +1014,12 @@ def save_bundle(
     leakage: dict[str, dict[str, float]] | None = None,
     session_keys: list[str] | None = None,
     packet_count: int = 0,
+    rx_fusion: str = "none",
+    rx_sources_order: list[str] | None = None,
+    rx_fusion_bin_s: float | None = None,
+    rx_min: int | None = None,
+    n_features_per_rx: int | None = None,
+    or_vote_metrics: dict[str, float] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
@@ -843,6 +1054,13 @@ def save_bundle(
             "sessions": sorted(set(session_keys or [])),
             "packet_count": packet_count,
             "trained_at": datetime.now(timezone.utc).isoformat(),
+            # Multi-RX: concat features across sorted source_id (length = N).
+            "rx_fusion": rx_fusion,
+            "rx_sources_order": list(rx_sources_order or []),
+            "rx_fusion_bin_s": rx_fusion_bin_s,
+            "rx_min": rx_min,
+            "n_features_per_rx": n_features_per_rx,
+            "or_vote_metrics": or_vote_metrics,
         },
         path,
     )
@@ -874,6 +1092,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=12.0,
         help="Reject windows spanning longer than this (0 disables)",
+    )
+    p.add_argument(
+        "--rx-fusion",
+        choices=("auto", "concat", "none"),
+        default="auto",
+        help=(
+            "Multi-RX (any N boards): concat = time-align all source_id features; "
+            "auto = concat when ≥2 RXs; none = per-RX windows only"
+        ),
+    )
+    p.add_argument(
+        "--rx-bin-s",
+        type=float,
+        default=1.0,
+        help="Time bin (seconds) for multi-RX feature concat / OR-vote",
+    )
+    p.add_argument(
+        "--rx-min",
+        default="2",
+        help=(
+            "Min boards present in a time bin to keep a fused window "
+            "(integer, or 'all' = every discovered source_id). Default 2."
+        ),
     )
     g = p.add_argument_group("feature layout (stored in the model bundle)")
     g.add_argument(
@@ -910,12 +1151,18 @@ def main() -> None:
     )
 
     print(f"Loading {args.csv} …")
-    packets, labels, session_labels, session_keys = load_packets(args.csv, config=config)
+    packets, labels, session_labels, stream_keys, group_keys = load_packets(
+        args.csv, config=config
+    )
     print(
         f"  packets: {len(packets)}  empty={labels.count(LABEL_EMPTY)}  "
         f"object={labels.count(LABEL_OBJECT)}"
     )
-    print(f"  sessions: {len(set(session_keys))}  ({', '.join(sorted(set(session_labels)))})")
+    print(
+        f"  captures: {len(set(group_keys))}  "
+        f"RX-streams: {len(set(stream_keys))}  "
+        f"({', '.join(sorted(set(session_labels)))})"
+    )
     print(f"  features: v{FEATURE_VERSION}  [{config.describe()}]")
 
     baseline_profile = compute_baseline_profile(packets, labels)
@@ -923,7 +1170,7 @@ def main() -> None:
 
     ws = build_windows(
         packets, labels, session_labels, spec, baseline_profile, baseline_phase,
-        config=config, session_keys=session_keys,
+        config=config, session_keys=stream_keys, group_keys=group_keys,
     )
     if ws.y.size == 0:
         sys.exit("No windows built — too few packets per session, or all rejected as discontiguous.")
@@ -933,6 +1180,56 @@ def main() -> None:
         f"(dropped {ws.dropped_discontiguous} discontiguous, "
         f"{ws.dropped_mixed_label} mixed-label)"
     )
+
+    # Multi-RX (N boards from unique source_id — not hardcoded to 3):
+    # OR-vote on per-RX windows (diagnostic), then concat-fuse for deploy.
+    n_features_per_rx = int(ws.X.shape[1])
+    rx_sources = sorted(
+        {s for s in ws.sources if s and s != "unknown" and s != "fused"}
+    )
+    or_vote_metrics: dict[str, float] | None = None
+    if len(rx_sources) >= 2:
+        print(f"\n  RX boards (N={len(rx_sources)}): {', '.join(rx_sources)}")
+        or_vote_metrics = vote_or_session_score(
+            ws, model_name="hgb", bin_s=args.rx_bin_s
+        ) or None
+        if or_vote_metrics:
+            print(
+                f"  complementary OR-vote (leave-one-session): "
+                f"bal_acc={or_vote_metrics['balanced_accuracy']:.3f}  "
+                f"bins={int(or_vote_metrics['bins'])}"
+            )
+        else:
+            print("  complementary OR-vote: not enough session folds")
+
+    rx_min_raw = str(args.rx_min).strip().lower()
+    if rx_min_raw == "all":
+        rx_min = max(2, len(rx_sources))
+    else:
+        try:
+            rx_min = int(rx_min_raw)
+        except ValueError:
+            sys.exit(f"--rx-min must be an integer or 'all', got {args.rx_min!r}")
+        if rx_min < 2:
+            sys.exit("--rx-min must be ≥ 2 (or 'all')")
+
+    do_concat = args.rx_fusion == "concat" or (
+        args.rx_fusion == "auto" and len(rx_sources) >= 2
+    )
+    rx_fusion_mode = "none"
+    rx_sources_order: list[str] = []
+    if do_concat and len(rx_sources) >= 2:
+        ws, rx_sources_order = fuse_multirx_windows(
+            ws, bin_s=args.rx_bin_s, min_rx=min(rx_min, len(rx_sources))
+        )
+        if ws.sources and ws.sources[0] == "fused":
+            rx_fusion_mode = "concat"
+        else:
+            # Fusion fell back to per-RX windows (0 fused bins).
+            rx_fusion_mode = "none"
+            rx_sources_order = []
+    elif args.rx_fusion == "concat" and len(rx_sources) < 2:
+        print("  WARNING: --rx-fusion concat needs ≥2 source_id values; using per-RX")
 
     # ---- leakage baselines -------------------------------------------------
     leakage = leakage_baselines(ws)
@@ -1160,10 +1457,22 @@ def main() -> None:
         evaluation_trustworthy=feasible and not nc_bad,
         evaluation_note=note,
         leakage=leakage,
-        session_keys=session_keys,
+        session_keys=group_keys,
         packet_count=len(packets),
+        rx_fusion=rx_fusion_mode,
+        rx_sources_order=rx_sources_order,
+        rx_fusion_bin_s=args.rx_bin_s if rx_fusion_mode == "concat" else None,
+        rx_min=min(rx_min, len(rx_sources)) if rx_fusion_mode == "concat" else None,
+        n_features_per_rx=n_features_per_rx if rx_fusion_mode == "concat" else None,
+        or_vote_metrics=or_vote_metrics,
     )
     print(f"\nSaved → {args.out}")
+    if rx_fusion_mode == "concat":
+        print(
+            f"  rx_fusion=concat  N={len(rx_sources_order)}  "
+            f"sources={rx_sources_order}  "
+            f"dims={n_features_per_rx}×{len(rx_sources_order)}"
+        )
     print("Live:  ./run_detect.sh --fast --quiet")
 
 

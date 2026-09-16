@@ -47,7 +47,7 @@ from train_object_detector import (
 
 def prepare(csv: Path, spec: WindowSpec, config: FeatureConfig, baseline=None):
     """Window a capture. Pass `baseline` to reuse another condition's profile."""
-    packets, labels, session_labels, session_keys = load_packets(csv, config=config)
+    packets, labels, session_labels, stream_keys, group_keys = load_packets(csv, config=config)
     if baseline is None:
         prof = compute_baseline_profile(packets, labels)
         phase = compute_baseline_phase_profile(packets, labels) if config.use_phase else None
@@ -55,7 +55,7 @@ def prepare(csv: Path, spec: WindowSpec, config: FeatureConfig, baseline=None):
         prof, phase = baseline
     ws = build_windows(
         packets, labels, session_labels, spec, prof, phase,
-        config=config, session_keys=session_keys,
+        config=config, session_keys=stream_keys, group_keys=group_keys,
     )
     return ws, (prof, phase)
 

@@ -83,7 +83,7 @@ if [[ "${1:-}" == "--train-from-db" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       # Space-separated form: the value is the next argv element, so take both.
-      --include|--exclude)
+      --include|--exclude|--source-id)
         EXPORT_ARGS+=("$1")
         shift
         if [[ $# -gt 0 ]]; then
@@ -91,7 +91,7 @@ if [[ "${1:-}" == "--train-from-db" ]]; then
           shift
         fi
         ;;
-      --include=*|--exclude=*)
+      --include=*|--exclude=*|--source-id=*)
         EXPORT_ARGS+=("$1")
         shift
         ;;

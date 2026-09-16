@@ -45,7 +45,7 @@ def main() -> None:
     if not args.csv:
         sys.exit("Pass --csv path to score")
 
-    packets, labels, session_labels, session_keys = load_packets(args.csv, config=config)
+    packets, labels, session_labels, stream_keys, group_keys = load_packets(args.csv, config=config)
     ws = build_windows(
         packets,
         labels,
@@ -54,7 +54,8 @@ def main() -> None:
         baseline,
         baseline_phase,
         config=config,
-        session_keys=session_keys,
+        session_keys=stream_keys,
+        group_keys=group_keys,
     )
     X, y = ws.X, ws.y
     if len(y) == 0:
