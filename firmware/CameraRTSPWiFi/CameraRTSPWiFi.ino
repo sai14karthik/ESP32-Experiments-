@@ -11,11 +11,11 @@
 const char *ssid = "LabHealthSecurePSK";
 const char *password = "ZLMKAQm@UV2e9g8r7GW!";
 
-// Tuned for best stable quality on LabPSK (esp32cam-rtsp XIAO board + Micro-RTSP):
-//   VGA 640x480, JPEG q=8 (lower = sharper), 10 fps, TCP interleaved only via MediaMTX.
+// Smooth motion on LabPSK Micro-RTSP (trade a bit of still sharpness for fluid walk):
+//   VGA, JPEG q=10 (smaller frames → steadier pacing), 15 fps.
 static const uint16_t kRtspPort = 554;
-static const uint32_t kMsecPerFrame = 100;  // 10 fps
-static const int kJpegQuality = 8;
+static const uint32_t kMsecPerFrame = 67;  // ~15 fps
+static const int kJpegQuality = 10;
 
 OV2640 cam;
 WiFiServer rtspServer(kRtspPort);

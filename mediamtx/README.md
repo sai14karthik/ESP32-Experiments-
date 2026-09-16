@@ -120,9 +120,9 @@ Port **8554** = MediaMTX. Port **554** = ESP only (debugging).
 
 | Setting | Value | Why |
 |---------|-------|-----|
-| Resolution | VGA 640×480 | Best stable size for Micro-RTSP on LabPSK (SVGA+ often corrupts) |
-| JPEG quality | **8** (0–63, lower = sharper) | Clearer than default 10–12 |
-| Frame rate | 10 fps | Steady TCP pacing |
+| Resolution | VGA 640×480 | Best stable size for Micro-RTSP on LabPSK |
+| JPEG quality | **10** | Smaller frames → steadier timing (walk looks less robotic) |
+| Frame rate | **~15 fps** | Smoother motion than 10 fps |
 | RTP JPEG type | **0** (4:2:2) | Matches OV2640 / `esp32cam-rtsp` |
 | Transport | TCP only | LabPSK reliability |
 | MediaMTX queue | `writeQueueSize: 4096` | Fewer drops on bursty MJPEG |
@@ -145,6 +145,7 @@ Do **not** push UXGA/1080p on this path — Wi‑Fi + Micro-RTSP will tear frame
 | VLC no picture | Force RTP over RTSP (TCP); confirm Mini log shows a reader session |
 | `bad vlc` / corrupt JPEG | Board needs current Micro-RTSP (JPEG RTP **type 0**). Reflash from this repo |
 | A few “start chunk” lines at join | Normal for MJPEG RTSP; ignore if video then plays |
+| `deprecated pixel format / set range correctly` | Harmless JPEG full-range warning — fixed in `watch_xiao_rtsp.sh` (`in_range=jpeg`). VLC users can ignore it |
 
 ---
 
