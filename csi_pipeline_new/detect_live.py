@@ -425,7 +425,14 @@ class MultiRxLiveDetector:
         self.rx_sources_order = order
         self.n_features_per_rx = int(n_per)
         self.bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
-        self.min_rx = int(bundle.get("rx_min") or 2)
+        # Live defaults to requiring every trained board (avoids zero-pad false
+        # OBJECT when one RX is late). Bundle rx_min still applies if smaller
+        # only when explicitly set higher than N (clamped).
+        trained_min = int(bundle.get("rx_min") or 2)
+        self.min_rx = len(order)  # all boards for live stability
+        if trained_min > len(order):
+            self.min_rx = len(order)
+        self._trained_min_rx = trained_min
         self.streams = {
             src: _RxFeatureBuffer(
                 window_size=self.window_size,
@@ -747,7 +754,8 @@ def print_startup_banner(
         print(
             f"multi-RX live: fuse N={len(order)} "
             f"({', '.join(order)}) — use --listen-tcp 9055 "
-            f"(stop ./run_multi_ingest.sh first; same port)",
+            f"(stop ./run_multi_ingest.sh first; same port). "
+            f"Predicts only when all {len(order)} RXs have a fresh window.",
             file=sys.stderr,
         )
     if bundle.get("evaluation_trustworthy") is False:
