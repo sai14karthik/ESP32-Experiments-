@@ -150,11 +150,23 @@ case "$cmd" in
       echo "No model — run ./run_presence.sh train first" >&2
       exit 2
     fi
+    # Default --fast to match ./run_presence.sh live (same EMA / FPR).
+    CAL_EXTRA=("$@")
+    if [[ ! " $* " =~ " --fast " && ! " $* " =~ " --no-fast " ]]; then
+      CAL_EXTRA=(--fast "${CAL_EXTRA[@]}")
+    fi
+    # strip our sentinel if present
+    OUT_EXTRA=()
+    for a in "${CAL_EXTRA[@]}"; do
+      [[ "$a" == "--no-fast" ]] && continue
+      OUT_EXTRA+=("$a")
+    done
     uv_csi "$CSI/calibrate_site.py" \
       --model "$MP" \
       --out "$MODELS/site_calibration.joblib" \
       --from-csv "$CSV" \
-      "$@"
+      "${OUT_EXTRA[@]}"
+    mkdir -p "$CSI/models"
     cp -f "$MODELS/site_calibration.joblib" "$CSI/models/site_calibration.joblib"
     echo "synced calibration → $MODELS/site_calibration.joblib" >&2
     ;;
