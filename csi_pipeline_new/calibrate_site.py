@@ -265,6 +265,37 @@ def collect_from_tcp(
 # --------------------------------------------------------------------------
 
 
+def _reorder_by_rx_stream(
+    packets: list,
+    session_labels: list[str],
+    stream_keys: list[str],
+    group_keys: list[str],
+) -> tuple[list, list[str], list[str], list[str]]:
+    """Sort packets into contiguous per-RX runs (required by build_windows).
+
+    TCP fan-in delivers boards interleaved; training CSV is already ordered by
+    source_id. Without this sort, calibrate-live builds almost no windows and
+    multi-RX fusion fails even when all boards are connected.
+    """
+    if not packets or not stream_keys:
+        return packets, session_labels, stream_keys, group_keys
+    idx = list(range(len(packets)))
+
+    def _key(i: int) -> tuple:
+        sk = stream_keys[i]
+        src = sk.split("|", 1)[1] if "|" in sk else sk
+        ts = packets[i].host_ts
+        return (src, float(ts) if ts is not None else 0.0, i)
+
+    idx.sort(key=_key)
+    return (
+        [packets[i] for i in idx],
+        [session_labels[i] for i in idx],
+        [stream_keys[i] for i in idx],
+        [group_keys[i] for i in idx],
+    )
+
+
 def smooth(proba: np.ndarray, alpha: float) -> np.ndarray:
     """Replay the detector's EMA over the window sequence.
 
@@ -295,11 +326,18 @@ def calibrate(
     group_keys: list[str] | None = None,
 ) -> dict:
     config = FeatureConfig.from_dict(bundle.get("feature_config"))
+    session_labels = session_labels or ["calibration"] * len(packets)
+    stream_keys = stream_keys or ["calibration"] * len(packets)
+    group_keys = group_keys or ["calibration"] * len(packets)
+
+    # TCP collect is arrival-interleaved; windowing needs contiguous per-RX runs.
+    if any("|" in k for k in stream_keys):
+        packets, session_labels, stream_keys, group_keys = _reorder_by_rx_stream(
+            packets, session_labels, stream_keys, group_keys
+        )
+
     n = len(packets)
     labels = [LABEL_EMPTY] * n
-    session_labels = session_labels or ["calibration"] * n
-    stream_keys = stream_keys or ["calibration"] * n
-    group_keys = group_keys or ["calibration"] * n
 
     profile = np.median(
         np.stack([p.amp[_csi_feat.ACTIVE_IDX] for p in packets], axis=0), axis=0
@@ -347,16 +385,28 @@ def calibrate(
                 span = max(ts) - min(ts)
             rate = len(packets) / max(span or 1.0, 1.0)
             per_rx_rate = rate / max(len(order), 1)
+            # Window wall-clock ≈ window_size / pkt_s_per_rx; bins must cover that
+            # or different RXs never land in the same fuse bucket.
+            window_s = float(bundle["window_size"]) / max(per_rx_rate, 0.5)
             if per_rx_rate < 15.0:
-                bin_s = max(bin_s, 2.0)
+                bin_s = max(bin_s, 2.0, 0.75 * window_s)
+            print(
+                f"  cal fuse: {ws.X.shape[0]} per-RX windows  "
+                f"bin_s={bin_s:.1f}s  ~{per_rx_rate:.1f} pkt/s/RX",
+                file=sys.stderr,
+            )
         trained_min = int(bundle.get("rx_min") or 1)
         min_rx = min(max(1, trained_min), len(order)) if order else max(1, trained_min)
+        pre_n = int(ws.X.shape[0])
         ws, got = fuse_multirx_windows(ws, bin_s=bin_s, min_rx=min_rx)
         if not ws.sources or ws.sources[0] != "fused":
             sys.exit(
                 "Model expects multi-RX fused features, but calibration could not "
-                "build fused empty windows. Use --from-csv exports/training_packets.csv "
-                "(needs source_id on ≥2 boards), not a single USB serial stream."
+                f"build fused empty windows ({pre_n} per-RX windows, "
+                f"sources={sorted({s for s in (ws.sources or [])})}).\n"
+                "  Retry: leave room EMPTY, all boards powered, "
+                "./run_presence.sh calibrate-live --seconds 180\n"
+                "  Or: ./run_presence.sh calibrate   # from training CSV empty rows"
             )
         if order and got != order:
             print(

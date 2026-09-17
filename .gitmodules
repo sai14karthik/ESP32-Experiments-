@@ -22,3 +22,6 @@
 [submodule "esp32cam-rtsp"]
 	path = esp32cam-rtsp
 	url = https://github.com/rzeldent/esp32cam-rtsp
+[submodule "esphome-wifi-csi"]
+	path = esphome-wifi-csi
+	url = https://github.com/PeterkoCZ91/esphome-wifi-csi
