@@ -502,8 +502,8 @@ def main() -> None:
     p.add_argument(
         "--fpr",
         type=float,
-        default=0.10,
-        help="Tolerated false-positive rate on the empty room (default 0.10)",
+        default=0.05,
+        help="Tolerated false-positive rate on the empty room (default 0.05)",
     )
     p.add_argument("--stride", type=int, default=CALIBRATION_STRIDE)
     p.add_argument("--from-file", type=Path, help="Replay a raw CSI_DATA serial log")

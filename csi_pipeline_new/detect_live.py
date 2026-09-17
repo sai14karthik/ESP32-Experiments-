@@ -550,7 +550,7 @@ class MultiRxLiveDetector:
                 "buffered": self.buffered,
                 "need": self.window_size,
                 "rx_ready": n_ready,
-                "rx_need": len(self.rx_sources_order),
+                "rx_need": self.min_rx,
             }
 
         if got is None:
@@ -690,9 +690,12 @@ def load_bundle_and_calibration(
             # the operator did not ask for it.
             msg = f"calibration {cal_path.name} unusable: {why}"
             if require_explicit_calibration or calibration_path is not None:
-                sys.exit(f"{msg}\nRecalibrate: ./run_detect.sh --calibrate")
+                sys.exit(f"{msg}\nRecalibrate: cd ../presence_detection && ./run_presence.sh calibrate-live")
             print(f"WARNING: ignoring {msg}", file=sys.stderr)
-            print("         Recalibrate: ./run_detect.sh --calibrate", file=sys.stderr)
+            print(
+                "         Recalibrate: cd ../presence_detection && ./run_presence.sh calibrate-live",
+                file=sys.stderr,
+            )
             cal_path = None
         else:
             calibration = loaded
@@ -742,7 +745,8 @@ def print_startup_banner(
         print(
             "NOT calibrated: using the training site's baseline and threshold.\n"
             "         Measured transfer to an uncalibrated new setup is ~0.55 balanced\n"
-            "         accuracy (chance). Run ./run_detect.sh --calibrate first.",
+            "         accuracy (chance). Prefer:\n"
+            "           cd ../presence_detection && ./run_presence.sh calibrate-live",
             file=sys.stderr,
         )
     if fast:
@@ -758,11 +762,12 @@ def print_startup_banner(
         )
     if bundle.get("rx_fusion") == "concat":
         order = bundle.get("rx_sources_order") or []
+        need = getattr(detector, "min_rx", len(order))
         print(
             f"multi-RX live: fuse N={len(order)} "
             f"({', '.join(order)}) — use --listen-tcp 9055 "
             f"(stop ./run_multi_ingest.sh first; same port). "
-            f"Predicts only when all {len(order)} RXs have a fresh window.",
+            f"Predicts when ≥{need}/{len(order)} RXs have a fresh window.",
             file=sys.stderr,
         )
     if bundle.get("evaluation_trustworthy") is False:
@@ -946,6 +951,17 @@ def main() -> None:
     )
     if args.listen_tcp is not None and args.port:
         sys.exit("Use only one of --listen-tcp / --port")
+    if (
+        args.listen_tcp is not None
+        and bundle.get("rx_fusion") != "concat"
+        and not args.from_file
+    ):
+        sys.exit(
+            "Refusing --listen-tcp with a non-fused (single-RX) model.\n"
+            "  Multi-C5 TCP would dump every board into one buffer → wrong scores.\n"
+            "  Fix: cd ../presence_detection && ./run_presence.sh train\n"
+            "  (needs ≥2 source_ids in empty+occupied captures), then calibrate-live."
+        )
     if (
         bundle.get("rx_fusion") == "concat"
         and args.listen_tcp is None

@@ -277,6 +277,20 @@ WHERE session_id = (SELECT id FROM csi_sessions ORDER BY started_at DESC LIMIT 1
 
 Preferred for **room 207 / presence** capture: C5 stays on wall power; Mac Mini always-on ingest. Measure CSI from LabPSK (method 4.1); **forward** each `CSI_DATA` line over **TCP**.
 
+**Presence prototype front door** (train / calibrate-live / live / gui):
+
+```bash
+cd ../presence_detection   # or: cd ~/…/presence_detection
+./run_presence.sh clients
+./run_presence.sh capture empty_01    # interleave empty_* / occupied_*
+./run_presence.sh train
+./run_presence.sh calibrate-live      # room EMPTY; stop ingest first (:9055)
+./run_presence.sh live                # or: ./run_presence.sh gui
+```
+
+See `presence_detection/README.md`. Do not use the USB 4.3 `run_detect.sh` train
+section below for the multi-RX LabPSK demo — that path is single-board / SoftAP-era.
+
 ```text
 LabPSK AP --CSI--> ESP32-C5 #1 ──TCP :9055──┐
            ├─CSI--> ESP32-C5 #2 ──TCP :9055──┼──► Mac Mini (--listen-tcp) --> Postgres

@@ -125,9 +125,38 @@ if [[ "${1:-}" == "--eval-csv" ]]; then
   exit 0
 fi
 
-if [[ ! -f "$ROOT/models/object_detector.joblib" ]]; then
-  echo "No model yet — training from sample data …" >&2
-  uv_csi "$ROOT/train_object_detector.py" --deploy
+# Resolve --model path for fusion check / skip sample auto-train when explicit.
+MODEL_PATH="$ROOT/models/object_detector.joblib"
+prev=""
+for a in "$@"; do
+  if [[ "$prev" == "--model" ]]; then
+    MODEL_PATH="$a"
+    break
+  fi
+  case "$a" in
+    --model=*) MODEL_PATH="${a#--model=}"; break ;;
+  esac
+  prev="$a"
+done
+
+has_explicit_model=0
+for a in "$@"; do
+  case "$a" in
+    --model|--model=*) has_explicit_model=1; break ;;
+  esac
+done
+
+if [[ ! -f "$MODEL_PATH" ]]; then
+  if [[ $has_explicit_model -eq 1 ]]; then
+    echo "Model not found: $MODEL_PATH" >&2
+    echo "  Train: cd ../presence_detection && ./run_presence.sh train" >&2
+    exit 2
+  fi
+  if [[ ! -f "$ROOT/models/object_detector.joblib" ]]; then
+    echo "No model yet — training from sample data …" >&2
+    uv_csi "$ROOT/train_object_detector.py" --deploy
+  fi
+  MODEL_PATH="$ROOT/models/object_detector.joblib"
 fi
 
 EXTRA=()
@@ -154,7 +183,7 @@ done
 # Fused multi-RX models need TCP fan-in, not USB serial.
 if [[ $has_port -eq 0 && $has_file -eq 0 && $has_listen_tcp -eq 0 ]]; then
   FUSION="$(
-    uv_csi -c "import joblib; b=joblib.load('${ROOT}/models/object_detector.joblib'); print(b.get('rx_fusion') or '')" 2>/dev/null || true
+    uv_csi -c "import joblib; b=joblib.load(r'''${MODEL_PATH}'''); print(b.get('rx_fusion') or '')" 2>/dev/null || true
   )"
   if [[ "$FUSION" == "concat" ]]; then
     echo "multi-RX fused model — TCP :9055 (stop ./run_multi_ingest.sh if it holds the port)" >&2

@@ -2,7 +2,7 @@
 
 **Front door:** `./run_presence.sh` — capture stays in `csi_pipeline_new/`;
 models and exports live here. **N boards** = distinct `source_id`s (not hardcoded
-to 3). Retrain if you add/remove RXs.
+to 3). Retrain if you add/remove RXs **or** a board gets a new DHCP IP.
 
 ```
 LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini
@@ -10,27 +10,41 @@ LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini
                                               └─ presence_detection/models (train/live)
 ```
 
+**:9055 is exclusive** — capture, calibrate-live, live, and gui cannot share the
+port. Stop the current owner before starting the next.
+
 ## Daily loop (Mini)
 
 ```bash
 cd presence_detection
 
-./run_presence.sh clients                 # expect N boards
+./run_presence.sh clients                 # expect N boards (needs a listener)
 ./run_presence.sh capture empty_01        # ~2 min, Ctrl+C
 ./run_presence.sh capture occupied_01
 # interleave more empty_* / occupied_* …
 
 ./run_presence.sh train                   # fuse N RXs → models/object_detector.joblib
-# Leave room EMPTY, stop ingest/live:
+./run_presence.sh status                  # must show rx_fusion=concat, N=your boards
+
+# Leave room EMPTY; stop ingest (frees :9055):
 ./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
 ./run_presence.sh live                    # continuous P(object)
-./run_presence.sh gui                     # PyQt dashboard (EMPTY/OBJECT + chart)
+# or: ./run_presence.sh gui               # PyQt dashboard
 
 ./run_presence.sh eval
-./run_presence.sh status                  # shows rx_fusion + N + sources
 ```
 
-If live is still wrong after `calibrate-live` (empty median P already high), retrain with fresh captures:
+### Success criteria
+
+| Check | Expect |
+|-------|--------|
+| `status` | `rx_fusion=concat`, N = powered boards, sources = their IPs |
+| Empty room | mostly EMPTY / low P(object) |
+| Person/object in RF path | OBJECT / P above threshold |
+| Live line | `rx=N/N` (not stuck buffering) |
+| Logs | no `ignoring source_id=` warnings |
+
+If live is still wrong after `calibrate-live` (empty median P already high), retrain:
 
 ```bash
 ./run_presence.sh capture empty_now
@@ -43,14 +57,14 @@ If live is still wrong after `calibrate-live` (empty median P already high), ret
 ## Continuous improvement
 
 1. When live is wrong, immediately `./run_presence.sh capture empty_miss_…` or `occupied_miss_…`
-2. `./run_presence.sh train` → `calibrate-live` → `live` again  
+2. `./run_presence.sh train` → `calibrate-live` → `live` again
 3. Watch **OOF / grouped bal_acc** via `./run_presence.sh eval` — want stable or rising
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| `run_presence.sh` | Capture / train / calibrate-live / live / eval |
+| `run_presence.sh` | Capture / train / calibrate-live / live / gui / eval |
 | `models/` | `object_detector.joblib`, `site_calibration.joblib` |
 | `exports/` | Synced `training_packets.csv` |
 | `src/` | Paths + status helper |
@@ -61,8 +75,11 @@ If live is still wrong after `calibrate-live` (empty median P already high), ret
 | Step | How N is chosen |
 |------|-----------------|
 | Capture | Every C5 that connects to `:9055` |
-| Train | Distinct `source_id` → width `N × per-RX` |
+| Train | Distinct `source_id` → width `N × per-RX` (`--rx-min all` by default) |
 | Calibrate / live | Bundle `rx_sources_order` (length N); live `--rx-min all` by default |
+
+`calibrate` (CSV empty rows) is a fallback. Prefer **`calibrate-live`** so the
+threshold matches the room right now.
 
 ```bash
 ./run_presence.sh train --rx-min all

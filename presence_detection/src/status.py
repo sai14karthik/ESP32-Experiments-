@@ -30,12 +30,13 @@ def main() -> int:
     order = b.get("rx_sources_order") or []
     m = b.get("metrics") or {}
     g = b.get("grouped_metrics") or {}
+    fusion = b.get("rx_fusion")
     print(f"model: {mp}")
     print(
         f"  type={b.get('model_type')}  v{b.get('feature_version')}  "
         f"trained={b.get('trained_at')}"
     )
-    print(f"  rx_fusion={b.get('rx_fusion')}  N={len(order)}  sources={order}")
+    print(f"  rx_fusion={fusion}  N={len(order)}  sources={order}")
     n_per = b.get("n_features_per_rx")
     if order and n_per:
         print(f"  feature width={int(n_per)}×{len(order)}={int(n_per) * len(order)}")
@@ -46,6 +47,26 @@ def main() -> int:
     ov = b.get("or_vote_metrics") or {}
     if ov:
         print(f"  OR-vote bal_acc={ov.get('balanced_accuracy', float('nan')):.3f}")
+    if fusion != "concat":
+        print()
+        print(
+            "  BLOCKER: model is not multi-RX fused. "
+            "./run_presence.sh live/gui will refuse this model."
+        )
+        print("  Fix: interleaved capture → ./run_presence.sh train")
+        return 1
+    if b.get("evaluation_trustworthy") is False:
+        print()
+        print(
+            f"  WARNING: metrics confounded — {b.get('evaluation_note', '')}"
+        )
+        print("  Capture more interleaved empty_*/occupied_* then retrain.")
+    if order:
+        print()
+        print(
+            "  Note: source_id = DHCP IP. If a board gets a new lease, "
+            "retrain (IPs must match sources above)."
+        )
     print()
     if cp.is_file():
         cal = joblib.load(cp)
@@ -55,9 +76,15 @@ def main() -> int:
             f"windows={cal.get('n_windows')}  source={cal.get('source')}"
         )
         if cal.get("model_trained_at") != b.get("trained_at"):
-            print("  WARNING: calibration is for a different train — re-run calibrate")
+            print(
+                "  WARNING: calibration is for a different train — "
+                "re-run ./run_presence.sh calibrate-live"
+            )
     else:
-        print("calibration: MISSING — run: ./run_presence.sh calibrate")
+        print(
+            "calibration: MISSING — run: ./run_presence.sh calibrate-live "
+            "(room EMPTY; stop ingest on :9055)"
+        )
     return 0
 
 

@@ -68,6 +68,35 @@ resolve_csv() {
   fi
 }
 
+# Live/gui/calibrate-live on :9055 need a fused multi-RX model. Falling back to a
+# stale single-RX CSI model silently scores N boards into one buffer → always OBJECT.
+require_fused_model() {
+  local mp
+  mp="$(resolve_model)"
+  if [[ ! -f "$mp" ]]; then
+    echo "No model — run ./run_presence.sh train first" >&2
+    exit 2
+  fi
+  local fusion
+  fusion="$(
+    uv_csi -c "import joblib; print(joblib.load(r'''$mp''').get('rx_fusion') or '')" 2>/dev/null || true
+  )"
+  if [[ "$fusion" != "concat" ]]; then
+    echo "Model is not multi-RX fused (rx_fusion=${fusion:-none}): $mp" >&2
+    echo "  Live on :9055 with a single-RX model mis-scores N boards → wrong OBJECT." >&2
+    echo "  Fix: interleaved ./run_presence.sh capture empty_* / occupied_*" >&2
+    echo "       ./run_presence.sh train" >&2
+    echo "       ./run_presence.sh calibrate-live" >&2
+    echo "       ./run_presence.sh live" >&2
+    exit 2
+  fi
+  if [[ ! -f "$MODELS/object_detector.joblib" ]]; then
+    echo "WARNING: fused model is outside presence_detection/models/: $mp" >&2
+    echo "  Prefer: ./run_presence.sh train  (writes $MODELS/object_detector.joblib)" >&2
+  fi
+  echo "$mp"
+}
+
 sync_from_csi() {
   if [[ -f "$CSI/models/object_detector.joblib" ]]; then
     cp -f "$CSI/models/object_detector.joblib" "$MODELS/object_detector.joblib"
@@ -124,8 +153,12 @@ case "$cmd" in
     if [[ ${#INCLUDE[@]} -eq 0 ]]; then
       INCLUDE=(--include empty,occupied)
     fi
+    # Match live default: require all N boards (no zero-pad training bins).
+    if [[ ! " ${REST[*]-} " =~ " --rx-min " && ! " ${REST[*]-} " =~ " --rx-min=" ]]; then
+      REST=(--rx-min all "${REST[@]+"${REST[@]}"}")
+    fi
     "$CSI/run_detect.sh" --train-from-db "${INCLUDE[@]}" \
-      --out "$MODELS/object_detector.joblib" "${REST[@]}"
+      --out "$MODELS/object_detector.joblib" "${REST[@]+"${REST[@]}"}"
     # train-from-db writes via train_object_detector --out; also refresh CSV copy
     if [[ -f "$CSI/exports/training_packets.csv" ]]; then
       cp -f "$CSI/exports/training_packets.csv" "$EXPORTS/training_packets.csv"
@@ -140,7 +173,8 @@ case "$cmd" in
       sync_from_csi
     fi
     echo >&2
-    echo "Next: ./run_presence.sh calibrate && ./run_presence.sh live" >&2
+    echo "Next (room EMPTY, stop ingest): ./run_presence.sh calibrate-live" >&2
+    echo "Then: ./run_presence.sh live   # or: ./run_presence.sh gui" >&2
     ;;
   calibrate)
     CSV="$(resolve_csv)"
@@ -156,11 +190,14 @@ case "$cmd" in
     # Default --fast to match ./run_presence.sh live (same EMA / FPR).
     CAL_EXTRA=("$@")
     if [[ ! " $* " =~ " --fast " && ! " $* " =~ " --no-fast " ]]; then
-      CAL_EXTRA=(--fast "${CAL_EXTRA[@]}")
+      CAL_EXTRA=(--fast "${CAL_EXTRA[@]+"${CAL_EXTRA[@]}"}")
+    fi
+    if [[ ! " $* " =~ " --fpr " && ! " $* " =~ " --fpr=" ]]; then
+      CAL_EXTRA=(--fpr 0.05 "${CAL_EXTRA[@]+"${CAL_EXTRA[@]}"}")
     fi
     # strip our sentinel if present
     OUT_EXTRA=()
-    for a in "${CAL_EXTRA[@]}"; do
+    for a in "${CAL_EXTRA[@]+"${CAL_EXTRA[@]}"}"; do
       [[ "$a" == "--no-fast" ]] && continue
       OUT_EXTRA+=("$a")
     done
@@ -168,17 +205,14 @@ case "$cmd" in
       --model "$MP" \
       --out "$MODELS/site_calibration.joblib" \
       --from-csv "$CSV" \
-      "${OUT_EXTRA[@]}"
+      "${OUT_EXTRA[@]+"${OUT_EXTRA[@]}"}"
     mkdir -p "$CSI/models"
     cp -f "$MODELS/site_calibration.joblib" "$CSI/models/site_calibration.joblib"
     echo "synced calibration → $MODELS/site_calibration.joblib" >&2
+    echo "For live domain match prefer: ./run_presence.sh calibrate-live" >&2
     ;;
   calibrate-live)
-    MP="$(resolve_model)"
-    if [[ ! -f "$MP" ]]; then
-      echo "No model — run ./run_presence.sh train first" >&2
-      exit 2
-    fi
+    MP="$(require_fused_model)"
     echo "Leave the room EMPTY. Stop ingest/live first (port :9055)." >&2
     # Match live: --fast. Longer default so slow LabPSK rates still fuse.
     CAL_EXTRA=(--fast --fpr 0.05 --seconds 120)
@@ -193,33 +227,29 @@ case "$cmd" in
     mkdir -p "$CSI/models"
     cp -f "$MODELS/site_calibration.joblib" "$CSI/models/site_calibration.joblib"
     echo "synced calibration → $MODELS/site_calibration.joblib" >&2
-    echo "Next: ./run_presence.sh live" >&2
+    echo "Next: ./run_presence.sh live   # or: ./run_presence.sh gui" >&2
     ;;
   live)
-    MP="$(resolve_model)"
+    MP="$(require_fused_model)"
     CAL="$(resolve_cal)"
-    if [[ ! -f "$MP" ]]; then
-      echo "No model — run ./run_presence.sh train first" >&2
-      exit 2
-    fi
     # Continuous scores by default (--fast). Pass --quiet for state-change only.
     LIVE_ARGS=(--model "$MP" --listen-tcp 9055 --fast)
     if [[ -n "$CAL" ]]; then
       LIVE_ARGS+=(--calibration "$CAL")
+    else
+      echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ./run_multi_ingest.sh first if it holds :9055" >&2
     exec "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
     ;;
   gui)
-    MP="$(resolve_model)"
+    MP="$(require_fused_model)"
     CAL="$(resolve_cal)"
-    if [[ ! -f "$MP" ]]; then
-      echo "No model — run ./run_presence.sh train first" >&2
-      exit 2
-    fi
     GUI_ARGS=(--model "$MP" --listen-tcp 9055 --fast --gui)
     if [[ -n "$CAL" ]]; then
       GUI_ARGS+=(--calibration "$CAL")
+    else
+      echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ingest/terminal live first if they hold :9055" >&2
     exec "$CSI/run_detect.sh" --skip-probe "${GUI_ARGS[@]}" "$@"
