@@ -396,6 +396,7 @@ class MultiRxLiveDetector:
         live_stride: int | None = None,
         fast: bool = False,
         calibration: dict | None = None,
+        rx_min: int | str | None = None,
     ) -> None:
         order = list(bundle.get("rx_sources_order") or [])
         if len(order) < 2:
@@ -425,13 +426,14 @@ class MultiRxLiveDetector:
         self.rx_sources_order = order
         self.n_features_per_rx = int(n_per)
         self.bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
-        # Live defaults to requiring every trained board (avoids zero-pad false
-        # OBJECT when one RX is late). Bundle rx_min still applies if smaller
-        # only when explicitly set higher than N (clamped).
         trained_min = int(bundle.get("rx_min") or 2)
-        self.min_rx = len(order)  # all boards for live stability
-        if trained_min > len(order):
+        # Default live: require all N trained boards (stable). Override via rx_min=.
+        if rx_min is None:
             self.min_rx = len(order)
+        elif isinstance(rx_min, str) and rx_min.strip().lower() == "all":
+            self.min_rx = len(order)
+        else:
+            self.min_rx = max(2, min(int(rx_min), len(order)))
         self._trained_min_rx = trained_min
         self.streams = {
             src: _RxFeatureBuffer(
@@ -610,10 +612,15 @@ def make_live_detector(
     threshold: float | None = None,
     fast: bool = False,
     calibration: dict | None = None,
+    rx_min: int | str | None = None,
 ) -> LiveDetector | MultiRxLiveDetector:
     if bundle.get("rx_fusion") == "concat":
         return MultiRxLiveDetector(
-            bundle, threshold=threshold, fast=fast, calibration=calibration
+            bundle,
+            threshold=threshold,
+            fast=fast,
+            calibration=calibration,
+            rx_min=rx_min,
         )
     return LiveDetector(
         bundle, threshold=threshold, fast=fast, calibration=calibration
@@ -886,6 +893,11 @@ def build_live_arg_parser(*, include_terminal_flags: bool = True) -> argparse.Ar
         metavar="PORT",
         help="Multi-C5 TCP fan-in (default 9055). Required for fused multi-RX models.",
     )
+    p.add_argument(
+        "--rx-min",
+        default="all",
+        help="Fused live: min boards with a fresh window ('all' = N trained RXs, or an int ≥2)",
+    )
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--from-file", type=Path, help="Replay CSI lines (no hardware)")
     p.add_argument("--threshold", type=float, help="Override saved threshold")
@@ -947,7 +959,11 @@ def main() -> None:
         )
 
     detector = make_live_detector(
-        bundle, threshold=args.threshold, fast=args.fast, calibration=calibration
+        bundle,
+        threshold=args.threshold,
+        fast=args.fast,
+        calibration=calibration,
+        rx_min=getattr(args, "rx_min", "all"),
     )
     print_startup_banner(
         bundle,

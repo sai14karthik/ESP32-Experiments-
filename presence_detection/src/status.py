@@ -36,6 +36,9 @@ def main() -> int:
         f"trained={b.get('trained_at')}"
     )
     print(f"  rx_fusion={b.get('rx_fusion')}  N={len(order)}  sources={order}")
+    n_per = b.get("n_features_per_rx")
+    if order and n_per:
+        print(f"  feature width={int(n_per)}×{len(order)}={int(n_per) * len(order)}")
     print(
         f"  OOF bal_acc={m.get('balanced_accuracy', float('nan')):.3f}  "
         f"grouped={g.get('balanced_accuracy', float('nan')):.3f}"

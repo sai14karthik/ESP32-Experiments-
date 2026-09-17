@@ -335,10 +335,11 @@ def calibrate(
         )
 
     # Match train-time multi-RX feature concat when the bundle was fused.
+    # Use all N trained boards (same as live default) so cal matches inference.
     if bundle.get("rx_fusion") == "concat":
         order = list(bundle.get("rx_sources_order") or [])
         bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
-        min_rx = int(bundle.get("rx_min") or 2)
+        min_rx = len(order) if order else int(bundle.get("rx_min") or 2)
         ws, got = fuse_multirx_windows(ws, bin_s=bin_s, min_rx=min_rx)
         if not ws.sources or ws.sources[0] != "fused":
             sys.exit(

@@ -1,7 +1,8 @@
 # Presence detection (ESP32-C5 CSI)
 
 **Front door:** `./run_presence.sh` — capture stays in `csi_pipeline_new/`;
-models and exports live here.
+models and exports live here. **N boards** = distinct `source_id`s (not hardcoded
+to 3). Retrain if you add/remove RXs.
 
 ```
 LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini
@@ -25,7 +26,7 @@ cd presence_detection
 ./run_presence.sh live                    # continuous P(object)
 
 ./run_presence.sh eval
-./run_presence.sh status
+./run_presence.sh status                  # shows rx_fusion + N + sources
 ```
 
 If live is still wrong after `calibrate-live` (empty median P already high), retrain with fresh captures:
@@ -54,13 +55,19 @@ If live is still wrong after `calibrate-live` (empty median P already high), ret
 | `src/` | Paths + status helper |
 | `../csi_pipeline_new/` | Ingest, features, TCP fan-in, trainers |
 
-## Flags
+## N-board behavior
 
-Train defaults to `--include empty,occupied` and multi-RX `--rx-fusion auto`.
-Pass-through examples:
+| Step | How N is chosen |
+|------|-----------------|
+| Capture | Every C5 that connects to `:9055` |
+| Train | Distinct `source_id` → width `N × per-RX` |
+| Calibrate / live | Bundle `rx_sources_order` (length N); live `--rx-min all` by default |
 
 ```bash
 ./run_presence.sh train --rx-min all
+./run_presence.sh train --rx-min 2
+./run_presence.sh live --rx-min all
+./run_presence.sh live --rx-min 2
 ./run_presence.sh calibrate-live --seconds 120 --fpr 0.02
 ./run_presence.sh live --quiet
 ```
