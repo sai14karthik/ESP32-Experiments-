@@ -4,7 +4,8 @@
 #   ./run_detect.sh                          # live serial (probes CSI first)
 #   ./run_detect.sh --gui                    # live PyQt presence window (EMPTY/OBJECT)
 #   ./run_detect.sh --gui --fast             # GUI + low-latency updates
-#   ./run_detect.sh --calibrate              # record the empty room here, set baseline+threshold
+#   ./run_detect.sh --calibrate              # USB recv, or empty rows of training CSV if no USB
+#   ./run_detect.sh --calibrate --from-csv exports/training_packets.csv  # TCP multi-RX path
 #   ./run_detect.sh --train                  # train from default sample CSV
 #   ./run_detect.sh --train-from-db          # export Postgres → train
 #   ./run_detect.sh --train-from-db --include baseline_desk,object_desk
@@ -50,20 +51,25 @@ if [[ "${1:-}" == "--ablate" ]]; then
   exit 0
 fi
 
-# Calibration needs the recv board, so find it the same way live detection does
-# rather than letting calibrate_site.py fall back to the first USB port — which
-# on this rig is often the sender.
+# Calibration: USB serial OR empty rows from a multi-RX training CSV (TCP path).
+# Wall-powered C5s have no USB — use --from-csv / auto-fallback below.
 if [[ "${1:-}" == "--calibrate" ]]; then
   shift
   CAL_ARGS=("$@")
   if [[ ! " $* " =~ " --port " && ! " $* " =~ " --from-csv " && ! " $* " =~ " --from-file " ]]; then
-    if ! RECV="$(uv_csi "$ROOT/probe_recv_port.py" --quiet --seconds 8 2>/dev/null)"; then
-      echo "No CSI_DATA on recv port (usbmodem*). Cannot calibrate." >&2
+    if RECV="$(uv_csi "$ROOT/probe_recv_port.py" --quiet --seconds 8 2>/dev/null)"; then
+      echo "auto recv port: $RECV" >&2
+      CAL_ARGS=(--port "$RECV" "$@")
+    elif [[ -f "$ROOT/exports/training_packets.csv" ]]; then
+      echo "No USB CSI — calibrating from empty rows of exports/training_packets.csv (TCP multi-RX)." >&2
+      CAL_ARGS=(--from-csv "$ROOT/exports/training_packets.csv" "$@")
+    else
+      echo "No CSI_DATA on recv port (usbmodem*) and no exports/training_packets.csv." >&2
+      echo "  TCP path: ./run_detect.sh --calibrate --from-csv exports/training_packets.csv" >&2
+      echo "  Or re-export: ./run_detect.sh --train-from-db --include empty,occupied" >&2
       echo "  Run ./run_detect.sh --diagnose" >&2
       exit 2
     fi
-    echo "auto recv port: $RECV" >&2
-    CAL_ARGS=(--port "$RECV" "$@")
   fi
   uv_csi "$ROOT/calibrate_site.py" "${CAL_ARGS[@]}"
   exit 0

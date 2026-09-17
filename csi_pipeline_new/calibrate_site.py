@@ -40,7 +40,6 @@ import joblib
 import numpy as np
 
 from csi_features import (
-    ACTIVE_IDX,
     FEATURE_VERSION,
     LABEL_EMPTY,
     LABEL_OBJECT,
@@ -49,9 +48,10 @@ from csi_features import (
     WindowSpec,
     iq_list_to_packet,
 )
+import csi_features as _csi_feat
 from csi_parse import DEFAULT_BAUD, parse_csi_line
 from detect_live import score_to_proba, score_windows
-from train_object_detector import build_windows, load_packets
+from train_object_detector import build_windows, fuse_multirx_windows, load_packets
 
 # Denser than the training stride. Windows are computed identically either way,
 # so overlapping them only samples the empty distribution more finely, which is
@@ -158,13 +158,25 @@ def collect_from_lines(path: Path, config: FeatureConfig) -> list[PacketRecord]:
     return packets
 
 
-def collect_from_csv(path: Path, config: FeatureConfig) -> list[PacketRecord]:
-    """Take only the EMPTY rows of a training CSV — object rows are ignored."""
-    packets, labels, _, _, _ = load_packets(path, config=config)
-    empty = [p for p, lab in zip(packets, labels) if lab == LABEL_EMPTY]
-    if not empty:
+def collect_from_csv(
+    path: Path, config: FeatureConfig
+) -> tuple[list[PacketRecord], list[str], list[str], list[str]]:
+    """Take only the EMPTY rows of a training CSV — object rows are ignored.
+
+    Returns packets plus the stream/group keys needed for multi-RX fusion.
+    """
+    packets, labels, session_labels, stream_keys, group_keys = load_packets(
+        path, config=config
+    )
+    keep = [i for i, lab in enumerate(labels) if lab == LABEL_EMPTY]
+    if not keep:
         sys.exit(f"No empty/baseline rows in {path}")
-    return empty
+    return (
+        [packets[i] for i in keep],
+        [session_labels[i] for i in keep],
+        [stream_keys[i] for i in keep],
+        [group_keys[i] for i in keep],
+    )
 
 
 # --------------------------------------------------------------------------
@@ -197,15 +209,25 @@ def calibrate(
     fpr: float,
     stride: int,
     fast: bool,
+    session_labels: list[str] | None = None,
+    stream_keys: list[str] | None = None,
+    group_keys: list[str] | None = None,
 ) -> dict:
     config = FeatureConfig.from_dict(bundle.get("feature_config"))
     n = len(packets)
     labels = [LABEL_EMPTY] * n
+    session_labels = session_labels or ["calibration"] * n
+    stream_keys = stream_keys or ["calibration"] * n
+    group_keys = group_keys or ["calibration"] * n
 
-    profile = np.median(np.stack([p.amp[ACTIVE_IDX] for p in packets], axis=0), axis=0)
+    profile = np.median(
+        np.stack([p.amp[_csi_feat.ACTIVE_IDX] for p in packets], axis=0), axis=0
+    )
     phase = None
     if config.use_phase:
-        phase = np.median(np.stack([p.phase[ACTIVE_IDX] for p in packets], axis=0), axis=0)
+        phase = np.median(
+            np.stack([p.phase[_csi_feat.ACTIVE_IDX] for p in packets], axis=0), axis=0
+        )
 
     spec = WindowSpec(
         size=int(bundle["window_size"]),
@@ -216,12 +238,13 @@ def calibrate(
     ws = build_windows(
         packets,
         labels,
-        ["calibration"] * n,
+        session_labels,
         spec,
         profile,
         phase,
         config=config,
-        session_keys=["calibration"] * n,
+        session_keys=stream_keys,
+        group_keys=group_keys,
     )
     if ws.X.shape[0] == 0:
         sys.exit(
@@ -229,6 +252,30 @@ def calibrate(
             f"({ws.dropped_discontiguous} dropped for time/seq gaps).\n"
             "The link is stalling. Check that csi_send is powered and in range."
         )
+
+    # Match train-time multi-RX feature concat when the bundle was fused.
+    if bundle.get("rx_fusion") == "concat":
+        order = list(bundle.get("rx_sources_order") or [])
+        bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
+        min_rx = int(bundle.get("rx_min") or 2)
+        ws, got = fuse_multirx_windows(ws, bin_s=bin_s, min_rx=min_rx)
+        if not ws.sources or ws.sources[0] != "fused":
+            sys.exit(
+                "Model expects multi-RX fused features, but calibration could not "
+                "build fused empty windows. Use --from-csv exports/training_packets.csv "
+                "(needs source_id on ≥2 boards), not a single USB serial stream."
+            )
+        if order and got != order:
+            print(
+                f"WARNING: calibration sources {got} != model order {order}",
+                file=sys.stderr,
+            )
+        n_per = bundle.get("n_features_per_rx")
+        if n_per and ws.X.shape[1] != int(n_per) * len(got):
+            sys.exit(
+                f"Fused calibration dims {ws.X.shape[1]} != "
+                f"{n_per}×{len(got)} expected by model"
+            )
 
     raw, score_kind = score_windows(bundle["pipeline"], ws.X)
     alpha = 1.0 if fast else float(bundle.get("ema_alpha", 0.3))
@@ -382,14 +429,25 @@ def main() -> None:
     print(f"features: {config.describe()}")
 
     if args.from_csv:
-        packets = collect_from_csv(args.from_csv, config)
+        packets, session_labels, stream_keys, group_keys = collect_from_csv(
+            args.from_csv, config
+        )
         source = f"csv:{args.from_csv.name}"
     elif args.from_file:
         packets = collect_from_lines(args.from_file, config)
+        session_labels = stream_keys = group_keys = None
         source = f"file:{args.from_file.name}"
     else:
+        if bundle.get("rx_fusion") == "concat":
+            sys.exit(
+                "This model was trained with multi-RX feature fusion.\n"
+                "USB serial is one board — calibrate from the training export instead:\n"
+                "  ./run_detect.sh --calibrate --from-csv exports/training_packets.csv\n"
+                "Or (after sync) let --calibrate auto-pick that CSV when no USB is present."
+            )
         port = args.port or find_port()
         packets = collect_from_serial(port, args.baud, args.seconds, config)
+        session_labels = stream_keys = group_keys = None
         source = f"serial:{port}"
 
     if len(packets) < bundle["window_size"]:
@@ -398,7 +456,16 @@ def main() -> None:
             "for one window. Is csi_send powered?"
         )
 
-    cal = calibrate(bundle, packets, fpr=args.fpr, stride=args.stride, fast=args.fast)
+    cal = calibrate(
+        bundle,
+        packets,
+        fpr=args.fpr,
+        stride=args.stride,
+        fast=args.fast,
+        session_labels=session_labels,
+        stream_keys=stream_keys,
+        group_keys=group_keys,
+    )
     cal["source"] = source
     problems = report(cal, bundle)
 
