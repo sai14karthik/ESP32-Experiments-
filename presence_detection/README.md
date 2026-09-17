@@ -22,7 +22,8 @@ cd presence_detection
 ./run_presence.sh train                   # fuse N RXs → models/object_detector.joblib
 ./run_presence.sh calibrate               # empty-room threshold → models/site_calibration.joblib
 # Ctrl+C any ./run_multi_ingest.sh first (same :9055)
-./run_presence.sh live                    # walk test EMPTY ↔ OBJECT
+./run_presence.sh live                    # continuous P(object) lines (--fast)
+./run_presence.sh live --quiet            # only EMPTY ↔ OBJECT changes
 
 ./run_presence.sh eval                    # reprint metrics anytime
 ./run_presence.sh status                  # fusion N, bal_acc, cal

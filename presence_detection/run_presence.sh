@@ -177,7 +177,8 @@ case "$cmd" in
       echo "No model — run ./run_presence.sh train first" >&2
       exit 2
     fi
-    LIVE_ARGS=(--model "$MP" --listen-tcp 9055 --fast --quiet)
+    # Continuous scores by default (--fast). Pass --quiet for state-change only.
+    LIVE_ARGS=(--model "$MP" --listen-tcp 9055 --fast)
     if [[ -n "$CAL" ]]; then
       LIVE_ARGS+=(--calibration "$CAL")
     fi
