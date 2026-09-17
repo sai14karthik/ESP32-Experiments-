@@ -382,9 +382,12 @@ class _RxFeatureBuffer:
 class MultiRxLiveDetector:
     """Live presence for models trained with ``rx_fusion=concat`` (any N boards).
 
-    Each TCP ``source_id`` keeps its own window buffer. Features are concatenated
-    in ``rx_sources_order`` (zeros if a board is briefly missing), then scored
-    with the same EMA / hysteresis as single-stream live.
+    Fault-tolerant:
+    - Scores with whatever subset is live (≥ ``min_rx``, default 1); missing
+      trained slots are zero-padded.
+    - New / DHCP-renumbered ``source_id``s hot-plug into idle trained slots for
+      this session (so add/replace works without an immediate retrain).
+    - Extra boards beyond N trained slots are ignored until you retrain.
     """
 
     def __init__(
@@ -427,14 +430,16 @@ class MultiRxLiveDetector:
         self.rx_sources_order = order
         self.n_features_per_rx = int(n_per)
         self.bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
-        trained_min = int(bundle.get("rx_min") or 2)
-        # Default live: require all N trained boards (stable). Override via rx_min=.
-        if rx_min is None:
-            self.min_rx = len(order)
+        trained_min = int(bundle.get("rx_min") or 1)
+        # Default live: any ≥1 board (fault-tolerant). Use --rx-min all to require N.
+        if rx_min is None or (
+            isinstance(rx_min, str) and rx_min.strip().lower() in ("auto", "any", "")
+        ):
+            self.min_rx = 1
         elif isinstance(rx_min, str) and rx_min.strip().lower() == "all":
             self.min_rx = len(order)
         else:
-            self.min_rx = max(2, min(int(rx_min), len(order)))
+            self.min_rx = max(1, min(int(rx_min), len(order)))
         self._trained_min_rx = trained_min
         self.streams = {
             src: _RxFeatureBuffer(
@@ -448,11 +453,12 @@ class MultiRxLiveDetector:
             for src in order
         }
         self._latest: dict[str, tuple[float, np.ndarray]] = {}
-        self._last_seen: dict[str, float] = {}
+        self._last_seen: dict[str, float] = {}  # trained slot → time
+        self._alias: dict[str, str] = {}  # live source_id → trained slot
         self._idle_warned: set[str] = set()
-        self._unknown_warned: set[str] = set()
+        self._overflow_warned: set[str] = set()
+        self._alias_noted: set[str] = set()
         self.stalls_dropped = 0
-        # Drop a board from fusion after this many seconds without packets.
         self.idle_s = max(5.0, 3.0 * self.bin_s)
 
         self.score_kind = (
@@ -498,8 +504,51 @@ class MultiRxLiveDetector:
         ]
         return min(live) if live else 0
 
+    def _slot_busy(self, slot: str, now: float) -> bool:
+        return now - self._last_seen.get(slot, 0.0) <= self.idle_s
+
+    def _resolve_slot(self, src: str, now: float) -> str | None:
+        """Map a live source_id onto a trained concat slot (hot-plug friendly)."""
+        if not src:
+            return None
+        if src in self.streams:
+            for live, slot in list(self._alias.items()):
+                if slot == src:
+                    del self._alias[live]
+                    print(
+                        f"RX {src} reclaimed trained slot (was {live})",
+                        file=sys.stderr,
+                    )
+            return src
+        if src in self._alias:
+            return self._alias[src]
+        for slot in self.rx_sources_order:
+            if self._slot_busy(slot, now):
+                continue
+            for live, s in list(self._alias.items()):
+                if s == slot:
+                    del self._alias[live]
+            self._alias[src] = slot
+            if src not in self._alias_noted:
+                self._alias_noted.add(src)
+                print(
+                    f"RX hotplug: {src} → trained slot {slot} "
+                    f"(add/replace OK; retrain later to lock new IPs)",
+                    file=sys.stderr,
+                )
+            return slot
+        if src not in self._overflow_warned:
+            self._overflow_warned.add(src)
+            print(
+                f"WARNING: extra RX {src} ignored — all "
+                f"{len(self.rx_sources_order)} trained slots busy. "
+                f"Retrain to use N+1 boards.",
+                file=sys.stderr,
+            )
+        return None
+
     def _prune_idle(self, now: float) -> list[str]:
-        """Clear buffers for silent boards; return list of currently missing IPs."""
+        """Clear buffers for silent slots; return missing trained slot ids."""
         missing: list[str] = []
         for s in self.rx_sources_order:
             last = self._last_seen.get(s)
@@ -507,20 +556,18 @@ class MultiRxLiveDetector:
                 missing.append(s)
                 if s in self._latest:
                     del self._latest[s]
-                buf = self.streams[s]
-                if buf.buf:
-                    buf.reset()
+                if self.streams[s].buf:
+                    self.streams[s].reset()
                 if s not in self._idle_warned and last is not None:
                     self._idle_warned.add(s)
                     print(
-                        f"WARNING: RX {s} silent >{self.idle_s:.1f}s — "
-                        f"dropped from fusion (need {self.min_rx}/{len(self.rx_sources_order)}). "
-                        f"Power it back, or: ./run_presence.sh live --rx-min 2",
+                        f"RX slot {s} silent >{self.idle_s:.1f}s — "
+                        f"zero-padded (still predict if ≥{self.min_rx} live).",
                         file=sys.stderr,
                     )
             elif s in self._idle_warned:
                 self._idle_warned.discard(s)
-                print(f"RX {s} back — rebuilding window…", file=sys.stderr)
+                print(f"RX slot {s} back — rebuilding window…", file=sys.stderr)
         return missing
 
     def reset(self) -> None:
@@ -528,7 +575,10 @@ class MultiRxLiveDetector:
             s.reset()
         self._latest.clear()
         self._last_seen.clear()
+        self._alias.clear()
         self._idle_warned.clear()
+        self._overflow_warned.clear()
+        self._alias_noted.clear()
         self._ema_p = None
         self._state = "empty"
 
@@ -541,6 +591,7 @@ class MultiRxLiveDetector:
             "rx_need": self.min_rx,
             "rx_missing": missing,
             "rx_total": len(self.rx_sources_order),
+            "rx_aliases": dict(self._alias),
         }
 
     def on_packet(
@@ -557,21 +608,14 @@ class MultiRxLiveDetector:
         now = arrival if arrival is not None else time.monotonic()
         src = (source_id or "").strip()
         missing = self._prune_idle(now)
-
-        if src not in self.streams:
-            if src and src not in self._unknown_warned:
-                self._unknown_warned.add(src)
-                print(
-                    f"WARNING: ignoring source_id={src!r} "
-                    f"(model expects {self.rx_sources_order})",
-                    file=sys.stderr,
-                )
+        slot = self._resolve_slot(src, now)
+        if slot is None:
             return self._not_ready(n_ready=len(self._latest), missing=missing)
 
-        self._last_seen[src] = now
-        missing = [s for s in missing if s != src]
+        self._last_seen[slot] = now
+        missing = [s for s in missing if s != slot]
 
-        got = self.streams[src].on_packet(
+        got = self.streams[slot].on_packet(
             iq,
             rssi=rssi,
             agc_gain=agc_gain,
@@ -586,7 +630,7 @@ class MultiRxLiveDetector:
                     f"per-RX feature dim {feat.shape[0]} != "
                     f"bundle n_features_per_rx={self.n_features_per_rx}"
                 )
-            self._latest[src] = (t, feat)
+            self._latest[slot] = (t, feat)
 
         if self._latest:
             t_ref = max(t for t, _ in self._latest.values())
@@ -643,7 +687,9 @@ class MultiRxLiveDetector:
             "threshold": self.threshold,
             "rx_present": present,
             "rx_total": len(self.rx_sources_order),
+            "rx_aliases": dict(self._alias),
         }
+
 
 
 def make_live_detector(
@@ -672,15 +718,10 @@ def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None
         if "rx_ready" in result:
             miss = result.get("rx_missing") or []
             miss_s = f" missing={','.join(miss)}" if miss else ""
-            hint = ""
-            need = result.get("rx_need")
-            total = result.get("rx_total")
-            if miss and need is not None and total is not None and int(need) >= int(total):
-                hint = "  (power missing RX, or: --rx-min 2)"
             return (
                 f"buffering RXs {result['rx_ready']}/{result.get('rx_need', '?')} "
                 f"(window {result.get('buffered', 0)}/{result.get('need', '?')} pkt)"
-                f"{miss_s}{hint}…"
+                f"{miss_s}…"
             )
         return (
             f"buffering {result['buffered']}/{result['need']} packets "
@@ -815,7 +856,8 @@ def print_startup_banner(
             f"multi-RX live: fuse N={len(order)} "
             f"({', '.join(order)}) — use --listen-tcp 9055 "
             f"(stop ./run_multi_ingest.sh first; same port). "
-            f"Predicts when ≥{need}/{len(order)} RXs have a fresh window.",
+            f"Fault-tolerant: predicts with ≥{need}/{len(order)} live RXs "
+            f"(missing slots zero-padded; new IPs hot-plug into idle slots).",
             file=sys.stderr,
         )
     if bundle.get("evaluation_trustworthy") is False:
@@ -948,8 +990,11 @@ def build_live_arg_parser(*, include_terminal_flags: bool = True) -> argparse.Ar
     )
     p.add_argument(
         "--rx-min",
-        default="all",
-        help="Fused live: min boards with a fresh window ('all' = N trained RXs, or an int ≥2)",
+        default="auto",
+        help=(
+            "Fused live: min boards with a fresh window "
+            "(default auto=1 fault-tolerant; 'all'=N trained; or an int ≥1)"
+        ),
     )
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--from-file", type=Path, help="Replay CSI lines (no hardware)")
@@ -1004,11 +1049,12 @@ def main() -> None:
         and bundle.get("rx_fusion") != "concat"
         and not args.from_file
     ):
-        sys.exit(
-            "Refusing --listen-tcp with a non-fused (single-RX) model.\n"
-            "  Multi-C5 TCP would dump every board into one buffer → wrong scores.\n"
-            "  Fix: cd ../presence_detection && ./run_presence.sh train\n"
-            "  (needs ≥2 source_ids in empty+occupied captures), then calibrate-live."
+        # Single-RX model on TCP is OK when only one board is connected (N=1).
+        # Warn: multiple TCP clients will share one buffer until you retrain fused.
+        print(
+            "NOTE: single-RX model on --listen-tcp (N=1 path). "
+            "Use one board, or retrain with ≥2 source_ids for multi-RX fusion.",
+            file=sys.stderr,
         )
     if (
         bundle.get("rx_fusion") == "concat"
@@ -1027,7 +1073,7 @@ def main() -> None:
         threshold=args.threshold,
         fast=args.fast,
         calibration=calibration,
-        rx_min=getattr(args, "rx_min", "all"),
+        rx_min=getattr(args, "rx_min", "auto"),
     )
     print_startup_banner(
         bundle,

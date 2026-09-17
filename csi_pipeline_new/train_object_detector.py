@@ -1110,10 +1110,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--rx-min",
-        default="2",
+        default="1",
         help=(
             "Min boards present in a time bin to keep a fused window "
-            "(integer, or 'all' = every discovered source_id). Default 2."
+            "(integer ≥1, or 'all' = every discovered source_id). "
+            "Default 1 = fault-tolerant (partial RX sets OK)."
         ),
     )
     g = p.add_argument_group("feature layout (stored in the model bundle)")
@@ -1204,14 +1205,14 @@ def main() -> None:
 
     rx_min_raw = str(args.rx_min).strip().lower()
     if rx_min_raw == "all":
-        rx_min = max(2, len(rx_sources))
+        rx_min = max(1, len(rx_sources))
     else:
         try:
             rx_min = int(rx_min_raw)
         except ValueError:
             sys.exit(f"--rx-min must be an integer or 'all', got {args.rx_min!r}")
-        if rx_min < 2:
-            sys.exit("--rx-min must be ≥ 2 (or 'all')")
+        if rx_min < 1:
+            sys.exit("--rx-min must be ≥ 1 (or 'all')")
 
     do_concat = args.rx_fusion == "concat" or (
         args.rx_fusion == "auto" and len(rx_sources) >= 2

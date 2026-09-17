@@ -38,11 +38,11 @@ cd presence_detection
 
 | Check | Expect |
 |-------|--------|
-| `status` | `rx_fusion=concat`, N = powered boards, sources = their IPs |
+| `status` | `rx_fusion=concat` (N≥2) or single-RX if trained with 1 board |
 | Empty room | mostly EMPTY / low P(presence) |
 | Person in RF path | PRESENCE / P above threshold |
-| Live line | `rx=N/N` (not stuck buffering) |
-| Logs | no `ignoring source_id=` warnings |
+| Live line | `rx=k/N` for any k in 1..N (not stuck forever) |
+| Logs | no stuck buffering when boards are up |
 
 If live is still wrong after `calibrate-live` (empty median P already high), retrain:
 
@@ -70,21 +70,21 @@ If live is still wrong after `calibrate-live` (empty median P already high), ret
 | `src/` | Paths + status helper |
 | `../csi_pipeline_new/` | Ingest, features, TCP fan-in, trainers |
 
-## N-board behavior
+## N-board behavior (fault-tolerant: 1 … max N)
 
-| Step | How N is chosen |
-|------|-----------------|
-| Capture | Every C5 that connects to `:9055` |
-| Train | Distinct `source_id` → width `N × per-RX` (`--rx-min all` by default) |
-| Calibrate / live | Bundle `rx_sources_order` (length N); live `--rx-min all` by default |
+| Boards | Train | Live |
+|--------|-------|------|
+| **1** | Single-RX model | Works on `:9055` with that one board |
+| **2…N** | Fused concat (`N ×` features) | Works with **any k in 1..N** live; missing zero-padded; new IPs hot-plug |
+| **N+1** | Retrain to expand | Extra board ignored until retrain |
 
-`calibrate` (CSV empty rows) is a fallback. Prefer **`calibrate-live`** so the
-threshold matches the room right now.
+No hardcoded max N — whatever distinct `source_id`s appear at train time.
 
 ```bash
-./run_presence.sh train --rx-min all
-./run_presence.sh train --rx-min 2
-./run_presence.sh live --rx-min all
+./run_presence.sh train                 # default --rx-min 1
+./run_presence.sh train --rx-min all    # stricter: only full-N bins
+./run_presence.sh live                  # default auto (≥1 board)
+./run_presence.sh live --rx-min all     # require every trained board
 ./run_presence.sh live --rx-min 2
 ./run_presence.sh calibrate-live --seconds 120 --fpr 0.02
 ./run_presence.sh live --quiet

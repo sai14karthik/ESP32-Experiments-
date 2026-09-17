@@ -47,26 +47,32 @@ def main() -> int:
     ov = b.get("or_vote_metrics") or {}
     if ov:
         print(f"  OR-vote bal_acc={ov.get('balanced_accuracy', float('nan')):.3f}")
-    if fusion != "concat":
+    if fusion == "concat":
         print()
         print(
-            "  BLOCKER: model is not multi-RX fused. "
-            "./run_presence.sh live/gui will refuse this model."
+            "  Live: fault-tolerant — works with 1..N boards "
+            f"(trained N={len(order)}; missing slots zero-padded)."
         )
-        print("  Fix: interleaved capture → ./run_presence.sh train")
-        return 1
+        if order:
+            print(
+                "  Note: source_id = DHCP IP. New IPs hot-plug into idle slots; "
+                "retrain to lock a new board set."
+            )
+    elif not fusion or fusion == "none":
+        print()
+        print(
+            "  Live: single-RX model (trained with 1 board). "
+            "Works with 1 board on :9055; capture with ≥2 boards and retrain for multi-RX."
+        )
+    else:
+        print()
+        print(f"  WARNING: unexpected rx_fusion={fusion!r}")
     if b.get("evaluation_trustworthy") is False:
         print()
         print(
             f"  WARNING: metrics confounded — {b.get('evaluation_note', '')}"
         )
         print("  Capture more interleaved empty_*/occupied_* then retrain.")
-    if order:
-        print()
-        print(
-            "  Note: source_id = DHCP IP. If a board gets a new lease, "
-            "retrain (IPs must match sources above)."
-        )
     print()
     if cp.is_file():
         cal = joblib.load(cp)

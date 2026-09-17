@@ -68,33 +68,39 @@ resolve_csv() {
   fi
 }
 
-# Live/gui/calibrate-live on :9055 need a fused multi-RX model. Falling back to a
-# stale single-RX CSI model silently scores N boards into one buffer → always PRESENCE.
-require_fused_model() {
+# Live/gui/calibrate-live need a usable presence model.
+# - N≥2 train → rx_fusion=concat (multi-RX)
+# - N=1 train → single-RX (rx_fusion empty) — still valid on :9055 with one board
+require_presence_model() {
   local mp
   mp="$(resolve_model)"
   if [[ ! -f "$mp" ]]; then
     echo "No model — run ./run_presence.sh train first" >&2
     exit 2
   fi
-  local fusion
+  local fusion nsrc
   fusion="$(
     uv_csi -c "import joblib; print(joblib.load(r'''$mp''').get('rx_fusion') or '')" 2>/dev/null || true
   )"
-  if [[ "$fusion" != "concat" ]]; then
-    echo "Model is not multi-RX fused (rx_fusion=${fusion:-none}): $mp" >&2
-    echo "  Live on :9055 with a single-RX model mis-scores N boards → wrong PRESENCE." >&2
-    echo "  Fix: interleaved ./run_presence.sh capture empty_* / occupied_*" >&2
-    echo "       ./run_presence.sh train" >&2
-    echo "       ./run_presence.sh calibrate-live" >&2
-    echo "       ./run_presence.sh live" >&2
-    exit 2
+  nsrc="$(
+    uv_csi -c "import joblib; b=joblib.load(r'''$mp'''); print(len(b.get('rx_sources_order') or []))" 2>/dev/null || true
+  )"
+  if [[ "$fusion" == "concat" ]]; then
+    if [[ ! -f "$MODELS/object_detector.joblib" ]]; then
+      echo "WARNING: fused model is outside presence_detection/models/: $mp" >&2
+    fi
+    echo "$mp"
+    return 0
   fi
-  if [[ ! -f "$MODELS/object_detector.joblib" ]]; then
-    echo "WARNING: fused model is outside presence_detection/models/: $mp" >&2
-    echo "  Prefer: ./run_presence.sh train  (writes $MODELS/object_detector.joblib)" >&2
+  # Single-RX model (trained with 1 board) — OK for N=1 live.
+  if [[ -z "$fusion" || "$fusion" == "none" || "$fusion" == "None" ]]; then
+    echo "model: single-RX (N=1). Live works with one board; add boards → retrain." >&2
+    echo "$mp"
+    return 0
   fi
-  echo "$mp"
+  echo "Unrecognized model fusion='$fusion' at $mp" >&2
+  echo "  Fix: ./run_presence.sh capture … && ./run_presence.sh train" >&2
+  exit 2
 }
 
 sync_from_csi() {
@@ -153,9 +159,9 @@ case "$cmd" in
     if [[ ${#INCLUDE[@]} -eq 0 ]]; then
       INCLUDE=(--include empty,occupied)
     fi
-    # Match live default: require all N boards (no zero-pad training bins).
+    # Match live: fault-tolerant partial RX sets (min 1 board per bin).
     if [[ ! " ${REST[*]-} " =~ " --rx-min " && ! " ${REST[*]-} " =~ " --rx-min=" ]]; then
-      REST=(--rx-min all "${REST[@]+"${REST[@]}"}")
+      REST=(--rx-min 1 "${REST[@]+"${REST[@]}"}")
     fi
     "$CSI/run_detect.sh" --train-from-db "${INCLUDE[@]}" \
       --out "$MODELS/object_detector.joblib" "${REST[@]+"${REST[@]}"}"
@@ -212,7 +218,7 @@ case "$cmd" in
     echo "For live domain match prefer: ./run_presence.sh calibrate-live" >&2
     ;;
   calibrate-live)
-    MP="$(require_fused_model)"
+    MP="$(require_presence_model)"
     echo "Leave the room EMPTY. Stop ingest/live first (port :9055)." >&2
     # Match live: --fast. Longer default so slow LabPSK rates still fuse.
     CAL_EXTRA=(--fast --fpr 0.05 --seconds 120)
@@ -230,7 +236,7 @@ case "$cmd" in
     echo "Next: ./run_presence.sh live   # or: ./run_presence.sh gui" >&2
     ;;
   live)
-    MP="$(require_fused_model)"
+    MP="$(require_presence_model)"
     CAL="$(resolve_cal)"
     # Continuous scores by default (--fast). Pass --quiet for state-change only.
     LIVE_ARGS=(--model "$MP" --listen-tcp 9055 --fast)
@@ -243,7 +249,7 @@ case "$cmd" in
     exec "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
     ;;
   gui)
-    MP="$(require_fused_model)"
+    MP="$(require_presence_model)"
     CAL="$(resolve_cal)"
     GUI_ARGS=(--model "$MP" --listen-tcp 9055 --fast --gui)
     if [[ -n "$CAL" ]]; then

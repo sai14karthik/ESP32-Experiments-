@@ -402,10 +402,10 @@ def main(argv: list[str] | None = None) -> None:
         and bundle.get("rx_fusion") != "concat"
         and not args.from_file
     ):
-        sys.exit(
-            "Refusing --listen-tcp with a non-fused (single-RX) model.\n"
-            "  Fix: cd ../presence_detection && ./run_presence.sh train && "
-            "./run_presence.sh calibrate-live"
+        print(
+            "NOTE: single-RX model on --listen-tcp (N=1 path). "
+            "Use one board, or retrain with ≥2 boards for multi-RX fusion.",
+            file=sys.stderr,
         )
 
     detector = make_live_detector(
@@ -413,7 +413,7 @@ def main(argv: list[str] | None = None) -> None:
         threshold=args.threshold,
         fast=args.fast,
         calibration=calibration,
-        rx_min=getattr(args, "rx_min", "all"),
+        rx_min=getattr(args, "rx_min", "auto"),
     )
     print_startup_banner(
         bundle,

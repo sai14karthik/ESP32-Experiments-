@@ -283,6 +283,7 @@ def test_multirx_live_detector(out_dir: Path) -> None:
     bundle = joblib.load(model_path)
     det = make_live_detector(bundle, fast=True)
     assert_true(isinstance(det, MultiRxLiveDetector), "expected MultiRxLiveDetector")
+    assert_true(det.min_rx == 1, f"default min_rx should be 1, got {det.min_rx}")
     configure_from_iq_len(IQ_LEN)
 
     ready = None
@@ -306,8 +307,69 @@ def test_multirx_live_detector(out_dir: Path) -> None:
     print(
         f"  live MultiRx: OK  state={ready['state']}  "
         f"rx={ready.get('rx_present')}/{ready.get('rx_total')}  "
-        f"p={ready.get('p_object')}"
+        f"p={ready.get('p_presence', ready.get('p_object'))}"
     )
+
+    # Remove one RX — default fault-tolerant live should keep predicting.
+    det.idle_s = 0.4
+    last = None
+    for k in range(bundle["window_size"] + 8):
+        for src in sources[:2]:
+            iq = [int(x) for x in _iq(500 + k * 3 + hash(src) % 7, occupied=True).split(",")]
+            last = det.on_packet(
+                iq,
+                source_id=src,
+                rssi=-40.0,
+                agc_gain=10.0,
+                fft_gain=20.0,
+                seq=k,
+                arrival=t0 + 50 + k * 0.08,
+            )
+    assert_true(last is not None and last.get("ready"), f"2/3 not ready: {last}")
+    assert_true(last.get("rx_present", 0) >= 1, f"rx_present after remove: {last}")
+    print(f"  live remove-1: OK  rx={last.get('rx_present')}/{last.get('rx_total')}")
+
+    # Only 1 of N — must still predict (min_rx=1).
+    det1 = make_live_detector(bundle, fast=True)
+    det1.idle_s = 0.4
+    last = None
+    for k in range(bundle["window_size"] + 8):
+        src = sources[0]
+        iq = [int(x) for x in _iq(700 + k * 2, occupied=False).split(",")]
+        last = det1.on_packet(
+            iq,
+            source_id=src,
+            rssi=-41.0,
+            agc_gain=10.0,
+            fft_gain=20.0,
+            seq=k,
+            arrival=t0 + 200 + k * 0.08,
+        )
+    assert_true(last is not None and last.get("ready"), f"1/3 not ready: {last}")
+    assert_true(last.get("rx_present") == 1, f"expected rx_present=1: {last}")
+    print(f"  live only-1: OK  rx={last.get('rx_present')}/{last.get('rx_total')}")
+
+    # Hot-plug a new IP into the idle third slot.
+    det2 = make_live_detector(bundle, fast=True)
+    det2.idle_s = 0.4
+    new_ip = "10.9.9.9"
+    last = None
+    for k in range(bundle["window_size"] + 5):
+        live_srcs = [sources[0], sources[1], new_ip]
+        for src in live_srcs:
+            iq = [int(x) for x in _iq(900 + k * 5 + hash(src) % 11, occupied=False).split(",")]
+            last = det2.on_packet(
+                iq,
+                source_id=src,
+                rssi=-42.0,
+                agc_gain=10.0,
+                fft_gain=20.0,
+                seq=k,
+                arrival=3000.0 + k * 0.08,
+            )
+    assert_true(last is not None and last.get("ready"), f"hotplug not ready: {last}")
+    assert_true(new_ip in (last.get("rx_aliases") or {}), f"no alias: {last}")
+    print(f"  live hotplug: OK  aliases={last.get('rx_aliases')}")
 
 
 def main() -> int:
