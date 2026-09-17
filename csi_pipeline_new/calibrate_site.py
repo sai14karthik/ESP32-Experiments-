@@ -12,7 +12,7 @@ So both have to come from the target site. This does that, using a recording of
 the empty room only:
 
     baseline    median amplitude per active subcarrier over the recording
-    threshold   the (1 - fpr) quantile of P(object) on those same windows
+    threshold   the (1 - fpr) quantile of P(presence) on those same windows
 
 Neither step needs a labelled example of an object, which is what makes it an
 install procedure rather than a second training run. You put the boards where
@@ -448,7 +448,7 @@ def report(cal: dict, bundle: dict) -> int:
     if kind == "predict_proba" and es["median"] > 0.4:
         problems += 1
         print(
-            "\nWARNING: empty-room median P(object) is already high "
+            "\nWARNING: empty-room median P(presence) is already high "
             f"({es['median']:.3f}). Live will look wrong until you retrain "
             "with fresh empty/occupied captures from this room:\n"
             "  ./run_presence.sh capture empty_now\n"
@@ -469,7 +469,7 @@ def report(cal: dict, bundle: dict) -> int:
     if score_to_proba(es["median"], kind) >= 0.5:
         problems += 1
         print(
-            "\nNOTE: the model calls the median empty window an OBJECT in absolute\n"
+            "\nNOTE: the model calls the median empty window PRESENCE in absolute\n"
             "      terms. That is expected at a site it was not trained on, and is\n"
             "      exactly what this calibration corrects: the threshold below is\n"
             "      set from this room's own distribution, not from training."

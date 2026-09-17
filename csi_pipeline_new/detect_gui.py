@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyQt live presence window for empty vs object detection.
+"""PyQt live presence window (EMPTY vs PRESENCE).
 
 Supports USB serial or multi-RX TCP (:9055) for fused models.
 
@@ -43,9 +43,9 @@ from detect_live import (
 
 HISTORY_SECONDS = 90.0
 EMPTY_BG = "#1b3a2f"
-OBJECT_BG = "#4a1c1c"
+PRESENCE_BG = "#4a1c1c"
 EMPTY_FG = "#7dffa3"
-OBJECT_FG = "#ff8a8a"
+PRESENCE_FG = "#ff8a8a"
 
 
 class DetectWorker(QThread):
@@ -214,7 +214,7 @@ class PresenceWindow(QMainWindow):
         layout.addWidget(self.state_label)
 
         row = QHBoxLayout()
-        self.p_label = QLabel("P(object) = —")
+        self.p_label = QLabel("P(presence) = —")
         self.p_label.setFont(QFont("", 16))
         row.addWidget(self.p_label)
         row.addStretch(1)
@@ -236,7 +236,7 @@ class PresenceWindow(QMainWindow):
 
         pg.setConfigOptions(antialias=True, foreground="#ddd", background="#121212")
         self.plot = pg.PlotWidget()
-        self.plot.setLabel("left", "P(object)")
+        self.plot.setLabel("left", "P(presence)")
         self.plot.setLabel("bottom", "seconds")
         self.plot.setYRange(0.0, 1.0, padding=0.0)
         self.plot.enableAutoRange(axis="y", enable=False)
@@ -273,9 +273,10 @@ class PresenceWindow(QMainWindow):
         self.worker.start()
 
     def _apply_state_style(self, state: str) -> None:
-        if state == "object":
-            bg, fg = OBJECT_BG, OBJECT_FG
-            text = "OBJECT"
+        # Accept legacy "object" from older payloads.
+        if state in ("presence", "object"):
+            bg, fg = PRESENCE_BG, PRESENCE_FG
+            text = "PRESENCE"
         elif state == "empty":
             bg, fg = EMPTY_BG, EMPTY_FG
             text = "EMPTY"
@@ -325,16 +326,16 @@ class PresenceWindow(QMainWindow):
                 buffered = payload.get("buffered", 0)
                 need = payload.get("need", self.detector.window_size)
                 self.state_label.setText(f"BUFFER {buffered}/{need}")
-            self.p_label.setText("P(object) = —")
+            self.p_label.setText("P(presence) = —")
             self.bar.setValue(0)
             self.on_status("waiting  ·  " + "  ".join(bits))
             return
 
         state = payload.get("state", "empty")
-        p = float(payload.get("p_object", 0.0))
+        p = float(payload.get("p_presence", payload.get("p_object", 0.0)))
         thr = float(payload.get("threshold", self.detector.threshold))
         self._apply_state_style(state)
-        self.p_label.setText(f"P(object) = {p:.3f}")
+        self.p_label.setText(f"P(presence) = {p:.3f}")
         self.thr_label.setText(f"threshold = {thr:.3f}")
         self.bar.setValue(int(round(max(0.0, min(1.0, p)) * 1000)))
 

@@ -69,7 +69,7 @@ resolve_csv() {
 }
 
 # Live/gui/calibrate-live on :9055 need a fused multi-RX model. Falling back to a
-# stale single-RX CSI model silently scores N boards into one buffer → always OBJECT.
+# stale single-RX CSI model silently scores N boards into one buffer → always PRESENCE.
 require_fused_model() {
   local mp
   mp="$(resolve_model)"
@@ -83,7 +83,7 @@ require_fused_model() {
   )"
   if [[ "$fusion" != "concat" ]]; then
     echo "Model is not multi-RX fused (rx_fusion=${fusion:-none}): $mp" >&2
-    echo "  Live on :9055 with a single-RX model mis-scores N boards → wrong OBJECT." >&2
+    echo "  Live on :9055 with a single-RX model mis-scores N boards → wrong PRESENCE." >&2
     echo "  Fix: interleaved ./run_presence.sh capture empty_* / occupied_*" >&2
     echo "       ./run_presence.sh train" >&2
     echo "       ./run_presence.sh calibrate-live" >&2

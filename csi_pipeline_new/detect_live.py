@@ -179,7 +179,7 @@ class LiveDetector:
             # A calibrated threshold can land near 0 or 1, where a fixed band
             # runs off the end of the scale: with threshold 0.01 the exit point
             # is -0.05, which no probability is ever below, so the state
-            # machine latches on OBJECT forever. Shrink the band to fit.
+            # machine latches on PRESENCE forever. Shrink the band to fit.
             self._enter_at = min(self._enter_at, 1.0 - PROBA_EPS)
             self._exit_at = max(self._exit_at, PROBA_EPS)
         self.buf: deque = deque(maxlen=self.window_size)
@@ -274,13 +274,14 @@ class LiveDetector:
         s = self._ema_p
         if self._state == "empty":
             if s >= self._enter_at:
-                self._state = "object"
+                self._state = "presence"
         elif s <= self._exit_at:
             self._state = "empty"
 
         return {
             "ready": True,
-            "p_object": round(score_to_proba(s, self.score_kind), 4),
+            "p_presence": round(score_to_proba(s, self.score_kind), 4),
+            "p_object": round(score_to_proba(s, self.score_kind), 4),  # alias
             "p_raw": round(score_to_proba(raw, self.score_kind), 4),
             "score": round(s, 4),
             "score_kind": self.score_kind,
@@ -589,13 +590,14 @@ class MultiRxLiveDetector:
         s = self._ema_p
         if self._state == "empty":
             if s >= self._enter_at:
-                self._state = "object"
+                self._state = "presence"
         elif s <= self._exit_at:
             self._state = "empty"
 
         return {
             "ready": True,
-            "p_object": round(score_to_proba(s, self.score_kind), 4),
+            "p_presence": round(score_to_proba(s, self.score_kind), 4),
+            "p_object": round(score_to_proba(s, self.score_kind), 4),  # alias
             "p_raw": round(score_to_proba(raw, self.score_kind), 4),
             "score": round(s, 4),
             "score_kind": self.score_kind,
@@ -648,11 +650,11 @@ def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None
         extra += f" rx={result['rx_present']}/{result.get('rx_total', '?')}"
     if result.get("score_kind") == "decision_function":
         return (
-            f"{tag:6s}  score={result['score']:+7.3f}  thr={result['threshold']:+.3f}  "
-            f"p={result['p_object']:.4f}{extra}"
+            f"{tag:8s}  score={result['score']:+7.3f}  thr={result['threshold']:+.3f}  "
+            f"p={result.get('p_presence', result['p_object']):.4f}{extra}"
         )
     return (
-        f"{tag:6s}  P(object)={result['p_object']:.3f}  "
+        f"{tag:8s}  P(presence)={result.get('p_presence', result['p_object']):.3f}  "
         f"raw={result['p_raw']:.3f}  thr={result['threshold']:.3f}{extra}"
     )
 

@@ -184,7 +184,7 @@ Read the output before trusting it:
 ./run_detect.sh --quiet
 ```
 
-Remove object → should say **EMPTY**. Put object back → **OBJECT** (~2 s first result at the measured ~13.6 pkt/s in-burst rate, then updates every 15 packets — or every packet with `--fast`).
+Remove presence from the path → should say **EMPTY**. Person/presence in path → **PRESENCE** (~2 s first result at the measured ~13.6 pkt/s in-burst rate, then updates every 15 packets — or every packet with `--fast`).
 
 **Already have `baseline_1hr` / `object_1hr` in Postgres?** Those two sessions are the confounded pair described above; training on them alone will produce a model whose score cannot be interpreted. Capture interleaved rounds and combine: `./run_detect.sh --train-from-db --exclude 1hr`.
 

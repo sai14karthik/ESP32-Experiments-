@@ -313,8 +313,8 @@ That last line is the one that matters. Splitting the **baseline session against
 Output example:
 
 ```text
-EMPTY   P(object)=0.12  raw=0.08  thr=0.83  seq=32090 rssi=-53
-OBJECT  P(object)=0.91  raw=0.88  thr=0.83  seq=17201 rssi=-47
+EMPTY      P(presence)=0.12  raw=0.08  thr=0.83  seq=32090 rssi=-53
+PRESENCE   P(presence)=0.91  raw=0.88  thr=0.83  seq=17201 rssi=-47
 ```
 
 Waits for **30 packets** (~2 s at the measured ~13.6 pkt/s in-burst rate) before the first prediction, then updates every **15 packets** — or every packet with `--fast`. A gap longer than the window span resets the buffer rather than predicting across a stall.

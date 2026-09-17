@@ -2,7 +2,7 @@
 # Real-time CSI object detection (uv + csi dependency group).
 #
 #   ./run_detect.sh                          # live serial (probes CSI first)
-#   ./run_detect.sh --gui                    # live PyQt presence window (EMPTY/OBJECT)
+#   ./run_detect.sh --gui                    # live PyQt presence window (EMPTY/PRESENCE)
 #   ./run_detect.sh --gui --fast             # GUI + low-latency updates
 #   ./run_detect.sh --calibrate              # USB recv, or empty rows of training CSV if no USB
 #   ./run_detect.sh --calibrate --from-csv exports/training_packets.csv  # TCP multi-RX path

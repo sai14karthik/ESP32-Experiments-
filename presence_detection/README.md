@@ -28,7 +28,7 @@ cd presence_detection
 
 # Leave room EMPTY; stop ingest (frees :9055):
 ./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
-./run_presence.sh live                    # continuous P(object)
+./run_presence.sh live                    # continuous P(presence)
 # or: ./run_presence.sh gui               # PyQt dashboard
 
 ./run_presence.sh eval
@@ -39,8 +39,8 @@ cd presence_detection
 | Check | Expect |
 |-------|--------|
 | `status` | `rx_fusion=concat`, N = powered boards, sources = their IPs |
-| Empty room | mostly EMPTY / low P(object) |
-| Person/object in RF path | OBJECT / P above threshold |
+| Empty room | mostly EMPTY / low P(presence) |
+| Person in RF path | PRESENCE / P above threshold |
 | Live line | `rx=N/N` (not stuck buffering) |
 | Logs | no `ignoring source_id=` warnings |
 
