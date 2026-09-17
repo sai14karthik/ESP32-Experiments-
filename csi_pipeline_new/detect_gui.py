@@ -319,9 +319,13 @@ class PresenceWindow(QMainWindow):
             # buffer / multi-RX progress so the user sees fill status.
             self._apply_state_style("waiting")
             if "rx_ready" in payload:
-                self.state_label.setText(
-                    f"RX {payload.get('rx_ready', 0)}/{payload.get('rx_need', '?')}"
-                )
+                miss = payload.get("rx_missing") or []
+                label = f"RX {payload.get('rx_ready', 0)}/{payload.get('rx_need', '?')}"
+                if miss:
+                    label += f"\nmissing {miss[0]}" + (
+                        f" +{len(miss)-1}" if len(miss) > 1 else ""
+                    )
+                self.state_label.setText(label)
             else:
                 buffered = payload.get("buffered", 0)
                 need = payload.get("need", self.detector.window_size)

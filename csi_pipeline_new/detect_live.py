@@ -448,8 +448,12 @@ class MultiRxLiveDetector:
             for src in order
         }
         self._latest: dict[str, tuple[float, np.ndarray]] = {}
+        self._last_seen: dict[str, float] = {}
+        self._idle_warned: set[str] = set()
         self._unknown_warned: set[str] = set()
         self.stalls_dropped = 0
+        # Drop a board from fusion after this many seconds without packets.
+        self.idle_s = max(5.0, 3.0 * self.bin_s)
 
         self.score_kind = (
             calibration.get("score_kind", "predict_proba")
@@ -485,14 +489,59 @@ class MultiRxLiveDetector:
 
     @property
     def buffered(self) -> int:
-        return min((len(s.buf) for s in self.streams.values()), default=0)
+        """Min fill among RXs that are currently live (recent packets)."""
+        now = time.monotonic()
+        live = [
+            len(self.streams[s].buf)
+            for s in self.rx_sources_order
+            if now - self._last_seen.get(s, 0.0) <= self.idle_s
+        ]
+        return min(live) if live else 0
+
+    def _prune_idle(self, now: float) -> list[str]:
+        """Clear buffers for silent boards; return list of currently missing IPs."""
+        missing: list[str] = []
+        for s in self.rx_sources_order:
+            last = self._last_seen.get(s)
+            if last is None or now - last > self.idle_s:
+                missing.append(s)
+                if s in self._latest:
+                    del self._latest[s]
+                buf = self.streams[s]
+                if buf.buf:
+                    buf.reset()
+                if s not in self._idle_warned and last is not None:
+                    self._idle_warned.add(s)
+                    print(
+                        f"WARNING: RX {s} silent >{self.idle_s:.1f}s — "
+                        f"dropped from fusion (need {self.min_rx}/{len(self.rx_sources_order)}). "
+                        f"Power it back, or: ./run_presence.sh live --rx-min 2",
+                        file=sys.stderr,
+                    )
+            elif s in self._idle_warned:
+                self._idle_warned.discard(s)
+                print(f"RX {s} back — rebuilding window…", file=sys.stderr)
+        return missing
 
     def reset(self) -> None:
         for s in self.streams.values():
             s.reset()
         self._latest.clear()
+        self._last_seen.clear()
+        self._idle_warned.clear()
         self._ema_p = None
         self._state = "empty"
+
+    def _not_ready(self, *, n_ready: int, missing: list[str]) -> dict:
+        return {
+            "ready": False,
+            "buffered": self.buffered,
+            "need": self.window_size,
+            "rx_ready": n_ready,
+            "rx_need": self.min_rx,
+            "rx_missing": missing,
+            "rx_total": len(self.rx_sources_order),
+        }
 
     def on_packet(
         self,
@@ -505,7 +554,10 @@ class MultiRxLiveDetector:
         seq: int | None = None,
         arrival: float | None = None,
     ) -> dict | None:
+        now = arrival if arrival is not None else time.monotonic()
         src = (source_id or "").strip()
+        missing = self._prune_idle(now)
+
         if src not in self.streams:
             if src and src not in self._unknown_warned:
                 self._unknown_warned.add(src)
@@ -514,13 +566,10 @@ class MultiRxLiveDetector:
                     f"(model expects {self.rx_sources_order})",
                     file=sys.stderr,
                 )
-            return {
-                "ready": False,
-                "buffered": self.buffered,
-                "need": self.window_size,
-                "rx_ready": len(self._latest),
-                "rx_need": self.min_rx,
-            }
+            return self._not_ready(n_ready=len(self._latest), missing=missing)
+
+        self._last_seen[src] = now
+        missing = [s for s in missing if s != src]
 
         got = self.streams[src].on_packet(
             iq,
@@ -546,13 +595,7 @@ class MultiRxLiveDetector:
 
         n_ready = len(self._latest)
         if n_ready < self.min_rx:
-            return {
-                "ready": False,
-                "buffered": self.buffered,
-                "need": self.window_size,
-                "rx_ready": n_ready,
-                "rx_need": self.min_rx,
-            }
+            return self._not_ready(n_ready=n_ready, missing=missing)
 
         if got is None:
             return None
@@ -568,13 +611,8 @@ class MultiRxLiveDetector:
             else:
                 parts.append(np.zeros(self.n_features_per_rx, dtype=np.float64))
         if present < self.min_rx:
-            return {
-                "ready": False,
-                "buffered": self.buffered,
-                "need": self.window_size,
-                "rx_ready": present,
-                "rx_need": self.min_rx,
-            }
+            still_missing = [s for s in self.rx_sources_order if s not in self._latest]
+            return self._not_ready(n_ready=present, missing=still_missing or missing)
 
         fused = np.concatenate(parts).reshape(1, -1)
         scores, kind = score_windows(self.pipe, fused, kind=self.score_kind)
@@ -632,9 +670,17 @@ def make_live_detector(
 def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None) -> str:
     if not result.get("ready"):
         if "rx_ready" in result:
+            miss = result.get("rx_missing") or []
+            miss_s = f" missing={','.join(miss)}" if miss else ""
+            hint = ""
+            need = result.get("rx_need")
+            total = result.get("rx_total")
+            if miss and need is not None and total is not None and int(need) >= int(total):
+                hint = "  (power missing RX, or: --rx-min 2)"
             return (
                 f"buffering RXs {result['rx_ready']}/{result.get('rx_need', '?')} "
-                f"(window {result.get('buffered', 0)}/{result.get('need', '?')} pkt)…"
+                f"(window {result.get('buffered', 0)}/{result.get('need', '?')} pkt)"
+                f"{miss_s}{hint}…"
             )
         return (
             f"buffering {result['buffered']}/{result['need']} packets "
@@ -997,6 +1043,8 @@ def main() -> None:
     )
 
     last_state: str | None = None
+    last_buf_line: str | None = None
+    last_buf_at = 0.0
     eval_true: list[str] = []
     eval_pred: list[str] = []
 
@@ -1006,7 +1054,7 @@ def main() -> None:
         *,
         source_id: str | None = None,
     ) -> None:
-        nonlocal last_state
+        nonlocal last_state, last_buf_line, last_buf_at
         meta = meta or {}
         sid = source_id or meta.get("source_id")
         kwargs = dict(
@@ -1023,12 +1071,16 @@ def main() -> None:
             return
         if not result.get("ready"):
             if not args.quiet and not args.eval:
-                print(
-                    format_line(result, seq=meta.get("seq"), rssi=meta.get("rssi")),
-                    flush=True,
-                )
+                line = format_line(result, seq=meta.get("seq"), rssi=meta.get("rssi"))
+                now = time.monotonic()
+                # Throttle identical buffering spam (e.g. waiting on a missing RX).
+                if line != last_buf_line or now - last_buf_at >= 2.0:
+                    print(line, flush=True)
+                    last_buf_line = line
+                    last_buf_at = now
             return
 
+        last_buf_line = None
         state = result["state"]
         if args.eval and meta.get("true_label"):
             eval_true.append(meta["true_label"])
