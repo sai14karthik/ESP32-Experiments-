@@ -179,8 +179,8 @@ case "$cmd" in
       exit 2
     fi
     echo "Leave the room EMPTY. Stop ingest/live first (port :9055)." >&2
-    # Match live: --fast; stricter FPR for less false OBJECT.
-    CAL_EXTRA=(--fast --fpr 0.05 --seconds 90)
+    # Match live: --fast. Longer default so slow LabPSK rates still fuse.
+    CAL_EXTRA=(--fast --fpr 0.05 --seconds 120)
     if [[ $# -gt 0 ]]; then
       CAL_EXTRA+=("$@")
     fi

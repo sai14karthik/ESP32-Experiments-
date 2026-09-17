@@ -335,11 +335,24 @@ def calibrate(
         )
 
     # Match train-time multi-RX feature concat when the bundle was fused.
-    # Use all N trained boards (same as live default) so cal matches inference.
+    # Prefer train's rx_min (often 2) so slow links still produce enough bins;
+    # live can still require all N via --rx-min all.
     if bundle.get("rx_fusion") == "concat":
         order = list(bundle.get("rx_sources_order") or [])
         bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
-        min_rx = len(order) if order else int(bundle.get("rx_min") or 2)
+        # Longer bins when packet rate is low (common on LabPSK).
+        if len(packets) > 0 and order:
+            span = None
+            ts = [p.host_ts for p in packets if p.host_ts is not None]
+            if len(ts) >= 2:
+                span = max(ts) - min(ts)
+            rate = len(packets) / max(span or 1.0, 1.0)
+            per_rx_rate = rate / max(len(order), 1)
+            if per_rx_rate < 15.0:
+                bin_s = max(bin_s, 2.0)
+        trained_min = int(bundle.get("rx_min") or 2)
+        min_rx = min(trained_min, len(order)) if order else trained_min
+        min_rx = max(2, min_rx)
         ws, got = fuse_multirx_windows(ws, bin_s=bin_s, min_rx=min_rx)
         if not ws.sources or ws.sources[0] != "fused":
             sys.exit(
