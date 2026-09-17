@@ -25,3 +25,6 @@
 [submodule "esphome-wifi-csi"]
 	path = esphome-wifi-csi
 	url = https://github.com/PeterkoCZ91/esphome-wifi-csi
+[submodule "SeeedStudio-XIAO-ESP32S3-Sense-camera"]
+	path = SeeedStudio-XIAO-ESP32S3-Sense-camera
+	url = https://github.com/limengdu/SeeedStudio-XIAO-ESP32S3-Sense-camera
