@@ -20,26 +20,35 @@ cd presence_detection
 # interleave more empty_* / occupied_* …
 
 ./run_presence.sh train                   # fuse N RXs → models/object_detector.joblib
-./run_presence.sh calibrate               # empty-room threshold → models/site_calibration.joblib
-# Ctrl+C any ./run_multi_ingest.sh first (same :9055)
-./run_presence.sh live                    # continuous P(object) lines (--fast)
-./run_presence.sh live --quiet            # only EMPTY ↔ OBJECT changes
+# Leave room EMPTY, stop ingest/live:
+./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
+./run_presence.sh live                    # continuous P(object)
 
-./run_presence.sh eval                    # reprint metrics anytime
-./run_presence.sh status                  # fusion N, bal_acc, cal
+./run_presence.sh eval
+./run_presence.sh status
+```
+
+If live is still wrong after `calibrate-live` (empty median P already high), retrain with fresh captures:
+
+```bash
+./run_presence.sh capture empty_now
+./run_presence.sh capture occupied_now
+./run_presence.sh train
+./run_presence.sh calibrate-live
+./run_presence.sh live
 ```
 
 ## Continuous improvement
 
 1. When live is wrong, immediately `./run_presence.sh capture empty_miss_…` or `occupied_miss_…`
-2. `./run_presence.sh train` → `calibrate` → `live` again  
-3. Watch **OOF / grouped bal_acc** via `./run_presence.sh eval` — want stable or rising (~0.70 today)
+2. `./run_presence.sh train` → `calibrate-live` → `live` again  
+3. Watch **OOF / grouped bal_acc** via `./run_presence.sh eval` — want stable or rising
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| `run_presence.sh` | Capture / train / calibrate / live / eval |
+| `run_presence.sh` | Capture / train / calibrate-live / live / eval |
 | `models/` | `object_detector.joblib`, `site_calibration.joblib` |
 | `exports/` | Synced `training_packets.csv` |
 | `src/` | Paths + status helper |
@@ -52,6 +61,6 @@ Pass-through examples:
 
 ```bash
 ./run_presence.sh train --rx-min all
-./run_presence.sh train --include empty,occupied --source-id 10.128.93.29
-./run_presence.sh live --threshold 0.25
+./run_presence.sh calibrate-live --seconds 120 --fpr 0.02
+./run_presence.sh live --quiet
 ```

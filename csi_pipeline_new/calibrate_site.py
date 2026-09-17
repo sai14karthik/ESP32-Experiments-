@@ -179,6 +179,87 @@ def collect_from_csv(
     )
 
 
+def collect_from_tcp(
+    port: int,
+    seconds: float,
+    config: FeatureConfig,
+    *,
+    expected_sources: list[str] | None = None,
+) -> tuple[list[PacketRecord], list[str], list[str], list[str]]:
+    """Record EMPTY-room CSI from multi-C5 TCP fan-in (same path as live detect)."""
+    from detect_live import iter_csi_from_tcp
+
+    packets: list[PacketRecord] = []
+    session_labels: list[str] = []
+    stream_keys: list[str] = []
+    group_keys: list[str] = []
+    counts: dict[str, int] = {}
+    deadline = time.monotonic() + seconds
+    last_report = 0.0
+    sid = "live_cal_empty"
+
+    print(
+        f"tcp://0.0.0.0:{port} — recording {seconds:.0f}s EMPTY room "
+        f"(leave the area; stop ingest first)",
+        file=sys.stderr,
+    )
+    if expected_sources:
+        print(f"expect RXs: {', '.join(expected_sources)}", file=sys.stderr)
+
+    try:
+        for source_id, iq, meta in iter_csi_from_tcp(port):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                packets.append(
+                    iq_list_to_packet(
+                        iq,
+                        rssi=float(meta.get("rssi") or 0.0),
+                        agc_gain=float(meta.get("agc_gain") or 0.0),
+                        fft_gain=float(meta.get("fft_gain") or 0.0),
+                        seq=meta.get("seq"),
+                        host_ts=time.time(),
+                        normalize_gain=config.normalize_gain,
+                    )
+                )
+            except ValueError:
+                continue
+            session_labels.append("empty")
+            stream_keys.append(f"{sid}|{source_id}")
+            group_keys.append(sid)
+            counts[source_id] = counts.get(source_id, 0) + 1
+            now = time.monotonic()
+            if now - last_report >= 5.0:
+                last_report = now
+                left = max(0.0, deadline - now)
+                parts = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+                print(
+                    f"  … {len(packets)} packets  [{parts}]  {left:.0f}s left",
+                    file=sys.stderr,
+                )
+    except OSError as exc:
+        sys.exit(
+            f"TCP listen failed on :{port}: {exc}\n"
+            "Stop ./run_multi_ingest.sh / ./run_presence.sh live first."
+        )
+
+    if not packets:
+        sys.exit("No CSI packets received — are the C5 boards powered and flashed for this Mini?")
+    print(
+        f"recorded {len(packets)} packets from {len(counts)} RX "
+        f"({', '.join(f'{k}={v}' for k, v in sorted(counts.items()))})",
+        file=sys.stderr,
+    )
+    if expected_sources:
+        missing = [s for s in expected_sources if s not in counts]
+        if missing:
+            print(
+                f"WARNING: missing expected RXs during cal: {missing}",
+                file=sys.stderr,
+            )
+    return packets, session_labels, stream_keys, group_keys
+
+
 # --------------------------------------------------------------------------
 # calibration
 # --------------------------------------------------------------------------
@@ -350,6 +431,16 @@ def report(cal: dict, bundle: dict) -> int:
     print(f"hysteresis {cal['hysteresis']:.4f}  "
           f"(enter {cal['threshold'] + cal['hysteresis']:+.3f}, "
           f"exit {cal['threshold'] - cal['hysteresis']:+.3f})")
+    if kind == "predict_proba" and es["median"] > 0.4:
+        problems += 1
+        print(
+            "\nWARNING: empty-room median P(object) is already high "
+            f"({es['median']:.3f}). Live will look wrong until you retrain "
+            "with fresh empty/occupied captures from this room:\n"
+            "  ./run_presence.sh capture empty_now\n"
+            "  ./run_presence.sh capture occupied_now\n"
+            "  ./run_presence.sh train && ./run_presence.sh calibrate-live"
+        )
     if kind == "decision_function":
         print(f"  equivalent probability {score_to_proba(cal['threshold'], kind):.6f} — "
               "saturated, which is why the threshold is set on log-odds")
@@ -404,6 +495,14 @@ def main() -> None:
     p.add_argument("--from-file", type=Path, help="Replay a raw CSI_DATA serial log")
     p.add_argument("--from-csv", type=Path, help="Use the empty rows of a training CSV")
     p.add_argument(
+        "--listen-tcp",
+        type=int,
+        nargs="?",
+        const=9055,
+        metavar="PORT",
+        help="Record EMPTY room from multi-C5 TCP fan-in (default 9055). Best for live detect.",
+    )
+    p.add_argument(
         "--fast",
         action="store_true",
         help="Calibrate for --fast detection (no EMA). Must match how you run detect.",
@@ -423,16 +522,34 @@ def main() -> None:
             "Retrain before calibrating: ./run_detect.sh --train"
         )
     config = FeatureConfig.from_dict(bundle.get("feature_config"))
+    n_sc = bundle.get("n_subcarriers")
+    if n_sc is not None:
+        from csi_features import configure_subcarriers
+
+        configure_subcarriers(int(n_sc))
 
     print(f"model {args.model.name}  {bundle.get('model_type', '?')}"
           f"  trained {bundle.get('trained_at', '?')}")
     print(f"features: {config.describe()}")
 
+    n_src = 0
+    if args.from_csv and args.listen_tcp is not None:
+        sys.exit("Use only one of --from-csv / --listen-tcp")
     if args.from_csv:
         packets, session_labels, stream_keys, group_keys = collect_from_csv(
             args.from_csv, config
         )
         source = f"csv:{args.from_csv.name}"
+    elif args.listen_tcp is not None:
+        order = list(bundle.get("rx_sources_order") or []) or None
+        packets, session_labels, stream_keys, group_keys = collect_from_tcp(
+            int(args.listen_tcp),
+            args.seconds,
+            config,
+            expected_sources=order,
+        )
+        source = f"tcp:{args.listen_tcp}"
+        n_src = len({sk.split("|", 1)[-1] for sk in stream_keys})
     elif args.from_file:
         packets = collect_from_lines(args.from_file, config)
         session_labels = stream_keys = group_keys = None
@@ -441,9 +558,9 @@ def main() -> None:
         if bundle.get("rx_fusion") == "concat":
             sys.exit(
                 "This model was trained with multi-RX feature fusion.\n"
-                "USB serial is one board — calibrate from the training export instead:\n"
-                "  ./run_detect.sh --calibrate --from-csv exports/training_packets.csv\n"
-                "Or (after sync) let --calibrate auto-pick that CSV when no USB is present."
+                "Calibrate on the same TCP path as live:\n"
+                "  ./run_presence.sh calibrate-live\n"
+                "Or from export: ./run_presence.sh calibrate --from-csv …"
             )
         port = args.port or find_port()
         packets = collect_from_serial(port, args.baud, args.seconds, config)
@@ -453,7 +570,7 @@ def main() -> None:
     if len(packets) < bundle["window_size"]:
         sys.exit(
             f"Only {len(packets)} packets — need at least {bundle['window_size']} "
-            "for one window. Is csi_send powered?"
+            "for one window. Are the C5 boards sending CSI?"
         )
 
     cal = calibrate(
@@ -467,6 +584,8 @@ def main() -> None:
         group_keys=group_keys,
     )
     cal["source"] = source
+    if n_src:
+        cal["rx_sources_seen"] = n_src
     problems = report(cal, bundle)
 
     if args.dry_run:
@@ -478,8 +597,7 @@ def main() -> None:
     print(f"\nwrote {args.out}")
     if problems:
         print(f"{problems} warning(s) above — the calibration was saved anyway.")
-    print("detect_live.py will use it automatically. Verify with a real object:")
-    print("  ./run_detect.sh --quiet" + (" --fast" if args.fast else ""))
+    print("Next: ./run_presence.sh live   (or ./run_detect.sh --listen-tcp --fast)")
 
 
 if __name__ == "__main__":

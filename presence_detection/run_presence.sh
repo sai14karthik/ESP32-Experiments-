@@ -30,11 +30,13 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh capture empty_01      # ~2 min multi-ingest label
   ./run_presence.sh clients               # how many C5s on :9055
   ./run_presence.sh train                 # export empty+occupied → fuse train → models/
-  ./run_presence.sh calibrate             # empty-room cal from export (TCP path)
-  ./run_presence.sh live                  # TCP :9055 fused live (stop ingest first)
+  ./run_presence.sh calibrate             # empty-room cal from training CSV
+  ./run_presence.sh calibrate-live        # EMPTY room over TCP :9055 (fix live)
+  ./run_presence.sh live                  # continuous scores (--fast)
+  ./run_presence.sh live --quiet          # state changes only
   ./run_presence.sh eval                  # print saved metrics
   ./run_presence.sh status                # model + calibration summary
-  ./run_presence.sh sync                  # copy CSI models/exports → presence_detection/
+  ./run_presence.sh sync                  # copy CSI models/exports → here
 EOF
   exit "${1:-0}"
 }
@@ -169,6 +171,28 @@ case "$cmd" in
     mkdir -p "$CSI/models"
     cp -f "$MODELS/site_calibration.joblib" "$CSI/models/site_calibration.joblib"
     echo "synced calibration → $MODELS/site_calibration.joblib" >&2
+    ;;
+  calibrate-live)
+    MP="$(resolve_model)"
+    if [[ ! -f "$MP" ]]; then
+      echo "No model — run ./run_presence.sh train first" >&2
+      exit 2
+    fi
+    echo "Leave the room EMPTY. Stop ingest/live first (port :9055)." >&2
+    # Match live: --fast; stricter FPR for less false OBJECT.
+    CAL_EXTRA=(--fast --fpr 0.05 --seconds 90)
+    if [[ $# -gt 0 ]]; then
+      CAL_EXTRA+=("$@")
+    fi
+    uv_csi "$CSI/calibrate_site.py" \
+      --model "$MP" \
+      --out "$MODELS/site_calibration.joblib" \
+      --listen-tcp 9055 \
+      "${CAL_EXTRA[@]}"
+    mkdir -p "$CSI/models"
+    cp -f "$MODELS/site_calibration.joblib" "$CSI/models/site_calibration.joblib"
+    echo "synced calibration → $MODELS/site_calibration.joblib" >&2
+    echo "Next: ./run_presence.sh live" >&2
     ;;
   live)
     MP="$(resolve_model)"
