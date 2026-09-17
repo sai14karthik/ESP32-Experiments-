@@ -298,9 +298,328 @@ class LiveDetector:
         )
 
 
+class _RxFeatureBuffer:
+    """Per-board packet ring → window features (no classifier)."""
+
+    def __init__(
+        self,
+        *,
+        window_size: int,
+        live_stride: int,
+        max_span_s: float | None,
+        config: FeatureConfig,
+        baseline_profile,
+        baseline_phase,
+    ) -> None:
+        self.window_size = window_size
+        self.live_stride = live_stride
+        self.max_span_s = max_span_s
+        self.config = config
+        self.baseline_profile = baseline_profile
+        self.baseline_phase = baseline_phase
+        self.buf: deque = deque(maxlen=window_size)
+        self._packet_idx = -1
+        self._last_arrival: float | None = None
+        self.stalls_dropped = 0
+
+    def reset(self) -> None:
+        self.buf.clear()
+        self._packet_idx = -1
+        self._last_arrival = None
+
+    def on_packet(
+        self,
+        iq: list[int],
+        *,
+        rssi: float = 0.0,
+        agc_gain: float = 0.0,
+        fft_gain: float = 0.0,
+        seq: int | None = None,
+        arrival: float | None = None,
+    ) -> tuple[float, np.ndarray] | None:
+        now = arrival if arrival is not None else time.monotonic()
+        if (
+            self.max_span_s
+            and self._last_arrival is not None
+            and now - self._last_arrival > self.max_span_s
+            and self.buf
+        ):
+            self.stalls_dropped += 1
+            self.buf.clear()
+            self._packet_idx = -1
+        self._last_arrival = now
+
+        try:
+            packet = iq_list_to_packet(
+                iq,
+                rssi=rssi,
+                agc_gain=agc_gain,
+                fft_gain=fft_gain,
+                seq=seq,
+                host_ts=now,
+                normalize_gain=self.config.normalize_gain,
+            )
+            self.buf.append(packet)
+        except ValueError:
+            return None
+
+        self._packet_idx += 1
+        if len(self.buf) < self.window_size:
+            return None
+        if (self._packet_idx - (self.window_size - 1)) % self.live_stride != 0:
+            return None
+
+        feat = window_to_features(
+            list(self.buf),
+            config=self.config,
+            baseline_profile=self.baseline_profile,
+            baseline_phase=self.baseline_phase,
+        )
+        return now, feat
+
+
+class MultiRxLiveDetector:
+    """Live presence for models trained with ``rx_fusion=concat`` (any N boards).
+
+    Each TCP ``source_id`` keeps its own window buffer. Features are concatenated
+    in ``rx_sources_order`` (zeros if a board is briefly missing), then scored
+    with the same EMA / hysteresis as single-stream live.
+    """
+
+    def __init__(
+        self,
+        bundle: dict,
+        *,
+        threshold: float | None = None,
+        ema_alpha: float | None = None,
+        hysteresis: float | None = None,
+        live_stride: int | None = None,
+        fast: bool = False,
+        calibration: dict | None = None,
+    ) -> None:
+        order = list(bundle.get("rx_sources_order") or [])
+        if len(order) < 2:
+            raise ValueError("rx_fusion=concat bundle missing rx_sources_order (≥2)")
+        n_per = bundle.get("n_features_per_rx")
+        if not n_per:
+            raise ValueError("rx_fusion=concat bundle missing n_features_per_rx")
+
+        self.pipe = bundle["pipeline"]
+        n_sc = bundle.get("n_subcarriers")
+        if n_sc is not None:
+            configure_subcarriers(int(n_sc))
+        self.baseline_profile = bundle.get("baseline_profile")
+        self.baseline_phase = bundle.get("baseline_phase")
+        self.calibration = calibration
+        if calibration is not None:
+            self.baseline_profile = calibration["baseline_profile"]
+            self.baseline_phase = calibration.get("baseline_phase")
+        self.config = FeatureConfig.from_dict(bundle.get("feature_config"))
+        self.window_size: int = int(bundle["window_size"])
+        self.stride: int = int(bundle["stride"])
+        self.max_span_s: float | None = bundle.get("max_span_s", 12.0)
+        self.fast = fast
+        self.live_stride = int(
+            live_stride if live_stride is not None else (1 if fast else self.stride)
+        )
+        self.rx_sources_order = order
+        self.n_features_per_rx = int(n_per)
+        self.bin_s = float(bundle.get("rx_fusion_bin_s") or 1.0)
+        self.min_rx = int(bundle.get("rx_min") or 2)
+        self.streams = {
+            src: _RxFeatureBuffer(
+                window_size=self.window_size,
+                live_stride=self.live_stride,
+                max_span_s=self.max_span_s,
+                config=self.config,
+                baseline_profile=self.baseline_profile,
+                baseline_phase=self.baseline_phase,
+            )
+            for src in order
+        }
+        self._latest: dict[str, tuple[float, np.ndarray]] = {}
+        self._unknown_warned: set[str] = set()
+        self.stalls_dropped = 0
+
+        self.score_kind = (
+            calibration.get("score_kind", "predict_proba")
+            if calibration is not None
+            else "predict_proba"
+        )
+        if threshold is None and calibration is not None:
+            threshold = calibration["threshold"]
+        self.threshold = float(
+            threshold if threshold is not None else bundle.get("threshold", 0.5)
+        )
+        if self.score_kind == "predict_proba":
+            self.threshold = float(min(max(self.threshold, PROBA_EPS), 1.0 - PROBA_EPS))
+        if fast and ema_alpha is None:
+            ema_alpha = 1.0
+        if fast and hysteresis is None:
+            hysteresis = 0.03 if self.score_kind == "predict_proba" else None
+        self.ema_alpha = float(
+            ema_alpha if ema_alpha is not None else bundle.get("ema_alpha", 0.3)
+        )
+        if hysteresis is None and calibration is not None:
+            hysteresis = calibration.get("hysteresis")
+        self.hysteresis = float(
+            hysteresis if hysteresis is not None else bundle.get("hysteresis", 0.06)
+        )
+        self._enter_at = self.threshold + self.hysteresis
+        self._exit_at = self.threshold - self.hysteresis
+        if self.score_kind == "predict_proba":
+            self._enter_at = min(self._enter_at, 1.0 - PROBA_EPS)
+            self._exit_at = max(self._exit_at, PROBA_EPS)
+        self._ema_p: float | None = None
+        self._state = "empty"
+
+    @property
+    def buffered(self) -> int:
+        return min((len(s.buf) for s in self.streams.values()), default=0)
+
+    def reset(self) -> None:
+        for s in self.streams.values():
+            s.reset()
+        self._latest.clear()
+        self._ema_p = None
+        self._state = "empty"
+
+    def on_packet(
+        self,
+        iq: list[int],
+        *,
+        source_id: str | None = None,
+        rssi: float = 0.0,
+        agc_gain: float = 0.0,
+        fft_gain: float = 0.0,
+        seq: int | None = None,
+        arrival: float | None = None,
+    ) -> dict | None:
+        src = (source_id or "").strip()
+        if src not in self.streams:
+            if src and src not in self._unknown_warned:
+                self._unknown_warned.add(src)
+                print(
+                    f"WARNING: ignoring source_id={src!r} "
+                    f"(model expects {self.rx_sources_order})",
+                    file=sys.stderr,
+                )
+            return {
+                "ready": False,
+                "buffered": self.buffered,
+                "need": self.window_size,
+                "rx_ready": len(self._latest),
+                "rx_need": self.min_rx,
+            }
+
+        got = self.streams[src].on_packet(
+            iq,
+            rssi=rssi,
+            agc_gain=agc_gain,
+            fft_gain=fft_gain,
+            seq=seq,
+            arrival=arrival,
+        )
+        if got is not None:
+            t, feat = got
+            if int(feat.shape[0]) != self.n_features_per_rx:
+                raise RuntimeError(
+                    f"per-RX feature dim {feat.shape[0]} != "
+                    f"bundle n_features_per_rx={self.n_features_per_rx}"
+                )
+            self._latest[src] = (t, feat)
+
+        if self._latest:
+            t_ref = max(t for t, _ in self._latest.values())
+            for s in [s for s, (t, _) in self._latest.items() if t_ref - t > self.bin_s]:
+                del self._latest[s]
+
+        n_ready = len(self._latest)
+        if n_ready < self.min_rx:
+            return {
+                "ready": False,
+                "buffered": self.buffered,
+                "need": self.window_size,
+                "rx_ready": n_ready,
+                "rx_need": len(self.rx_sources_order),
+            }
+
+        if got is None:
+            return None
+
+        t_ref = max(t for t, _ in self._latest.values())
+        parts: list[np.ndarray] = []
+        present = 0
+        for s in self.rx_sources_order:
+            hit = self._latest.get(s)
+            if hit is not None and abs(hit[0] - t_ref) <= self.bin_s:
+                parts.append(hit[1])
+                present += 1
+            else:
+                parts.append(np.zeros(self.n_features_per_rx, dtype=np.float64))
+        if present < self.min_rx:
+            return {
+                "ready": False,
+                "buffered": self.buffered,
+                "need": self.window_size,
+                "rx_ready": present,
+                "rx_need": self.min_rx,
+            }
+
+        fused = np.concatenate(parts).reshape(1, -1)
+        scores, kind = score_windows(self.pipe, fused, kind=self.score_kind)
+        if kind != self.score_kind:
+            raise RuntimeError(
+                f"score space {kind} != calibrated {self.score_kind}; recalibrate"
+            )
+        raw = float(scores[0])
+        if self._ema_p is None:
+            self._ema_p = raw
+        else:
+            self._ema_p = self.ema_alpha * raw + (1.0 - self.ema_alpha) * self._ema_p
+        s = self._ema_p
+        if self._state == "empty":
+            if s >= self._enter_at:
+                self._state = "object"
+        elif s <= self._exit_at:
+            self._state = "empty"
+
+        return {
+            "ready": True,
+            "p_object": round(score_to_proba(s, self.score_kind), 4),
+            "p_raw": round(score_to_proba(raw, self.score_kind), 4),
+            "score": round(s, 4),
+            "score_kind": self.score_kind,
+            "state": self._state,
+            "threshold": self.threshold,
+            "rx_present": present,
+            "rx_total": len(self.rx_sources_order),
+        }
+
+
+def make_live_detector(
+    bundle: dict,
+    *,
+    threshold: float | None = None,
+    fast: bool = False,
+    calibration: dict | None = None,
+) -> LiveDetector | MultiRxLiveDetector:
+    if bundle.get("rx_fusion") == "concat":
+        return MultiRxLiveDetector(
+            bundle, threshold=threshold, fast=fast, calibration=calibration
+        )
+    return LiveDetector(
+        bundle, threshold=threshold, fast=fast, calibration=calibration
+    )
+
+
 def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None) -> str:
     if not result.get("ready"):
-        # ~13.6 pkt/s measured in-burst on the 4.3 ESP-NOW pair.
+        if "rx_ready" in result:
+            return (
+                f"buffering RXs {result['rx_ready']}/{result.get('rx_need', '?')} "
+                f"(window {result.get('buffered', 0)}/{result.get('need', '?')} pkt)…"
+            )
         return (
             f"buffering {result['buffered']}/{result['need']} packets "
             f"(~{result['need'] / 13.6:.0f}s)…"
@@ -311,9 +630,9 @@ def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None
         extra += f" seq={seq}"
     if rssi is not None:
         extra += f" rssi={rssi}"
+    if result.get("rx_present") is not None:
+        extra += f" rx={result['rx_present']}/{result.get('rx_total', '?')}"
     if result.get("score_kind") == "decision_function":
-        # Probability is uninformative once the model saturates, so lead with
-        # the score the decision is actually made on.
         return (
             f"{tag:6s}  score={result['score']:+7.3f}  thr={result['threshold']:+.3f}  "
             f"p={result['p_object']:.4f}{extra}"
@@ -373,7 +692,7 @@ def load_bundle_and_calibration(
 
 def print_startup_banner(
     bundle: dict,
-    detector: LiveDetector,
+    detector: LiveDetector | MultiRxLiveDetector,
     *,
     calibration: dict | None,
     cal_path: Path | None,
@@ -426,10 +745,9 @@ def print_startup_banner(
     if bundle.get("rx_fusion") == "concat":
         order = bundle.get("rx_sources_order") or []
         print(
-            f"WARNING: model expects multi-RX fused features "
-            f"({len(order)} boards: {', '.join(order)}). "
-            f"Single-stream live detect will not match training dims yet — "
-            f"use offline eval on multi-source CSV for now.",
+            f"multi-RX live: fuse N={len(order)} "
+            f"({', '.join(order)}) — use --listen-tcp 9055 "
+            f"(stop ./run_multi_ingest.sh first; same port)",
             file=sys.stderr,
         )
     if bundle.get("evaluation_trustworthy") is False:
@@ -460,6 +778,22 @@ def iter_csi_from_file(path: Path, *, delay_s: float = 0.05):
             yield sample["iq"], packet_meta_from_sample(sample)
             if delay_s > 0:
                 time.sleep(delay_s)
+
+
+def iter_csi_from_tcp(port: int = 9055, bind: str = "0.0.0.0"):
+    """Yield ``(source_id, iq, meta)`` from multi-C5 TCP fan-in (same as ingest)."""
+    from ingest_serial import iter_lines_tcp
+
+    for item in iter_lines_tcp(port, bind=bind):
+        if item is None:
+            continue
+        source_id, line = item
+        sample = parse_csi_line(line)
+        if not sample or not sample.get("iq"):
+            continue
+        meta = packet_meta_from_sample(sample)
+        meta["source_id"] = source_id
+        yield source_id, sample["iq"], meta
 
 
 def iter_csi_from_serial(
@@ -536,6 +870,14 @@ def build_live_arg_parser(*, include_terminal_flags: bool = True) -> argparse.Ar
         default=root / "models" / "object_detector.joblib",
     )
     p.add_argument("--port", help="Serial port (default: auto-detect recv)")
+    p.add_argument(
+        "--listen-tcp",
+        type=int,
+        nargs="?",
+        const=9055,
+        metavar="PORT",
+        help="Multi-C5 TCP fan-in (default 9055). Required for fused multi-RX models.",
+    )
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--from-file", type=Path, help="Replay CSI lines (no hardware)")
     p.add_argument("--threshold", type=float, help="Override saved threshold")
@@ -582,7 +924,21 @@ def main() -> None:
         calibration_path=args.calibration,
         no_calibration=args.no_calibration,
     )
-    detector = LiveDetector(
+    if args.listen_tcp is not None and args.port:
+        sys.exit("Use only one of --listen-tcp / --port")
+    if (
+        bundle.get("rx_fusion") == "concat"
+        and args.listen_tcp is None
+        and not args.port
+        and not args.from_file
+    ):
+        args.listen_tcp = 9055
+        print(
+            "auto --listen-tcp 9055 (fused multi-RX model)",
+            file=sys.stderr,
+        )
+
+    detector = make_live_detector(
         bundle, threshold=args.threshold, fast=args.fast, calibration=calibration
     )
     print_startup_banner(
@@ -591,22 +947,36 @@ def main() -> None:
         calibration=calibration,
         cal_path=cal_path,
         fast=args.fast,
+        stop_hint=(
+            "Ctrl+C to stop. Stop ./run_multi_ingest.sh first — both use :9055."
+            if args.listen_tcp is not None
+            else "Ctrl+C to stop. Do not run idf.py monitor on the same port."
+        ),
     )
 
     last_state: str | None = None
     eval_true: list[str] = []
     eval_pred: list[str] = []
 
-    def handle_packet(iq: list[int], meta: dict | None = None) -> None:
+    def handle_packet(
+        iq: list[int],
+        meta: dict | None = None,
+        *,
+        source_id: str | None = None,
+    ) -> None:
         nonlocal last_state
         meta = meta or {}
-        result = detector.on_packet(
-            iq,
+        sid = source_id or meta.get("source_id")
+        kwargs = dict(
             rssi=float(meta.get("rssi") or 0.0),
             agc_gain=float(meta.get("agc_gain") or 0.0),
             fft_gain=float(meta.get("fft_gain") or 0.0),
             seq=meta.get("seq"),
         )
+        if isinstance(detector, MultiRxLiveDetector):
+            result = detector.on_packet(iq, source_id=sid, **kwargs)
+        else:
+            result = detector.on_packet(iq, **kwargs)
         if result is None:
             return
         if not result.get("ready"):
@@ -643,7 +1013,29 @@ def main() -> None:
             print("Use: ./run_detect.sh --eval-csv for labeled replay accuracy.", file=sys.stderr)
         return
 
+    if args.listen_tcp is not None:
+        print(
+            f"tcp multi-RX: 0.0.0.0:{args.listen_tcp}  "
+            f"(expect {getattr(detector, 'rx_sources_order', [])})",
+            file=sys.stderr,
+        )
+        try:
+            for source_id, iq, meta in iter_csi_from_tcp(args.listen_tcp):
+                handle_packet(iq, meta, source_id=source_id)
+        except OSError as exc:
+            sys.exit(
+                f"TCP listen failed on :{args.listen_tcp}: {exc}\n"
+                "Is ./run_multi_ingest.sh still holding the port? Stop it, then retry."
+            )
+        return
+
     port = args.port or find_port()
+    if isinstance(detector, MultiRxLiveDetector):
+        print(
+            "WARNING: fused multi-RX model on a single USB serial stream — "
+            "prefer --listen-tcp 9055 with all boards.",
+            file=sys.stderr,
+        )
     print(f"serial: {port} @ {args.baud}", file=sys.stderr)
     for iq, meta in iter_csi_from_serial(port, args.baud):
         handle_packet(iq, meta)

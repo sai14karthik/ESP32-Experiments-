@@ -1,53 +1,56 @@
 # Presence detection (ESP32-C5 CSI)
 
-Home for **presence / empty-vs-occupied** work. Capture stays in `csi_pipeline_new/`;
-train/live will move here over time.
+**Front door:** `./run_presence.sh` — capture stays in `csi_pipeline_new/`;
+models and exports live here.
 
 ```
-LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini Postgres
-                                              --> multi-RX-aware train
+LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini
+                                              ├─ Postgres (capture)
+                                              └─ presence_detection/models (train/live)
 ```
 
-## Capture
+## Daily loop (Mini)
 
 ```bash
-cd csi_pipeline_new
-./run_multi_ingest.sh --label empty_01    # ~2 min, Ctrl+C
-./run_multi_ingest.sh --label occupied_01
-# interleave ~15 each …
+cd presence_detection
+
+./run_presence.sh clients                 # expect N boards
+./run_presence.sh capture empty_01        # ~2 min, Ctrl+C
+./run_presence.sh capture occupied_01
+# interleave more empty_* / occupied_* …
+
+./run_presence.sh train                   # fuse N RXs → models/object_detector.joblib
+./run_presence.sh calibrate               # empty-room threshold → models/site_calibration.joblib
+# Ctrl+C any ./run_multi_ingest.sh first (same :9055)
+./run_presence.sh live                    # walk test EMPTY ↔ OBJECT
+
+./run_presence.sh eval                    # reprint metrics anytime
+./run_presence.sh status                  # fusion N, bal_acc, cal
 ```
 
-## Train (multi-RX aware — re-export includes source_id)
+## Continuous improvement
 
-On Mini, after syncing this repo:
+1. When live is wrong, immediately `./run_presence.sh capture empty_miss_…` or `occupied_miss_…`
+2. `./run_presence.sh train` → `calibrate` → `live` again  
+3. Watch **OOF / grouped bal_acc** via `./run_presence.sh eval` — want stable or rising (~0.70 today)
 
-```bash
-cd csi_pipeline_new
-./run_detect.sh --train-from-db --include empty,occupied
-```
-
-Default **`--rx-fusion auto`**: discovers **N** boards from distinct `source_id`
-values (2, 3, 8, … — not hardcoded). Windows are time-binned and **feature-
-concatenated in sorted source_id order** (missing board in a bin → zeros).
-Train also prints a complementary **OR-vote** score. Overrides:
-`--rx-fusion none`, `--rx-fusion concat`, `--rx-min all` (require every board
-in each bin), `--rx-min 2` (default; tolerate dropouts).
-
-You should see `RX boards (N=…)`, fused dims ≈ N× single-RX, and **median span > 0**.
-If [A] session-grouped bal_acc is still ~0.5, the link geometry needs work —
-not the fan-in path. Adding/removing boards later means **retrain** (feature
-width follows N).
-
-Optional single-board ablation:
-
-```bash
-./run_detect.sh --train-from-db --include empty,occupied --source-id 10.128.93.XX --rx-fusion none
-```
-
-## This folder
+## Layout
 
 | Path | Role |
 |------|------|
-| `models/` | Presence model artifacts (later) |
-| `exports/` | Training dumps (later) |
-| `src/` | Presence-specific code (later wrappers) |
+| `run_presence.sh` | Capture / train / calibrate / live / eval |
+| `models/` | `object_detector.joblib`, `site_calibration.joblib` |
+| `exports/` | Synced `training_packets.csv` |
+| `src/` | Paths + status helper |
+| `../csi_pipeline_new/` | Ingest, features, TCP fan-in, trainers |
+
+## Flags
+
+Train defaults to `--include empty,occupied` and multi-RX `--rx-fusion auto`.
+Pass-through examples:
+
+```bash
+./run_presence.sh train --rx-min all
+./run_presence.sh train --include empty,occupied --source-id 10.128.93.29
+./run_presence.sh live --threshold 0.25
+```

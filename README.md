@@ -13,7 +13,15 @@
 ## Common commands
 
 ```bash
-# Presence capture (Mini, 3× C5 → Postgres)
+# Presence (preferred front door on Mini)
+cd presence_detection
+./run_presence.sh clients
+./run_presence.sh capture empty_01
+./run_presence.sh train && ./run_presence.sh calibrate
+# stop ingest, then:
+./run_presence.sh live
+
+# Low-level capture / CSI
 cd csi_pipeline_new && ./run_multi_ingest.sh --label empty_01
 cd csi_pipeline_new && ./count_csi_clients.sh
 

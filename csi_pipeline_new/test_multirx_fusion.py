@@ -258,6 +258,58 @@ def test_single_rx_auto_skips_fusion(out_dir: Path) -> None:
     print("  train N=1 auto: OK (no fusion)")
 
 
+def test_multirx_live_detector(out_dir: Path) -> None:
+    from detect_live import MultiRxLiveDetector, make_live_detector
+    from csi_features import configure_from_iq_len
+
+    csv_path = out_dir / "live_n3.csv"
+    model_path = out_dir / "live_model.joblib"
+    sources = write_synthetic_csv(csv_path, n_rx=3, sessions_per_class=3)
+    cmd = [
+        sys.executable,
+        str(ROOT / "train_object_detector.py"),
+        "--csv",
+        str(csv_path),
+        "--out",
+        str(model_path),
+        "--deploy",
+        "--rx-fusion",
+        "concat",
+        "--time-blocks",
+        "2",
+    ]
+    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+    assert_true(proc.returncode == 0, f"train for live failed\n{proc.stderr}")
+    bundle = joblib.load(model_path)
+    det = make_live_detector(bundle, fast=True)
+    assert_true(isinstance(det, MultiRxLiveDetector), "expected MultiRxLiveDetector")
+    configure_from_iq_len(IQ_LEN)
+
+    ready = None
+    t0 = 1000.0
+    # Feed ~window packets to each RX with aligned timestamps
+    for k in range(bundle["window_size"] + 5):
+        for src in sources:
+            iq = [int(x) for x in _iq(k * 10 + hash(src) % 100, occupied=False).split(",")]
+            ready = det.on_packet(
+                iq,
+                source_id=src,
+                rssi=-45.0,
+                agc_gain=10.0,
+                fft_gain=20.0,
+                seq=k,
+                arrival=t0 + k * 0.08,
+            )
+    assert_true(ready is not None and ready.get("ready"), f"not ready: {ready}")
+    assert_true(ready.get("rx_present", 0) >= 2, f"rx_present={ready}")
+    assert_true("state" in ready, "missing state")
+    print(
+        f"  live MultiRx: OK  state={ready['state']}  "
+        f"rx={ready.get('rx_present')}/{ready.get('rx_total')}  "
+        f"p={ready.get('p_object')}"
+    )
+
+
 def main() -> int:
     print("=== multi-RX fusion tests ===")
     try:
@@ -269,6 +321,7 @@ def main() -> int:
                 test_train_cli(n, out_dir)
             test_train_none_and_min_all(out_dir)
             test_single_rx_auto_skips_fusion(out_dir)
+            test_multirx_live_detector(out_dir)
     except Exception as exc:
         print(f"\nFAIL: {exc}")
         return 1

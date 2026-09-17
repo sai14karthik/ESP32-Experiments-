@@ -71,6 +71,8 @@ firmware/*.bin
 # Generated CSI exports (too large for GitHub; keep fixtures/)
 csi_pipeline_new/exports/*.csv
 csi_pipeline/exports/*.csv
+presence_detection/exports/*.csv
+presence_detection/models/*.joblib
 
 # MediaMTX generated at runtime (do not commit)
 mediamtx/mediamtx.runtime.yml

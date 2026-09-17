@@ -10,9 +10,8 @@
 #   ./run_detect.sh --train-from-db          # export Postgres → train
 #   ./run_detect.sh --train-from-db --include baseline_desk,object_desk
 #   ./run_detect.sh --eval-csv               # print saved hold-out metrics
-#   ./run_detect.sh --quiet                  # live: print only on EMPTY ↔ OBJECT
-#   ./run_detect.sh --fast                   # low-latency: stride=1, no EMA (~0.2s updates)
-#   ./run_detect.sh --fast --quiet           # fast + quiet (recommended live)
+#   ./run_detect.sh --listen-tcp             # multi-RX live on :9055 (fused models; stop ingest first)
+#   ./run_detect.sh --fast --quiet           # recommended live (auto TCP if model is fused)
 #   ./run_detect.sh --probe                  # which USB port has CSI_DATA
 #   ./run_detect.sh --diagnose               # recv port + model checklist
 #   ./run_detect.sh --diagnose --all-ports   # also probe usbserial (resets sender)
@@ -135,26 +134,42 @@ EXTRA=()
 DETECT_ARGS=()
 has_port=0
 has_file=0
+has_listen_tcp=0
 skip_probe=0
 use_gui=0
+# Preserve user flags for detect_live; only --skip-probe is wrapper-only.
+prev=""
 for a in "$@"; do
   case "$a" in
+    --skip-probe) skip_probe=1; prev=""; continue ;;
+    --gui) use_gui=1; DETECT_ARGS+=("$a"); prev=""; continue ;;
     --port|--port=*) has_port=1 ;;
     --from-file|--from-file=*) has_file=1 ;;
-    --skip-probe) skip_probe=1 ;;
-    --gui) use_gui=1 ;;
-    *) DETECT_ARGS+=("$a") ;;
+    --listen-tcp|--listen-tcp=*) has_listen_tcp=1 ;;
   esac
+  DETECT_ARGS+=("$a")
+  prev="$a"
 done
 
-if [[ $has_port -eq 0 && $has_file -eq 0 ]]; then
+# Fused multi-RX models need TCP fan-in, not USB serial.
+if [[ $has_port -eq 0 && $has_file -eq 0 && $has_listen_tcp -eq 0 ]]; then
+  FUSION="$(
+    uv_csi -c "import joblib; b=joblib.load('${ROOT}/models/object_detector.joblib'); print(b.get('rx_fusion') or '')" 2>/dev/null || true
+  )"
+  if [[ "$FUSION" == "concat" ]]; then
+    echo "multi-RX fused model — TCP :9055 (stop ./run_multi_ingest.sh if it holds the port)" >&2
+    EXTRA=(--listen-tcp 9055)
+    has_listen_tcp=1
+  fi
+fi
+
+if [[ $has_port -eq 0 && $has_file -eq 0 && $has_listen_tcp -eq 0 ]]; then
   if [[ $skip_probe -eq 0 ]]; then
     if ! RECV="$(uv_csi "$ROOT/probe_recv_port.py" --quiet --seconds 8 2>/dev/null)"; then
       echo "No CSI_DATA on recv port (usbmodem*)." >&2
+      echo "  • Fused multi-RX: ./run_detect.sh --listen-tcp --fast --quiet" >&2
+      echo "  • Or: cd ../presence_detection && ./run_presence.sh live" >&2
       echo "  • Recv → USB Mac (/dev/cu.usbmodem*)" >&2
-      echo "  • Send → powered (not USB data), within ~2 m, channel 11" >&2
-      echo "  • Reset both boards, then: ./run_detect.sh --diagnose" >&2
-      echo "  • Reflash: cd .. && ./scripts/flash_csi_pair.sh /dev/cu.usbserial-10 /dev/cu.usbmodem2101" >&2
       echo "  • Skip check: ./run_detect.sh --skip-probe" >&2
       exit 2
     fi
