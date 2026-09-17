@@ -24,6 +24,7 @@ cd presence_detection
 # Leave room EMPTY, stop ingest/live:
 ./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
 ./run_presence.sh live                    # continuous P(object)
+./run_presence.sh gui                     # PyQt dashboard (EMPTY/OBJECT + chart)
 
 ./run_presence.sh eval
 ./run_presence.sh status                  # shows rx_fusion + N + sources

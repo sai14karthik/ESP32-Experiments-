@@ -34,6 +34,7 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh calibrate-live        # EMPTY room over TCP :9055 (fix live)
   ./run_presence.sh live                  # continuous scores (--fast)
   ./run_presence.sh live --quiet          # state changes only
+  ./run_presence.sh gui                   # PyQt dashboard (TCP multi-RX)
   ./run_presence.sh eval                  # print saved metrics
   ./run_presence.sh status                # model + calibration summary
   ./run_presence.sh sync                  # copy CSI models/exports → here
@@ -208,6 +209,20 @@ case "$cmd" in
     fi
     echo "Stop ./run_multi_ingest.sh first if it holds :9055" >&2
     exec "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
+    ;;
+  gui)
+    MP="$(resolve_model)"
+    CAL="$(resolve_cal)"
+    if [[ ! -f "$MP" ]]; then
+      echo "No model — run ./run_presence.sh train first" >&2
+      exit 2
+    fi
+    GUI_ARGS=(--model "$MP" --listen-tcp 9055 --fast --gui)
+    if [[ -n "$CAL" ]]; then
+      GUI_ARGS+=(--calibration "$CAL")
+    fi
+    echo "Stop ingest/terminal live first if they hold :9055" >&2
+    exec "$CSI/run_detect.sh" --skip-probe "${GUI_ARGS[@]}" "$@"
     ;;
   eval)
     MP="$(resolve_model)"

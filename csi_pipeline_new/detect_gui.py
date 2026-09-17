@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """PyQt live presence window for empty vs object detection.
 
-Reuses LiveDetector and the serial helpers from detect_live.py. Launch with:
+Supports USB serial or multi-RX TCP (:9055) for fused models.
 
-  ./run_detect.sh --gui
   ./run_detect.sh --gui --fast
-  python detect_live.py --gui --fast
+  ./run_presence.sh gui
+  python detect_live.py --gui --listen-tcp 9055 --fast
 """
 
 from __future__ import annotations
@@ -30,12 +30,14 @@ from PyQt5.QtWidgets import (
 import pyqtgraph as pg
 
 from detect_live import (
-    LiveDetector,
+    MultiRxLiveDetector,
     build_live_arg_parser,
     find_port,
     iter_csi_from_file,
     iter_csi_from_serial,
+    iter_csi_from_tcp,
     load_bundle_and_calibration,
+    make_live_detector,
     print_startup_banner,
 )
 
@@ -47,7 +49,7 @@ OBJECT_FG = "#ff8a8a"
 
 
 class DetectWorker(QThread):
-    """Background CSI reader → LiveDetector → UI signals."""
+    """Background CSI reader → detector → UI signals."""
 
     update = pyqtSignal(dict)
     status = pyqtSignal(str)
@@ -56,11 +58,12 @@ class DetectWorker(QThread):
 
     def __init__(
         self,
-        detector: LiveDetector,
+        detector,
         *,
         port: str | None,
         baud: int,
         from_file: Path | None,
+        listen_tcp: int | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -68,6 +71,7 @@ class DetectWorker(QThread):
         self.port = port
         self.baud = baud
         self.from_file = from_file
+        self.listen_tcp = listen_tcp
         self._stop = False
         self._pkt_times: deque[float] = deque()
 
@@ -95,10 +99,30 @@ class DetectWorker(QThread):
             **result,
             "seq": meta.get("seq"),
             "rssi": meta.get("rssi"),
+            "source_id": meta.get("source_id"),
             "pkt_s": round(self._pkt_rate(), 1),
             "t": time.monotonic(),
         }
         self.update.emit(payload)
+
+    def _handle(self, iq: list[int], meta: dict, *, source_id: str | None = None) -> None:
+        kwargs = dict(
+            rssi=float(meta.get("rssi") or 0.0),
+            agc_gain=float(meta.get("agc_gain") or 0.0),
+            fft_gain=float(meta.get("fft_gain") or 0.0),
+            seq=meta.get("seq"),
+        )
+        if isinstance(self.detector, MultiRxLiveDetector):
+            result = self.detector.on_packet(
+                iq, source_id=source_id or meta.get("source_id"), **kwargs
+            )
+        else:
+            result = self.detector.on_packet(iq, **kwargs)
+        rate = self._pkt_rate()
+        if result is None:
+            return
+        result = {**result, "pkt_s": round(rate, 1)}
+        self._emit_result(result, meta)
 
     def run(self) -> None:
         try:
@@ -107,16 +131,26 @@ class DetectWorker(QThread):
                 for iq, meta in iter_csi_from_file(self.from_file, delay_s=0.05):
                     if self._stop:
                         break
-                    result = self.detector.on_packet(
-                        iq,
-                        rssi=float(meta.get("rssi") or 0.0),
-                        agc_gain=float(meta.get("agc_gain") or 0.0),
-                        fft_gain=float(meta.get("fft_gain") or 0.0),
-                        seq=meta.get("seq"),
-                    )
-                    self._pkt_rate()
-                    if result is not None:
-                        self._emit_result(result, meta)
+                    self._handle(iq, meta)
+                self.finished_ok.emit()
+                return
+
+            if self.listen_tcp is not None:
+                order = getattr(self.detector, "rx_sources_order", None) or []
+                self.status.emit(
+                    f"tcp :{self.listen_tcp}  N={len(order) or '?'}  "
+                    f"({', '.join(order) if order else 'any'})"
+                )
+                try:
+                    for source_id, iq, meta in iter_csi_from_tcp(self.listen_tcp):
+                        if self._stop:
+                            break
+                        self._handle(iq, meta, source_id=source_id)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"TCP :{self.listen_tcp} failed: {exc}. "
+                        "Stop ./run_multi_ingest.sh / terminal live first."
+                    ) from exc
                 self.finished_ok.emit()
                 return
 
@@ -132,19 +166,7 @@ class DetectWorker(QThread):
             ):
                 if self._stop:
                     break
-                result = self.detector.on_packet(
-                    iq,
-                    rssi=float(meta.get("rssi") or 0.0),
-                    agc_gain=float(meta.get("agc_gain") or 0.0),
-                    fft_gain=float(meta.get("fft_gain") or 0.0),
-                    seq=meta.get("seq"),
-                )
-                rate = self._pkt_rate()
-                if result is None:
-                    # Still update pkt/s occasionally via status path in wait messages.
-                    continue
-                result = {**result, "pkt_s": round(rate, 1)}
-                self._emit_result(result, meta)
+                self._handle(iq, meta)
             self.finished_ok.emit()
         except Exception as exc:  # noqa: BLE001 — surface to UI
             self.failed.emit(str(exc))
@@ -153,13 +175,15 @@ class DetectWorker(QThread):
 class PresenceWindow(QMainWindow):
     def __init__(
         self,
-        detector: LiveDetector,
+        detector,
         *,
         port: str | None,
         baud: int,
         from_file: Path | None,
+        listen_tcp: int | None,
         calibrated: bool,
         model_name: str,
+        rx_label: str = "",
     ) -> None:
         super().__init__()
         self.detector = detector
@@ -168,8 +192,11 @@ class PresenceWindow(QMainWindow):
         self._t0 = time.monotonic()
         self._last_state: str | None = None
 
-        self.setWindowTitle("CSI presence")
-        self.resize(720, 520)
+        title = "CSI presence"
+        if rx_label:
+            title = f"CSI presence — {rx_label}"
+        self.setWindowTitle(title)
+        self.resize(780, 560)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -191,6 +218,10 @@ class PresenceWindow(QMainWindow):
         self.p_label.setFont(QFont("", 16))
         row.addWidget(self.p_label)
         row.addStretch(1)
+        self.rx_label_w = QLabel(rx_label or "RX —")
+        self.rx_label_w.setFont(QFont("", 14))
+        row.addWidget(self.rx_label_w)
+        row.addStretch(1)
         self.thr_label = QLabel(f"threshold = {detector.threshold:.3f}")
         self.thr_label.setFont(QFont("", 14))
         row.addWidget(self.thr_label)
@@ -207,8 +238,6 @@ class PresenceWindow(QMainWindow):
         self.plot = pg.PlotWidget()
         self.plot.setLabel("left", "P(object)")
         self.plot.setLabel("bottom", "seconds")
-        # Lock Y to probability space. Auto-range on a flat P≈1.0 series drifts
-        # into nonsense ranges (e.g. -1.6..-0.6) and hides the curve off-screen.
         self.plot.setYRange(0.0, 1.0, padding=0.0)
         self.plot.enableAutoRange(axis="y", enable=False)
         self.plot.getViewBox().setLimits(yMin=-0.02, yMax=1.02)
@@ -223,16 +252,19 @@ class PresenceWindow(QMainWindow):
         layout.addWidget(self.plot, stretch=1)
 
         cal_txt = "calibrated" if calibrated else "NOT calibrated"
-        self.status_label = QLabel(
-            f"{model_name}  ·  {cal_txt}  ·  connecting…"
-        )
+        self.status_label = QLabel(f"{model_name}  ·  {cal_txt}  ·  connecting…")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
         self._apply_state_style("waiting")
 
         self.worker = DetectWorker(
-            detector, port=port, baud=baud, from_file=from_file, parent=self
+            detector,
+            port=port,
+            baud=baud,
+            from_file=from_file,
+            listen_tcp=listen_tcp,
+            parent=self,
         )
         self.worker.update.connect(self.on_update)
         self.worker.status.connect(self.on_status)
@@ -259,9 +291,6 @@ class PresenceWindow(QMainWindow):
         self.bar.setPalette(pal)
 
     def on_status(self, msg: str) -> None:
-        base = self.status_label.text().split("  ·  ")[0:2]
-        prefix = "  ·  ".join(base) if len(base) >= 2 else self.status_label.text()
-        # Keep model/calibration prefix when possible.
         if "  ·  " in self.status_label.text():
             parts = self.status_label.text().split("  ·  ")
             self.status_label.setText(f"{parts[0]}  ·  {parts[1]}  ·  {msg}")
@@ -278,15 +307,25 @@ class PresenceWindow(QMainWindow):
             bits.append(f"rssi={rssi}")
         if seq is not None:
             bits.append(f"seq={seq}")
+        if payload.get("rx_present") is not None:
+            bits.append(f"rx={payload['rx_present']}/{payload.get('rx_total', '?')}")
+            self.rx_label_w.setText(
+                f"RX {payload['rx_present']}/{payload.get('rx_total', '?')}"
+            )
 
         if not ready:
-            buffered = payload.get("buffered", 0)
-            need = payload.get("need", self.detector.window_size)
-            self.state_label.setText(f"BUFFER {buffered}/{need}")
+            if "rx_ready" in payload:
+                self.state_label.setText(
+                    f"RX {payload.get('rx_ready', 0)}/{payload.get('rx_need', '?')}"
+                )
+            else:
+                buffered = payload.get("buffered", 0)
+                need = payload.get("need", self.detector.window_size)
+                self.state_label.setText(f"BUFFER {buffered}/{need}")
             self._apply_state_style("waiting")
             self.p_label.setText("P(object) = —")
             self.bar.setValue(0)
-            self.on_status(f"buffering {buffered}/{need}  ·  " + "  ".join(bits))
+            self.on_status("waiting  ·  " + "  ".join(bits))
             return
 
         state = payload.get("state", "empty")
@@ -298,8 +337,6 @@ class PresenceWindow(QMainWindow):
         self.bar.setValue(int(round(max(0.0, min(1.0, p)) * 1000)))
 
         t = float(payload.get("t", time.monotonic())) - self._t0
-        # Clamp for display — training score_kind is predict_proba, but keep the
-        # curve inside the locked [0, 1] view even if a bad payload arrives.
         p_plot = float(max(0.0, min(1.0, p)))
         self._history_t.append(t)
         self._history_p.append(p_plot)
@@ -310,7 +347,6 @@ class PresenceWindow(QMainWindow):
         if self._history_t:
             left = max(0.0, self._history_t[-1] - HISTORY_SECONDS)
             self.plot.setXRange(left, max(left + 10.0, self._history_t[-1]), padding=0.02)
-        # Re-assert after setData — some pyqtgraph builds re-enable Y auto-range.
         self.plot.setYRange(0.0, 1.0, padding=0.0)
         if self._thr_line is not None and 0.0 <= thr <= 1.0:
             self._thr_line.setValue(thr)
@@ -335,11 +371,9 @@ class PresenceWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Allow being called via ``detect_live.py --gui`` with leftover flags.
     argv = [a for a in argv if a != "--gui"]
 
     p = build_live_arg_parser(include_terminal_flags=False)
-    # Ignore terminal-only flags (--quiet/--json/--eval) so mixed CLI still works.
     args, _unknown = p.parse_known_args(argv)
 
     bundle, calibration, cal_path = load_bundle_and_calibration(
@@ -347,8 +381,21 @@ def main(argv: list[str] | None = None) -> None:
         calibration_path=args.calibration,
         no_calibration=args.no_calibration,
     )
-    detector = LiveDetector(
-        bundle, threshold=args.threshold, fast=args.fast, calibration=calibration
+    if (
+        bundle.get("rx_fusion") == "concat"
+        and args.listen_tcp is None
+        and not args.port
+        and not args.from_file
+    ):
+        args.listen_tcp = 9055
+        print("auto --listen-tcp 9055 (fused multi-RX model)", file=sys.stderr)
+
+    detector = make_live_detector(
+        bundle,
+        threshold=args.threshold,
+        fast=args.fast,
+        calibration=calibration,
+        rx_min=getattr(args, "rx_min", "all"),
     )
     print_startup_banner(
         bundle,
@@ -356,13 +403,20 @@ def main(argv: list[str] | None = None) -> None:
         calibration=calibration,
         cal_path=cal_path,
         fast=args.fast,
-        stop_hint="Close the window to stop. Do not run idf.py monitor on the same port.",
+        stop_hint=(
+            "Close the window to stop. Stop ingest first if using :9055."
+            if args.listen_tcp is not None
+            else "Close the window to stop. Do not run idf.py monitor on the same port."
+        ),
     )
 
     port = args.port
-    if args.from_file is None and port is None:
+    if args.from_file is None and args.listen_tcp is None and port is None:
         port = find_port()
         print(f"serial: {port} @ {args.baud}", file=sys.stderr)
+
+    order = getattr(detector, "rx_sources_order", None) or []
+    rx_label = f"N={len(order)}" if order else ""
 
     app = QApplication(sys.argv)
     app.setApplicationName("CSI presence")
@@ -371,8 +425,10 @@ def main(argv: list[str] | None = None) -> None:
         port=port,
         baud=args.baud,
         from_file=args.from_file,
+        listen_tcp=args.listen_tcp,
         calibrated=calibration is not None,
         model_name=f"{bundle.get('model_type', '?')} v{bundle.get('feature_version', '?')}",
+        rx_label=rx_label,
     )
     window.show()
     raise SystemExit(app.exec_())
