@@ -738,7 +738,7 @@ def format_line(result: dict, *, seq: int | None = None, rssi: int | None = None
     if result.get("score_kind") == "decision_function":
         return (
             f"{tag:8s}  score={result['score']:+7.3f}  thr={result['threshold']:+.3f}  "
-            f"p={result.get('p_presence', result['p_object']):.4f}{extra}"
+            f"P(presence)={result.get('p_presence', result['p_object']):.4f}{extra}"
         )
     return (
         f"{tag:8s}  P(presence)={result.get('p_presence', result['p_object']):.3f}  "
