@@ -180,10 +180,6 @@ PAGE_HTML = """<!DOCTYPE html>
     display: none;
   }
   #device-empty.show { display: block; }
-  footer {
-    margin-top: 16px; font-size: 0.7rem; color: var(--muted);
-    text-align: center;
-  }
 </style>
 </head>
 <body class="waiting">
@@ -203,7 +199,6 @@ PAGE_HTML = """<!DOCTYPE html>
   <ul id="device-list"></ul>
   <div id="device-empty">No ESP TCP clients on :9055 yet</div>
 </div>
-<footer>Same line updates live · not a scrolling log</footer>
 <script>
 (function () {
   const body = document.body;
