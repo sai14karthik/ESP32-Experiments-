@@ -184,19 +184,39 @@ def iter_lines_file(path: str):
             yield line.strip()
 
 
-def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
+def iter_lines_tcp(
+    port: int,
+    bind: str = "0.0.0.0",
+    backlog: int = 8,
+    *,
+    status: dict[str, Any] | None = None,
+):
     """Fan-in: accept multiple ESP32-C5 TCP clients; yield CSI lines concurrently.
 
     One client disconnect/error must not stop others — each board has its own
     reader thread; the acceptor keeps listening for reconnects.
 
     Yields None (idle) or (source_id, line) where source_id is the client IP.
+
+    If ``status`` is provided, it is updated under an internal lock with:
+    ``active`` (int connection count) and ``ips`` (sorted unique client IPs).
     """
     q: queue.Queue[Any] = queue.Queue(maxsize=20000)
     stop = threading.Event()
     clients_lock = threading.Lock()
     n_clients = 0
+    # IP → open connection count (one board usually = 1).
+    ip_counts: dict[str, int] = {}
     sentinel = object()
+
+    def _publish_status() -> None:
+        if status is None:
+            return
+        status["active"] = n_clients
+        status["ips"] = sorted(ip_counts.keys())
+
+    if status is not None:
+        _publish_status()
 
     def _client_reader(conn: socket.socket, addr: tuple[str, int]) -> None:
         nonlocal n_clients
@@ -257,9 +277,15 @@ def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
                 pass
             with clients_lock:
                 n_clients = max(0, n_clients - 1)
-                left = n_clients
+                left = ip_counts.get(source_id, 0) - 1
+                if left <= 0:
+                    ip_counts.pop(source_id, None)
+                else:
+                    ip_counts[source_id] = left
+                left_n = n_clients
+                _publish_status()
             print(
-                f"client disconnected {addr[0]}:{addr[1]} (active={left}; "
+                f"client disconnected {addr[0]}:{addr[1]} (active={left_n}; "
                 f"ingest continues)",
                 flush=True,
             )
@@ -285,7 +311,9 @@ def iter_lines_tcp(port: int, bind: str = "0.0.0.0", backlog: int = 8):
                     break
                 with clients_lock:
                     n_clients += 1
+                    ip_counts[addr[0]] = ip_counts.get(addr[0], 0) + 1
                     active = n_clients
+                    _publish_status()
                 print(
                     f"client connected {addr[0]}:{addr[1]} (active={active})",
                     flush=True,

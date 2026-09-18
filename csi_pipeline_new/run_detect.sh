@@ -4,6 +4,7 @@
 #   ./run_detect.sh                          # live serial (probes CSI first)
 #   ./run_detect.sh --gui                    # live PyQt presence window (EMPTY/PRESENCE)
 #   ./run_detect.sh --gui --fast             # GUI + low-latency updates
+#   ./run_detect.sh --web --listen-tcp       # phone web UI (HTTP :8765)
 #   ./run_detect.sh --calibrate              # USB recv, or empty rows of training CSV if no USB
 #   ./run_detect.sh --calibrate --from-csv exports/training_packets.csv  # TCP multi-RX path
 #   ./run_detect.sh --train                  # train from default sample CSV
@@ -166,12 +167,14 @@ has_file=0
 has_listen_tcp=0
 skip_probe=0
 use_gui=0
+use_web=0
 # Preserve user flags for detect_live; only --skip-probe is wrapper-only.
 prev=""
 for a in "$@"; do
   case "$a" in
     --skip-probe) skip_probe=1; prev=""; continue ;;
     --gui) use_gui=1; DETECT_ARGS+=("$a"); prev=""; continue ;;
+    --web) use_web=1; prev=""; continue ;;
     --port|--port=*) has_port=1 ;;
     --from-file|--from-file=*) has_file=1 ;;
     --listen-tcp|--listen-tcp=*) has_listen_tcp=1 ;;
@@ -216,7 +219,9 @@ if [[ $has_port -eq 0 && $has_file -eq 0 && $has_listen_tcp -eq 0 ]]; then
 fi
 
 DETECT_SCRIPT="$ROOT/detect_live.py"
-if [[ $use_gui -eq 1 ]]; then
+if [[ $use_web -eq 1 ]]; then
+  DETECT_SCRIPT="$ROOT/detect_web.py"
+elif [[ $use_gui -eq 1 ]]; then
   DETECT_SCRIPT="$ROOT/detect_gui.py"
 fi
 

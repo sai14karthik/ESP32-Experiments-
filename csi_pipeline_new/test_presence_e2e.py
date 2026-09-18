@@ -64,7 +64,7 @@ def main() -> int:
     print("=== presence E2E ===")
 
     r = run([str(PRES / "run_presence.sh"), "help"])
-    for needle in ("train", "calibrate-live", "live", "gui", "capture", "status"):
+    for needle in ("train", "calibrate-live", "live", "gui", "web", "capture", "status"):
         if needle not in r.stdout:
             fail(f"help missing {needle}")
         else:

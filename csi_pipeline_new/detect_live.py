@@ -890,11 +890,19 @@ def iter_csi_from_file(path: Path, *, delay_s: float = 0.05):
                 time.sleep(delay_s)
 
 
-def iter_csi_from_tcp(port: int = 9055, bind: str = "0.0.0.0"):
-    """Yield ``(source_id, iq, meta)`` from multi-C5 TCP fan-in (same as ingest)."""
+def iter_csi_from_tcp(
+    port: int = 9055,
+    bind: str = "0.0.0.0",
+    *,
+    status: dict | None = None,
+):
+    """Yield ``(source_id, iq, meta)`` from multi-C5 TCP fan-in (same as ingest).
+
+    Optional ``status`` is updated by the TCP acceptor with ``active`` / ``ips``.
+    """
     from ingest_serial import iter_lines_tcp
 
-    for item in iter_lines_tcp(port, bind=bind):
+    for item in iter_lines_tcp(port, bind=bind, status=status):
         if item is None:
             continue
         source_id, line = item

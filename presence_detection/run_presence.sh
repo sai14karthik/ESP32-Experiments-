@@ -7,6 +7,7 @@
 #   ./run_presence.sh train                 # export empty+occupied → fuse train → sync models/
 #   ./run_presence.sh calibrate             # empty-room cal from export (TCP path)
 #   ./run_presence.sh live                  # TCP :9055 fused live (stop ingest first)
+#   ./run_presence.sh web                   # live + phone UI on :8765
 #   ./run_presence.sh eval                  # print saved metrics
 #   ./run_presence.sh status                # model + calibration summary
 #
@@ -35,6 +36,9 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh live                  # continuous scores (--fast)
   ./run_presence.sh live --quiet          # state changes only
   ./run_presence.sh gui                   # PyQt dashboard (TCP multi-RX)
+  ./run_presence.sh web                   # phone web UI (http://<mini-ip>:8765)
+  ./run_presence.sh web --http-port 8765  # optional port override
+  ./run_presence.sh test-web              # unit/integration tests (no hardware)
   ./run_presence.sh eval                  # print saved metrics
   ./run_presence.sh status                # model + calibration summary
   ./run_presence.sh sync                  # copy CSI models/exports → here
@@ -180,7 +184,7 @@ case "$cmd" in
     fi
     echo >&2
     echo "Next (room EMPTY, stop ingest): ./run_presence.sh calibrate-live" >&2
-    echo "Then: ./run_presence.sh live   # or: ./run_presence.sh gui" >&2
+    echo "Then: ./run_presence.sh live   # or: ./run_presence.sh gui / web" >&2
     ;;
   calibrate)
     CSV="$(resolve_csv)"
@@ -233,7 +237,7 @@ case "$cmd" in
     mkdir -p "$CSI/models"
     cp -f "$MODELS/site_calibration.joblib" "$CSI/models/site_calibration.joblib"
     echo "synced calibration → $MODELS/site_calibration.joblib" >&2
-    echo "Next: ./run_presence.sh live   # or: ./run_presence.sh gui" >&2
+    echo "Next: ./run_presence.sh live   # or: ./run_presence.sh gui / web" >&2
     ;;
   live)
     MP="$(require_presence_model)"
@@ -259,6 +263,24 @@ case "$cmd" in
     fi
     echo "Stop ingest/terminal live first if they hold :9055" >&2
     exec "$CSI/run_detect.sh" --skip-probe "${GUI_ARGS[@]}" "$@"
+    ;;
+  web)
+    MP="$(require_presence_model)"
+    CAL="$(resolve_cal)"
+    WEB_ARGS=(--model "$MP" --listen-tcp 9055 --fast --web --http-port 8765)
+    if [[ -n "$CAL" ]]; then
+      WEB_ARGS+=(--calibration "$CAL")
+    else
+      echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
+    fi
+    echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
+    echo "Phone: http://<mini-ip>:8765  (LabPSK phones may not reach Mini — use a LAN that can)" >&2
+    exec "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
+    ;;
+  test-web)
+    ensure_uv
+    echo "Running presence web tests (no hardware)…" >&2
+    uv_csi "$ROOT/tests/test_web_live.py" "$@"
     ;;
   eval)
     MP="$(resolve_model)"

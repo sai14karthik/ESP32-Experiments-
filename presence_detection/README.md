@@ -10,7 +10,7 @@ LabPSK AP (TX) --CSI--> N× C5 RX --TCP :9055--> Mini
                                               └─ presence_detection/models (train/live)
 ```
 
-**:9055 is exclusive** — capture, calibrate-live, live, and gui cannot share the
+**:9055 is exclusive** — capture, calibrate-live, live, gui, and web cannot share the
 port. Stop the current owner before starting the next.
 
 ## Daily loop (Mini)
@@ -30,8 +30,16 @@ cd presence_detection
 ./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
 ./run_presence.sh live                    # continuous P(presence)
 # or: ./run_presence.sh gui               # PyQt dashboard
-
+# or: ./run_presence.sh web               # phone: http://10.128.93.23:8765
 ./run_presence.sh eval
+```
+
+Phone UI (`web`) owns CSI `:9055` and serves HTTP `:8765`. Stop ingest/live/gui
+first. LabPSK client isolation may block phone→Mini; use a network that can
+reach the Mini IP.
+
+```bash
+./run_presence.sh test-web   # no hardware — hub / HTTP / TCP status / wiring
 ```
 
 ### Success criteria
@@ -64,7 +72,7 @@ If live is still wrong after `calibrate-live` (empty median P already high), ret
 
 | Path | Role |
 |------|------|
-| `run_presence.sh` | Capture / train / calibrate-live / live / gui / eval |
+| `run_presence.sh` | Capture / train / calibrate-live / live / gui / web / eval |
 | `models/` | `object_detector.joblib`, `site_calibration.joblib` |
 | `exports/` | Synced `training_packets.csv` |
 | `src/` | Paths + status helper |
@@ -88,4 +96,6 @@ No hardcoded max N — whatever distinct `source_id`s appear at train time.
 ./run_presence.sh live --rx-min 2
 ./run_presence.sh calibrate-live --seconds 120 --fpr 0.02
 ./run_presence.sh live --quiet
+./run_presence.sh web                   # phone browser → http://10.128.93.23:8765
+./run_presence.sh web --http-port 8765
 ```
