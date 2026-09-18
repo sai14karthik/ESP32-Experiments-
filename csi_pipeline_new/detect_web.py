@@ -114,7 +114,6 @@ PAGE_HTML = """<!DOCTYPE html>
   body.empty #state { background: var(--empty); color: var(--empty-fg); }
   body.presence #state { background: var(--presence); color: var(--presence-fg); }
   body.waiting #state { background: var(--wait); color: var(--wait-fg); }
-  /* One updating status line — overwritten in place, never a log */
   #line {
     min-height: 1.4em;
     font-size: 0.95rem;
@@ -268,7 +267,6 @@ PAGE_HTML = """<!DOCTYPE html>
     body.className = cls;
     el("state").textContent = label;
 
-    // Single in-place status line (overwrite textContent — never append)
     const parts = [];
     if (s.score != null && s.threshold != null) {
       parts.push("score " + fmt(s.score, 3) + " / thr " + fmt(s.threshold, 3));
@@ -323,9 +321,8 @@ PAGE_HTML = """<!DOCTYPE html>
 
 
 def render_page_html(room: str = DEFAULT_ROOM) -> str:
-    """Fill room name into the mobile page (single in-place prediction UI)."""
+    """Fill room name into the mobile page."""
     name = (room or DEFAULT_ROOM).strip() or DEFAULT_ROOM
-    # Escape minimal HTML specials for text injection into title/heading.
     safe = (
         name.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -454,7 +451,6 @@ def _make_handler(hub: PresenceHub, *, room: str = DEFAULT_ROOM):
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
-            # Keep CSI terminal readable — only log errors.
             if args and str(args[0]).startswith(("4", "5")):
                 super().log_message(fmt, *args)
 
@@ -492,8 +488,6 @@ def _make_handler(hub: PresenceHub, *, room: str = DEFAULT_ROOM):
                 gen = -1
                 try:
                     while True:
-                        # Short timeout so ESP connect/disconnect shows without
-                        # waiting for the next CSI packet.
                         gen, snap = hub.wait_snapshot(gen, timeout=0.4)
                         line = f"data: {json.dumps(snap)}\n\n"
                         self.wfile.write(line.encode("utf-8"))
@@ -562,7 +556,6 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_ROOM,
         help=f'Room label shown at top of phone UI (default "{DEFAULT_ROOM}")',
     )
-    # detect_live's --gui is irrelevant here; ignore if forwarded.
     args = parser.parse_args(argv)
     if getattr(args, "gui", False):
         print("NOTE: --gui ignored by detect_web (use ./run_presence.sh gui)", file=sys.stderr)

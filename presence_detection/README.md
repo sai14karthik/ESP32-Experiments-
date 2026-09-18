@@ -47,7 +47,7 @@ Mini serves a mobile page while it runs live CSI detect:
 |--|--|
 | **URL** | http://10.128.93.23:8765 |
 | **Phone Wi‑Fi** | **LabPSK** (same LAN as Mini — devices can reach each other) |
-| **Shows** | Centered EMPTY/PRESENCE (updates in place), one status line, live ESP list |
+| **Shows** | EMPTY / PRESENCE, score line, live ESP list |
 | **Room** | Default **Room 207** (`--room "Room 207"`) |
 
 Phone does **not** talk to the ESP boards; it only loads the Mini web page.
