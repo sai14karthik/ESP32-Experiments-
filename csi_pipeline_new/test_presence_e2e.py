@@ -143,8 +143,10 @@ def _check_web_stack(bundle: dict, sources: list[str], cal: dict | None) -> None
             html = resp.read().decode("utf-8")
         if "Connected to Mini" not in html or "device-list" not in html:
             fail("web HTML missing device panel")
+        elif "Room 207" not in html:
+            fail("web HTML missing room label")
         else:
-            ok("web HTML has Connected to Mini")
+            ok("web HTML has room + Connected to Mini")
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         if "devices" not in data or data.get("esp_active") != 2:

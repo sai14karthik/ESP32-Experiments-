@@ -32,6 +32,7 @@ from detect_live import (
 )
 
 DEFAULT_HTTP_PORT = 8765
+DEFAULT_ROOM = "Room 207"
 
 PAGE_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -39,7 +40,7 @@ PAGE_HTML = """<!DOCTYPE html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
-<title>Presence</title>
+<title>{{ROOM}} · Presence</title>
 <style>
   :root {
     --bg: #0f1410;
@@ -66,41 +67,66 @@ PAGE_HTML = """<!DOCTYPE html>
     padding: max(16px, env(safe-area-inset-top)) 20px
              max(20px, env(safe-area-inset-bottom));
   }
-  header {
-    display: flex; justify-content: space-between; align-items: baseline;
-    margin-bottom: 12px;
+  .top {
+    text-align: center;
+    padding: 8px 0 4px;
   }
-  header h1 {
-    font-size: 0.85rem; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--muted); margin: 0;
+  .top .room {
+    margin: 0;
+    font-size: clamp(1.4rem, 5vw, 1.85rem);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .top .sub {
+    margin: 6px 0 0;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
   }
   #conn {
     font-size: 0.75rem; color: var(--muted);
   }
   #conn.ok { color: var(--empty-fg); }
   #conn.bad { color: var(--presence-fg); }
+  .hero {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 14px;
+    min-height: 42vh;
+    margin: 12px 0;
+  }
   #state {
-    flex: 1; display: flex; align-items: center; justify-content: center;
-    border-radius: 20px; margin: 8px 0 16px;
-    font-size: clamp(2.8rem, 14vw, 5rem); font-weight: 700;
-    letter-spacing: 0.04em; transition: background 0.25s, color 0.25s;
+    width: 100%;
+    max-width: 28rem;
+    padding: 1.6rem 1rem;
+    border-radius: 20px;
+    font-size: clamp(2.6rem, 13vw, 4.5rem);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    transition: background 0.25s, color 0.25s;
     background: var(--wait); color: var(--wait-fg);
-    min-height: 28vh;
   }
   body.empty #state { background: var(--empty); color: var(--empty-fg); }
   body.presence #state { background: var(--presence); color: var(--presence-fg); }
   body.waiting #state { background: var(--wait); color: var(--wait-fg); }
-  .panel { display: grid; gap: 10px; }
-  .row {
-    display: flex; justify-content: space-between; gap: 12px;
-    padding: 12px 14px; border-radius: 12px;
-    background: rgba(255,255,255,0.04);
+  /* One updating status line — overwritten in place, never a log */
+  #line {
+    min-height: 1.4em;
     font-size: 0.95rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+    letter-spacing: 0.01em;
   }
-  .row .k { color: var(--muted); }
-  .row .v { font-variant-numeric: tabular-nums; text-align: right; }
   .devices {
-    margin-top: 4px;
     padding: 12px 14px;
     border-radius: 12px;
     background: rgba(255,255,255,0.04);
@@ -161,29 +187,34 @@ PAGE_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body class="waiting">
-<header>
-  <h1>CSI presence</h1>
-  <span id="conn">connecting…</span>
-</header>
-<div id="state">WAITING</div>
-<div class="panel">
-  <div class="row"><span class="k">Score / thr</span><span class="v" id="score">—</span></div>
-  <div class="row"><span class="k">RX fused</span><span class="v" id="rx">—</span></div>
-  <div class="row"><span class="k">RSSI / seq</span><span class="v" id="meta">—</span></div>
-  <div class="devices">
-    <h2>
-      <span>Connected to Mini</span>
-      <span id="esp">0 live</span>
-    </h2>
-    <ul id="device-list"></ul>
-    <div id="device-empty">No ESP TCP clients on :9055 yet</div>
-  </div>
+<div class="top">
+  <h1 class="room">{{ROOM}}</h1>
+  <p class="sub">Presence · <span id="conn">connecting…</span></p>
 </div>
-<footer>LabPSK · TCP :9055 → Mini · live board list updates automatically</footer>
+<div class="hero">
+  <div id="state">WAITING</div>
+  <div id="line">—</div>
+</div>
+<div class="devices">
+  <h2>
+    <span>Connected to Mini</span>
+    <span id="esp">0 live</span>
+  </h2>
+  <ul id="device-list"></ul>
+  <div id="device-empty">No ESP TCP clients on :9055 yet</div>
+</div>
+<footer>Same line updates live · not a scrolling log</footer>
 <script>
 (function () {
   const body = document.body;
   const el = (id) => document.getElementById(id);
+
+  function fmt(n, digits) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return "—";
+    const s = x.toFixed(digits);
+    return (x >= 0 && digits > 0 ? "+" : "") + s;
+  }
 
   function fmtAge(age) {
     if (age == null) return "";
@@ -242,28 +273,19 @@ PAGE_HTML = """<!DOCTYPE html>
     body.className = cls;
     el("state").textContent = label;
 
+    // Single in-place status line (overwrite textContent — never append)
+    const parts = [];
     if (s.score != null && s.threshold != null) {
-      const sc = Number(s.score);
-      const thr = Number(s.threshold);
-      el("score").textContent =
-        (sc >= 0 ? "+" : "") + sc.toFixed(3) + " / " +
-        (thr >= 0 ? "+" : "") + thr.toFixed(3);
-    } else {
-      el("score").textContent = "—";
+      parts.push("score " + fmt(s.score, 3) + " / thr " + fmt(s.threshold, 3));
     }
-
     if (s.rx_present != null) {
-      el("rx").textContent = s.rx_present + "/" + (s.rx_total ?? "?");
+      parts.push("rx " + s.rx_present + "/" + (s.rx_total ?? "?"));
     } else if (s.rx_ready != null) {
-      el("rx").textContent = s.rx_ready + "/" + (s.rx_need ?? "?") + " ready";
-    } else {
-      el("rx").textContent = "—";
+      parts.push("rx " + s.rx_ready + "/" + (s.rx_need ?? "?"));
     }
-
-    const bits = [];
-    if (s.rssi != null) bits.push(s.rssi + " dBm");
-    if (s.seq != null) bits.push("seq " + s.seq);
-    el("meta").textContent = bits.length ? bits.join(" · ") : "—";
+    if (s.rssi != null) parts.push(s.rssi + " dBm");
+    if (s.seq != null) parts.push("seq " + s.seq);
+    el("line").textContent = parts.length ? parts.join("  ·  ") : "—";
 
     renderDevices(s);
   }
@@ -303,6 +325,19 @@ PAGE_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+def render_page_html(room: str = DEFAULT_ROOM) -> str:
+    """Fill room name into the mobile page (single in-place prediction UI)."""
+    name = (room or DEFAULT_ROOM).strip() or DEFAULT_ROOM
+    # Escape minimal HTML specials for text injection into title/heading.
+    safe = (
+        name.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+    return PAGE_HTML.replace("{{ROOM}}", safe)
 
 
 class PresenceHub:
@@ -419,7 +454,9 @@ class PresenceHub:
             return self._gen, self._snapshot_unlocked()
 
 
-def _make_handler(hub: PresenceHub):
+def _make_handler(hub: PresenceHub, *, room: str = DEFAULT_ROOM):
+    page = render_page_html(room)
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
             # Keep CSI terminal readable — only log errors.
@@ -444,7 +481,7 @@ def _make_handler(hub: PresenceHub):
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path in ("/", "/index.html"):
-                self._send(200, PAGE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/api/status":
                 payload = json.dumps(hub.snapshot()).encode("utf-8")
@@ -525,6 +562,11 @@ def main(argv: list[str] | None = None) -> None:
         default="0.0.0.0",
         help="HTTP bind address (default 0.0.0.0)",
     )
+    parser.add_argument(
+        "--room",
+        default=DEFAULT_ROOM,
+        help=f'Room label shown at top of phone UI (default "{DEFAULT_ROOM}")',
+    )
     # detect_live's --gui is irrelevant here; ignore if forwarded.
     args = parser.parse_args(argv)
     if getattr(args, "gui", False):
@@ -579,10 +621,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     reader.start()
 
-    handler = _make_handler(hub)
+    handler = _make_handler(hub, room=args.room)
     httpd = ThreadingHTTPServer((args.http_bind, args.http_port), handler)
     print(
-        f"web UI http://{args.http_bind}:{args.http_port}/  "
+        f"web UI http://{args.http_bind}:{args.http_port}/  room={args.room!r}  "
         f"(CSI tcp :{args.listen_tcp}; trained RXs={trained or ['(single)']})",
         flush=True,
     )

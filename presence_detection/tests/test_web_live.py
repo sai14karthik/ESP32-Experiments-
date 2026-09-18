@@ -32,6 +32,7 @@ from detect_web import (  # noqa: E402
     PAGE_HTML,
     PresenceHub,
     _make_handler,
+    render_page_html,
 )
 from ingest_serial import iter_lines_tcp  # noqa: E402
 
@@ -189,11 +190,18 @@ class TestPageHtml(unittest.TestCase):
             "/api/status",
             "Connected to Mini",
             "device-list",
-            "Score / thr",
+            "{{ROOM}}",
+            "id=\"line\"",
             "PRESENCE",
             "EMPTY",
         ):
             self.assertIn(needle, PAGE_HTML, msg=f"missing {needle!r}")
+
+    def test_render_page_injects_room(self) -> None:
+        html = render_page_html("Room 207")
+        self.assertIn("Room 207", html)
+        self.assertNotIn("{{ROOM}}", html)
+        self.assertIn('id="line"', html)
 
     def test_default_http_port(self) -> None:
         self.assertEqual(DEFAULT_HTTP_PORT, 8765)
@@ -220,7 +228,7 @@ class TestHttpApi(unittest.TestCase):
             {"seq": 42, "rssi": -55},
         )
         port = _free_port()
-        handler = _make_handler(self.hub)
+        handler = _make_handler(self.hub, room="Room 207")
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.base = f"http://127.0.0.1:{port}"
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -236,7 +244,8 @@ class TestHttpApi(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers.get("content-type", ""))
         text = body.decode("utf-8")
-        self.assertIn("CSI presence", text)
+        self.assertIn("Room 207", text)
+        self.assertIn('id="line"', text)
         self.assertIn("EventSource", text)
 
     def test_index_html_alias(self) -> None:

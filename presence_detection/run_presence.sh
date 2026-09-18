@@ -268,14 +268,14 @@ case "$cmd" in
   web)
     MP="$(require_presence_model)"
     CAL="$(resolve_cal)"
-    WEB_ARGS=(--model "$MP" --listen-tcp 9055 --fast --web --http-port 8765)
+    WEB_ARGS=(--model "$MP" --listen-tcp 9055 --fast --web --http-port 8765 --room "Room 207")
     if [[ -n "$CAL" ]]; then
       WEB_ARGS+=(--calibration "$CAL")
     else
       echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
-    echo "Phone on LabPSK: http://10.128.93.23:8765" >&2
+    echo "Phone on LabPSK: http://10.128.93.23:8765  (Room 207)" >&2
     exec "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
     ;;
   test-web)
