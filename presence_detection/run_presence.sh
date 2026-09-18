@@ -274,7 +274,7 @@ case "$cmd" in
       echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
-    echo "Phone: http://<mini-ip>:8765  (LabPSK phones may not reach Mini — use a LAN that can)" >&2
+    echo "Phone on LabPSK: http://10.128.93.23:8765" >&2
     exec "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
     ;;
   test-web)

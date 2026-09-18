@@ -7,7 +7,7 @@ HTTP :8765 (default).
   ./run_presence.sh web
   python detect_web.py --listen-tcp 9055 --fast --http-port 8765
 
-Phone: http://<mini-ip>:8765  (must reach Mini; LabPSK isolation may block)
+Phone: http://10.128.93.23:8765 on LabPSK (same LAN as Mini).
 """
 
 from __future__ import annotations

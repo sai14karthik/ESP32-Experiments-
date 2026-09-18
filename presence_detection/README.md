@@ -29,17 +29,32 @@ cd presence_detection
 # Leave room EMPTY; stop ingest (frees :9055):
 ./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
 ./run_presence.sh live                    # continuous P(presence)
-# or: ./run_presence.sh gui               # PyQt dashboard
-# or: ./run_presence.sh web               # phone: http://10.128.93.23:8765
+# or: ./run_presence.sh gui               # PyQt on Mini
+# or: ./run_presence.sh web               # phone on LabPSK → http://10.128.93.23:8765
 ./run_presence.sh eval
 ```
 
-Phone UI (`web`) owns CSI `:9055` and serves HTTP `:8765`. Stop ingest/live/gui
-first. LabPSK client isolation may block phone→Mini; use a network that can
-reach the Mini IP.
+## Phone UI (any iOS / Android browser)
+
+Mini serves a mobile page while it runs live CSI detect:
+
+```bash
+# On Mini — stop ingest / live / gui first (:9055 exclusive)
+./run_presence.sh web
+```
+
+| | |
+|--|--|
+| **URL** | http://10.128.93.23:8765 |
+| **Phone Wi‑Fi** | **LabPSK** (same LAN as Mini — devices can reach each other) |
+| **Shows** | EMPTY / PRESENCE, score vs thr, fused `rx=k/N`, ESP count + IPs |
+
+Phone does **not** talk to the ESP boards; it only loads the Mini web page.
+C5s still forward CSI to Mini on `:9055` as usual.
 
 ```bash
 ./run_presence.sh test-web   # no hardware — hub / HTTP / TCP status / wiring
+./run_presence.sh web --http-port 8765   # optional port override
 ```
 
 ### Success criteria
@@ -96,6 +111,7 @@ No hardcoded max N — whatever distinct `source_id`s appear at train time.
 ./run_presence.sh live --rx-min 2
 ./run_presence.sh calibrate-live --seconds 120 --fpr 0.02
 ./run_presence.sh live --quiet
-./run_presence.sh web                   # phone browser → http://10.128.93.23:8765
+./run_presence.sh web                   # LabPSK phone → http://10.128.93.23:8765
 ./run_presence.sh web --http-port 8765
+./run_presence.sh test-web              # no-hardware web tests
 ```
