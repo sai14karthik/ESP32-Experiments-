@@ -93,12 +93,29 @@ class TestPresenceHub(unittest.TestCase):
         self.assertEqual(hub.snapshot()["p_presence"], 0.4)
 
     def test_tcp_status_reflected_in_snapshot(self) -> None:
-        hub = PresenceHub()
-        hub.tcp_status["active"] = 3
-        hub.tcp_status["ips"] = ["10.128.93.29", "10.128.93.31", "10.128.93.32"]
+        hub = PresenceHub(
+            trained_order=["10.128.93.29", "10.128.93.31", "10.128.93.32"]
+        )
+        hub.tcp_status["active"] = 2
+        hub.tcp_status["ips"] = ["10.128.93.29", "10.128.93.31"]
+        hub.note_packet("10.128.93.29", {"rssi": -48, "seq": 10})
         s = hub.snapshot()
-        self.assertEqual(s["esp_active"], 3)
-        self.assertEqual(len(s["esp_ips"]), 3)
+        self.assertEqual(s["esp_active"], 2)
+        self.assertEqual(len(s["esp_ips"]), 2)
+        devices = {d["ip"]: d for d in s["devices"]}
+        self.assertTrue(devices["10.128.93.29"]["connected"])
+        self.assertTrue(devices["10.128.93.29"]["trained"])
+        self.assertEqual(devices["10.128.93.29"]["rssi"], -48)
+        self.assertTrue(devices["10.128.93.31"]["connected"])
+        self.assertFalse(devices["10.128.93.32"]["connected"])
+        self.assertTrue(devices["10.128.93.32"]["trained"])
+
+    def test_devices_sort_live_first(self) -> None:
+        hub = PresenceHub(trained_order=["10.0.0.2", "10.0.0.1"])
+        hub.tcp_status["active"] = 1
+        hub.tcp_status["ips"] = ["10.0.0.2"]
+        ips = [d["ip"] for d in hub.snapshot()["devices"]]
+        self.assertEqual(ips[0], "10.0.0.2")
 
     def test_wait_snapshot_timeout_no_deadlock(self) -> None:
         hub = PresenceHub()
@@ -170,7 +187,8 @@ class TestPageHtml(unittest.TestCase):
             "EventSource",
             "/api/stream",
             "/api/status",
-            "ESP connected",
+            "Connected to Mini",
+            "device-list",
             "Score / thr",
             "PRESENCE",
             "EMPTY",
@@ -183,9 +201,12 @@ class TestPageHtml(unittest.TestCase):
 
 class TestHttpApi(unittest.TestCase):
     def setUp(self) -> None:
-        self.hub = PresenceHub()
+        self.hub = PresenceHub(
+            trained_order=["10.128.93.29", "10.128.93.31", "10.128.93.32"]
+        )
         self.hub.tcp_status["active"] = 2
         self.hub.tcp_status["ips"] = ["10.128.93.29", "10.128.93.31"]
+        self.hub.note_packet("10.128.93.29", {"rssi": -48, "seq": 41})
         self.hub.update_detect(
             {
                 "ready": True,
@@ -221,7 +242,7 @@ class TestHttpApi(unittest.TestCase):
     def test_index_html_alias(self) -> None:
         status, _, body = _http_get(self.base + "/index.html")
         self.assertEqual(status, 200)
-        self.assertIn(b"ESP connected", body)
+        self.assertIn(b"Connected to Mini", body)
 
     def test_api_status_json(self) -> None:
         status, headers, body = _http_get(self.base + "/api/status")
@@ -236,6 +257,10 @@ class TestHttpApi(unittest.TestCase):
         self.assertEqual(data["rx_present"], 2)
         self.assertEqual(data["rx_total"], 3)
         self.assertEqual(data["seq"], 42)
+        devices = {d["ip"]: d for d in data["devices"]}
+        self.assertTrue(devices["10.128.93.29"]["connected"])
+        self.assertFalse(devices["10.128.93.32"]["connected"])
+        self.assertIn("devices", data)
 
     def test_api_404(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as ctx:

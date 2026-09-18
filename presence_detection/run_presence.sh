@@ -39,6 +39,7 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh web                   # phone web UI (http://<mini-ip>:8765)
   ./run_presence.sh web --http-port 8765  # optional port override
   ./run_presence.sh test-web              # unit/integration tests (no hardware)
+  ./run_presence.sh test-e2e              # full A–Z pipeline proof (no hardware)
   ./run_presence.sh eval                  # print saved metrics
   ./run_presence.sh status                # model + calibration summary
   ./run_presence.sh sync                  # copy CSI models/exports → here
@@ -281,6 +282,11 @@ case "$cmd" in
     ensure_uv
     echo "Running presence web tests (no hardware)…" >&2
     uv_csi "$ROOT/tests/test_web_live.py" "$@"
+    ;;
+  test-e2e)
+    ensure_uv
+    echo "Running full presence E2E (no hardware)…" >&2
+    uv_csi "$CSI/test_presence_e2e.py" "$@"
     ;;
   eval)
     MP="$(resolve_model)"

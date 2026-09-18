@@ -51,6 +51,8 @@ PAGE_HTML = """<!DOCTYPE html>
     --presence-fg: #ff8a8a;
     --wait: #1a2230;
     --wait-fg: #9eb6d4;
+    --live: #3ecf8e;
+    --off: #6a7370;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -79,18 +81,16 @@ PAGE_HTML = """<!DOCTYPE html>
   #conn.bad { color: var(--presence-fg); }
   #state {
     flex: 1; display: flex; align-items: center; justify-content: center;
-    border-radius: 20px; margin: 8px 0 20px;
+    border-radius: 20px; margin: 8px 0 16px;
     font-size: clamp(2.8rem, 14vw, 5rem); font-weight: 700;
     letter-spacing: 0.04em; transition: background 0.25s, color 0.25s;
     background: var(--wait); color: var(--wait-fg);
-    min-height: 40vh;
+    min-height: 28vh;
   }
   body.empty #state { background: var(--empty); color: var(--empty-fg); }
   body.presence #state { background: var(--presence); color: var(--presence-fg); }
   body.waiting #state { background: var(--wait); color: var(--wait-fg); }
-  .panel {
-    display: grid; gap: 10px;
-  }
+  .panel { display: grid; gap: 10px; }
   .row {
     display: flex; justify-content: space-between; gap: 12px;
     padding: 12px 14px; border-radius: 12px;
@@ -99,10 +99,61 @@ PAGE_HTML = """<!DOCTYPE html>
   }
   .row .k { color: var(--muted); }
   .row .v { font-variant-numeric: tabular-nums; text-align: right; }
-  #ips {
-    font-size: 0.8rem; color: var(--muted);
-    word-break: break-all; margin-top: 4px; line-height: 1.4;
+  .devices {
+    margin-top: 4px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.04);
   }
+  .devices h2 {
+    margin: 0 0 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+  }
+  #device-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 8px;
+  }
+  #device-list li {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    align-items: center;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  #device-list .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--off);
+  }
+  #device-list li.live .dot { background: var(--live); box-shadow: 0 0 8px var(--live); }
+  #device-list .ip { font-weight: 600; }
+  #device-list .meta {
+    color: var(--muted);
+    font-size: 0.75rem;
+    grid-column: 2 / -1;
+  }
+  #device-list .badge {
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--off);
+  }
+  #device-list li.live .badge { color: var(--live); }
+  #device-empty {
+    color: var(--muted);
+    font-size: 0.85rem;
+    display: none;
+  }
+  #device-empty.show { display: block; }
   footer {
     margin-top: 16px; font-size: 0.7rem; color: var(--muted);
     text-align: center;
@@ -118,15 +169,57 @@ PAGE_HTML = """<!DOCTYPE html>
 <div class="panel">
   <div class="row"><span class="k">Score / thr</span><span class="v" id="score">—</span></div>
   <div class="row"><span class="k">RX fused</span><span class="v" id="rx">—</span></div>
-  <div class="row"><span class="k">ESP connected</span><span class="v" id="esp">—</span></div>
-  <div id="ips"></div>
   <div class="row"><span class="k">RSSI / seq</span><span class="v" id="meta">—</span></div>
+  <div class="devices">
+    <h2>
+      <span>Connected to Mini</span>
+      <span id="esp">0 live</span>
+    </h2>
+    <ul id="device-list"></ul>
+    <div id="device-empty">No ESP TCP clients on :9055 yet</div>
+  </div>
 </div>
-<footer>Live from Mini · ignore raw P when score is below thr</footer>
+<footer>LabPSK · TCP :9055 → Mini · live board list updates automatically</footer>
 <script>
 (function () {
   const body = document.body;
   const el = (id) => document.getElementById(id);
+
+  function fmtAge(age) {
+    if (age == null) return "";
+    if (age < 1.5) return "now";
+    if (age < 60) return Math.round(age) + "s ago";
+    return Math.round(age / 60) + "m ago";
+  }
+
+  function renderDevices(s) {
+    const list = el("device-list");
+    const empty = el("device-empty");
+    const devices = s.devices || [];
+    const liveN = s.esp_active ?? devices.filter((d) => d.connected).length;
+    el("esp").textContent = liveN + " live";
+    list.innerHTML = "";
+    if (!devices.length) {
+      empty.className = "show";
+      return;
+    }
+    empty.className = "";
+    for (const d of devices) {
+      const li = document.createElement("li");
+      li.className = d.connected ? "live" : "off";
+      const bits = [];
+      if (d.trained) bits.push("trained");
+      else if (d.connected) bits.push("new IP");
+      if (d.rssi != null) bits.push(d.rssi + " dBm");
+      if (d.age_s != null && d.connected) bits.push(fmtAge(d.age_s));
+      li.innerHTML =
+        '<span class="dot"></span>' +
+        '<span class="ip">' + d.ip + '</span>' +
+        '<span class="badge">' + (d.connected ? "LIVE" : "OFF") + '</span>' +
+        (bits.length ? '<span class="meta">' + bits.join(" · ") + '</span>' : "");
+      list.appendChild(li);
+    }
+  }
 
   function apply(s) {
     el("conn").textContent = "live";
@@ -167,15 +260,12 @@ PAGE_HTML = """<!DOCTYPE html>
       el("rx").textContent = "—";
     }
 
-    const n = s.esp_active ?? 0;
-    const ips = s.esp_ips || [];
-    el("esp").textContent = String(n);
-    el("ips").textContent = ips.length ? ips.join(" · ") : "";
-
     const bits = [];
     if (s.rssi != null) bits.push(s.rssi + " dBm");
     if (s.seq != null) bits.push("seq " + s.seq);
     el("meta").textContent = bits.length ? bits.join(" · ") : "—";
+
+    renderDevices(s);
   }
 
   function fail() {
@@ -218,9 +308,11 @@ PAGE_HTML = """<!DOCTYPE html>
 class PresenceHub:
     """Thread-safe latest snapshot for HTTP / SSE clients."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, trained_order: list[str] | None = None) -> None:
         self._lock = threading.Lock()
         self._tcp_status: dict[str, Any] = {"active": 0, "ips": []}
+        self._trained_order: list[str] = list(trained_order or [])
+        self._per_rx: dict[str, dict[str, Any]] = {}
         self._detect: dict[str, Any] = {
             "ready": False,
             "state": "waiting",
@@ -239,6 +331,22 @@ class PresenceHub:
     @property
     def tcp_status(self) -> dict[str, Any]:
         return self._tcp_status
+
+    def set_trained_order(self, order: list[str] | None) -> None:
+        with self._lock:
+            self._trained_order = list(order or [])
+
+    def note_packet(self, source_id: str | None, meta: dict[str, Any]) -> None:
+        """Record last CSI sighting for a TCP client IP."""
+        sid = (source_id or meta.get("source_id") or "").strip()
+        if not sid:
+            return
+        with self._lock:
+            self._per_rx[sid] = {
+                "rssi": meta.get("rssi"),
+                "seq": meta.get("seq"),
+                "last_mono": time.monotonic(),
+            }
 
     def update_detect(self, result: dict[str, Any], meta: dict[str, Any]) -> None:
         with self._cond:
@@ -269,11 +377,39 @@ class PresenceHub:
         with self._lock:
             return self._snapshot_unlocked()
 
+    def _devices_unlocked(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        tcp_ips = {str(ip) for ip in (self._tcp_status.get("ips") or [])}
+        trained = set(self._trained_order)
+        all_ips = sorted(tcp_ips | trained | set(self._per_rx.keys()))
+        devices: list[dict[str, Any]] = []
+        for ip in all_ips:
+            info = self._per_rx.get(ip) or {}
+            connected = ip in tcp_ips
+            age_s = None
+            last = info.get("last_mono")
+            if last is not None:
+                age_s = round(now - float(last), 1)
+            devices.append(
+                {
+                    "ip": ip,
+                    "connected": connected,
+                    "trained": ip in trained,
+                    "rssi": info.get("rssi"),
+                    "seq": info.get("seq"),
+                    "age_s": age_s,
+                }
+            )
+        devices.sort(key=lambda d: (not d["connected"], d["ip"]))
+        return devices
+
     def _snapshot_unlocked(self) -> dict[str, Any]:
         tcp = dict(self._tcp_status)
         out = dict(self._detect)
         out["esp_active"] = int(tcp.get("active") or 0)
         out["esp_ips"] = list(tcp.get("ips") or [])
+        out["trained_ips"] = list(self._trained_order)
+        out["devices"] = self._devices_unlocked()
         return out
 
     def wait_snapshot(self, last_gen: int, timeout: float = 25.0) -> tuple[int, dict[str, Any]]:
@@ -350,6 +486,7 @@ def _csi_loop(
         ):
             if stop.is_set():
                 break
+            hub.note_packet(source_id, meta)
             kwargs = dict(
                 rssi=float(meta.get("rssi") or 0.0),
                 agc_gain=float(meta.get("agc_gain") or 0.0),
@@ -426,7 +563,12 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
 
-    hub = PresenceHub()
+    trained = list(
+        getattr(detector, "rx_sources_order", None)
+        or bundle.get("rx_sources_order")
+        or []
+    )
+    hub = PresenceHub(trained_order=trained)
     stop = threading.Event()
     reader = threading.Thread(
         target=_csi_loop,
@@ -441,7 +583,7 @@ def main(argv: list[str] | None = None) -> None:
     httpd = ThreadingHTTPServer((args.http_bind, args.http_port), handler)
     print(
         f"web UI http://{args.http_bind}:{args.http_port}/  "
-        f"(CSI tcp :{args.listen_tcp})",
+        f"(CSI tcp :{args.listen_tcp}; trained RXs={trained or ['(single)']})",
         flush=True,
     )
     try:

@@ -47,13 +47,14 @@ Mini serves a mobile page while it runs live CSI detect:
 |--|--|
 | **URL** | http://10.128.93.23:8765 |
 | **Phone Wi‑Fi** | **LabPSK** (same LAN as Mini — devices can reach each other) |
-| **Shows** | EMPTY / PRESENCE, score vs thr, fused `rx=k/N`, ESP count + IPs |
+| **Shows** | EMPTY / PRESENCE, score vs thr, fused `rx=k/N`, **live ESP list** (IP + LIVE/OFF) |
 
 Phone does **not** talk to the ESP boards; it only loads the Mini web page.
 C5s still forward CSI to Mini on `:9055` as usual.
 
 ```bash
-./run_presence.sh test-web   # no hardware — hub / HTTP / TCP status / wiring
+./run_presence.sh test-web   # web hub / HTTP / TCP status / wiring
+./run_presence.sh test-e2e   # full A–Z: train → cal → live 1..N → web → suites
 ./run_presence.sh web --http-port 8765   # optional port override
 ```
 
@@ -114,4 +115,5 @@ No hardcoded max N — whatever distinct `source_id`s appear at train time.
 ./run_presence.sh web                   # LabPSK phone → http://10.128.93.23:8765
 ./run_presence.sh web --http-port 8765
 ./run_presence.sh test-web              # no-hardware web tests
+./run_presence.sh test-e2e              # full A–Z pipeline proof
 ```
