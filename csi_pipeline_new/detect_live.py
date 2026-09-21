@@ -1044,6 +1044,23 @@ def main() -> None:
         gui_main()
         return
 
+    # Leave SSH controlling TTY; ignore tty-stop signals (Enter was "resuming" a STOPPED job).
+    import os
+    import signal
+
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    for sig_name in ("SIGTTOU", "SIGTTIN"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass
+
     # Keep SSH/tmux from looking frozen when Python buffers lines.
     for stream in (sys.stdout, sys.stderr):
         try:

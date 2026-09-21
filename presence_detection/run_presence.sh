@@ -27,8 +27,25 @@ if [[ -t 0 ]] && command -v stty >/dev/null 2>&1; then
 fi
 export PYTHONUNBUFFERED=1
 
+# Ignore tty stop signals — SSH job control otherwise freezes CSI and the UI goes offline.
+trap '' TTOU TTIN 2>/dev/null || true
+
 # shellcheck disable=SC1091
 source "$CSI/uv_common.sh"
+
+# Run live/web detached from the controlling terminal (survives SSH quirks).
+run_detached() {
+  local log="$1"
+  shift
+  mkdir -p "$(dirname "$log")"
+  echo "Logs → $log" >&2
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid "$@" </dev/null >>"$log" 2>&1
+  else
+    exec "$@" </dev/null >>"$log" 2>&1
+  fi
+}
+
 
 usage() {
   cat <<'EOF'
@@ -257,12 +274,8 @@ case "$cmd" in
       echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ./run_multi_ingest.sh first if it holds :9055" >&2
-    # Detach from SSH TTY: Enter/Ctrl+S must never stall CSI (that freezes the phone UI too).
-    mkdir -p "$ROOT/logs"
-    LOG="$ROOT/logs/live.log"
-    echo "Logs → $LOG   (tail -f $LOG). Do not use this SSH window as the live display." >&2
-    exec </dev/null >>"$LOG" 2>&1
-    exec "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
+    run_detached "$ROOT/logs/live.log" \
+      "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
     ;;
   gui)
     MP="$(require_presence_model)"
@@ -286,13 +299,9 @@ case "$cmd" in
       echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
-    echo "Phone on LabPSK: http://10.128.93.23:8765  (Room 207)" >&2
-    # Detach from SSH TTY completely — Enter/scroll must not gate CSI or the phone UI.
-    mkdir -p "$ROOT/logs"
-    LOG="$ROOT/logs/web.log"
-    echo "Logs → $LOG   (tail -f $LOG). Continuity = phone only. Leave this SSH alone." >&2
-    exec </dev/null >>"$LOG" 2>&1
-    exec "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
+    echo "UI: http://10.128.93.23:8765  (Room 207)" >&2
+    run_detached "$ROOT/logs/web.log" \
+      "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
     ;;
   test-web)
     ensure_uv

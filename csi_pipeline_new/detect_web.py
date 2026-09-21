@@ -13,6 +13,7 @@ Phone: http://10.128.93.23:8765 on LabPSK (same LAN as Mini).
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import threading
 import time
@@ -649,6 +650,22 @@ def _csi_loop(
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Leave the SSH controlling TTY so job-control STOP can't freeze CSI/UI.
+    import os
+
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    for sig_name in ("SIGTTOU", "SIGTTIN"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass
+
     parser = build_live_arg_parser(include_terminal_flags=True)
     parser.add_argument(
         "--http-port",
