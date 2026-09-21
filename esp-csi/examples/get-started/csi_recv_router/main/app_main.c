@@ -270,12 +270,13 @@ static void csi_pipeline_start(void)
     s_last_csi_tick = xTaskGetTickCount();
 }
 
-/** Soft recover: restart ping to re-stimulate router CSI. */
+/** Soft recover: restart ping to re-stimulate router CSI.
+ *  Do not tear down TCP — that drops Mini ingest and causes reconnect storms.
+ */
 static void csi_recover_ping(void)
 {
-    ESP_LOGW(TAG, "CSI stall → restart ping");
+    ESP_LOGW(TAG, "CSI stall → restart ping (TCP stays up)");
     wifi_ping_router_start();
-    csi_tcp_forward_force_reconnect();
 }
 
 /** Hard recover: drop Wi‑Fi, reconnect, re-enable CSI + ping. */

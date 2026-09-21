@@ -459,7 +459,8 @@ class MultiRxLiveDetector:
         self._overflow_warned: set[str] = set()
         self._alias_noted: set[str] = set()
         self.stalls_dropped = 0
-        self.idle_s = max(5.0, 3.0 * self.bin_s)
+        # Tolerate brief Wi‑Fi/TCP gaps without zero-padding / "silent" spam.
+        self.idle_s = max(15.0, 5.0 * self.bin_s)
 
         self.score_kind = (
             calibration.get("score_kind", "predict_proba")
