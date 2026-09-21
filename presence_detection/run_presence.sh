@@ -33,14 +33,56 @@ trap '' TTOU TTIN 2>/dev/null || true
 # shellcheck disable=SC1091
 source "$CSI/uv_common.sh"
 
-# Run live/web in the background so SSH Enter/Ctrl+S/job-control cannot STOP them.
-# Returns immediately; PID written next to the log.
+# Start web inside tmux so SSH Enter/sleep quirks cannot freeze CSI.
+start_web_tmux() {
+  local mp="$1"
+  local cal="$2"
+  shift 2
+  mkdir -p "$ROOT/logs"
+  pkill -f detect_web 2>/dev/null || true
+  tmux kill-session -t presence 2>/dev/null || true
+  sleep 0.5
+
+  # Keep Mini awake (best-effort; may need sudo once for pmset).
+  if ! pgrep -x caffeinate >/dev/null 2>&1; then
+    caffeinate -dims >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
+  fi
+  pmset -c sleep 0 disksleep 0 displaysleep 0 2>/dev/null || true
+
+  local cal_arg=""
+  if [[ -n "$cal" ]]; then
+    cal_arg=" --calibration \"$cal\""
+  fi
+  local extra=""
+  if [[ $# -gt 0 ]]; then
+    printf -v extra " %q" "$@"
+  fi
+
+  local cmd
+  cmd="cd \"$CSI\" && ./run_detect.sh --skip-probe --model \"$mp\"${cal_arg} --listen-tcp 9055 --fast --web --http-port 8765 --room 'Room 207'${extra} 2>&1 | tee \"$ROOT/logs/web.log\""
+
+  tmux new -d -s presence
+  tmux send-keys -t presence "$cmd" Enter
+  sleep 1
+  echo "UI:   http://10.128.93.23:8765" >&2
+  echo "Logs: $ROOT/logs/web.log   (or: tmux attach -t presence)" >&2
+  echo "Stop: ./run_presence.sh web-stop" >&2
+}
+
+stop_web() {
+  pkill -f detect_web 2>/dev/null || true
+  pkill -f 'run_detect.sh.*--web' 2>/dev/null || true
+  tmux kill-session -t presence 2>/dev/null || true
+  rm -f "$ROOT/logs/web.pid"
+  echo "web stopped" >&2
+}
+
 run_background() {
   local log="$1"
   local pidfile="$2"
   shift 2
   mkdir -p "$(dirname "$log")"
-  # Stop any prior instance we started.
   if [[ -f "$pidfile" ]]; then
     old="$(cat "$pidfile" 2>/dev/null || true)"
     if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
@@ -48,13 +90,12 @@ run_background() {
       sleep 0.5
     fi
   fi
-  # Prefer Python daemonize inside the app; nohup+background is the reliable Mac SSH path.
   nohup "$@" </dev/null >>"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$pidfile"
   disown "$pid" 2>/dev/null || true
   echo "Logs → $log" >&2
-  echo "PID  → $pid  (stop: kill \$(cat $pidfile))" >&2
+  echo "PID  → $pid  (stop: ./run_presence.sh live-stop)" >&2
 }
 
 
@@ -67,13 +108,12 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh train                 # export empty+occupied → fuse train → models/
   ./run_presence.sh calibrate             # empty-room cal from training CSV
   ./run_presence.sh calibrate-live        # EMPTY room over TCP :9055 (fix live)
-  ./run_presence.sh web                   # phone web UI (background; http://<mini-ip>:8765)
-  ./run_presence.sh web-stop              # stop background web
+  ./run_presence.sh web                   # start UI in tmux (http://10.128.93.23:8765)
+  ./run_presence.sh web-stop              # stop web
   ./run_presence.sh live                  # continuous scores (background)
-  ./run_presence.sh live-stop             # stop background live
+  ./run_presence.sh live-stop             # stop live
   ./run_presence.sh live --quiet          # state changes only
   ./run_presence.sh gui                   # PyQt dashboard (TCP multi-RX)
-  ./run_presence.sh web --http-port 8765  # optional port override
   ./run_presence.sh test-web              # unit/integration tests (no hardware)
   ./run_presence.sh test-e2e              # full A–Z pipeline proof (no hardware)
   ./run_presence.sh eval                  # print saved metrics
@@ -305,31 +345,25 @@ case "$cmd" in
   web)
     MP="$(require_presence_model)"
     CAL="$(resolve_cal)"
-    WEB_ARGS=(--model "$MP" --listen-tcp 9055 --fast --web --http-port 8765 --room "Room 207")
-    if [[ -n "$CAL" ]]; then
-      WEB_ARGS+=(--calibration "$CAL")
-    else
-      echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
-    fi
     echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
-    echo "UI: http://10.128.93.23:8765  (Room 207)" >&2
-    run_background "$ROOT/logs/web.log" "$ROOT/logs/web.pid" \
-      "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
+    start_web_tmux "$MP" "$CAL" "$@"
     ;;
-  web-stop|live-stop)
-    which="${cmd%-stop}"
-    pidfile="$ROOT/logs/${which}.pid"
+  web-stop)
+    stop_web
+    ;;
+  live-stop)
+    pidfile="$ROOT/logs/live.pid"
     if [[ -f "$pidfile" ]]; then
       pid="$(cat "$pidfile")"
       if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" && echo "stopped $which pid=$pid" >&2
+        kill "$pid" && echo "stopped live pid=$pid" >&2
       else
-        echo "$which not running (stale pid $pid)" >&2
+        echo "live not running (stale pid $pid)" >&2
       fi
       rm -f "$pidfile"
     else
-      echo "no pid file $pidfile" >&2
-      exit 1
+      pkill -f detect_live 2>/dev/null || true
+      echo "live stopped" >&2
     fi
     ;;
   test-web)
