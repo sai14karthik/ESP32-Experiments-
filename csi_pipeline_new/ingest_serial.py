@@ -199,20 +199,22 @@ def iter_lines_tcp(
     Yields None (idle) or (source_id, line) where source_id is the client IP.
 
     If ``status`` is provided, it is updated under an internal lock with:
-    ``active`` (int connection count) and ``ips`` (sorted unique client IPs).
+    ``active`` (unique client IPs), ``connections`` (open TCP sockets),
+    and ``ips`` (sorted unique client IPs).
     """
     q: queue.Queue[Any] = queue.Queue(maxsize=20000)
     stop = threading.Event()
     clients_lock = threading.Lock()
     n_clients = 0
-    # IP → open connection count (one board usually = 1).
+    # IP → open connection count (one board usually = 1; briefly 2 on reconnect).
     ip_counts: dict[str, int] = {}
     sentinel = object()
 
     def _publish_status() -> None:
         if status is None:
             return
-        status["active"] = n_clients
+        status["connections"] = n_clients
+        status["active"] = len(ip_counts)
         status["ips"] = sorted(ip_counts.keys())
 
     if status is not None:
@@ -283,10 +285,11 @@ def iter_lines_tcp(
                 else:
                     ip_counts[source_id] = left
                 left_n = n_clients
+                n_ips = len(ip_counts)
                 _publish_status()
             print(
-                f"client disconnected {addr[0]}:{addr[1]} (active={left_n}; "
-                f"ingest continues)",
+                f"client disconnected {addr[0]}:{addr[1]} "
+                f"(sockets={left_n}, boards={n_ips}; ingest continues)",
                 flush=True,
             )
 
@@ -313,9 +316,11 @@ def iter_lines_tcp(
                     n_clients += 1
                     ip_counts[addr[0]] = ip_counts.get(addr[0], 0) + 1
                     active = n_clients
+                    n_ips = len(ip_counts)
                     _publish_status()
                 print(
-                    f"client connected {addr[0]}:{addr[1]} (active={active})",
+                    f"client connected {addr[0]}:{addr[1]} "
+                    f"(sockets={active}, boards={n_ips})",
                     flush=True,
                 )
                 threading.Thread(

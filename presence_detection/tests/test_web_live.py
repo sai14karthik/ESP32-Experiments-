@@ -118,6 +118,15 @@ class TestPresenceHub(unittest.TestCase):
         ips = [d["ip"] for d in hub.snapshot()["devices"]]
         self.assertEqual(ips[0], "10.0.0.2")
 
+    def test_recent_packet_keeps_live_through_tcp_gap(self) -> None:
+        hub = PresenceHub(trained_order=["10.128.93.29"])
+        hub.note_packet("10.128.93.29", {"rssi": -50, "seq": 1})
+        hub.tcp_status["ips"] = []
+        hub.tcp_status["connections"] = 0
+        d = {x["ip"]: x for x in hub.snapshot()["devices"]}
+        self.assertTrue(d["10.128.93.29"]["connected"])
+        self.assertEqual(hub.snapshot()["esp_active"], 1)
+
     def test_wait_snapshot_timeout_no_deadlock(self) -> None:
         hub = PresenceHub()
         t0 = time.monotonic()
@@ -357,7 +366,9 @@ class TestTcpClientStatus(unittest.TestCase):
         c1 = socket.create_connection(("127.0.0.1", port), timeout=1.0)
         c2 = socket.create_connection(("127.0.0.1", port), timeout=1.0)
         time.sleep(0.15)
-        self.assertEqual(status.get("active"), 2)
+        # Same host IP → 1 board, 2 sockets (reconnect-style)
+        self.assertEqual(status.get("active"), 1)
+        self.assertEqual(status.get("connections"), 2)
         self.assertIn("127.0.0.1", status.get("ips") or [])
 
         c1.sendall(b'CSI_DATA,1,aa:bb:cc:dd:ee:ff,-40,11,-90,0,0,1,1,8,0,8,1,"[1,2,3,4,5,6,7,8]"\n')
@@ -370,8 +381,9 @@ class TestTcpClientStatus(unittest.TestCase):
         c1.close()
         c2.close()
         deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and status.get("active", -1) != 0:
+        while time.monotonic() < deadline and status.get("connections", -1) != 0:
             time.sleep(0.05)
+        self.assertEqual(status.get("connections"), 0)
         self.assertEqual(status.get("active"), 0)
         self.assertEqual(status.get("ips"), [])
         stop.set()

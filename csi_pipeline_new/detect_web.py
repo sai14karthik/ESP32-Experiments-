@@ -33,6 +33,8 @@ from detect_live import (
 
 DEFAULT_HTTP_PORT = 8765
 DEFAULT_ROOM = "Room 207"
+# Keep LIVE through brief TCP reconnect gaps (boards drop old socket then reopen).
+DEVICE_LIVE_GRACE_S = 8.0
 
 PAGE_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -412,11 +414,12 @@ class PresenceHub:
         devices: list[dict[str, Any]] = []
         for ip in all_ips:
             info = self._per_rx.get(ip) or {}
-            connected = ip in tcp_ips
             age_s = None
             last = info.get("last_mono")
             if last is not None:
                 age_s = round(now - float(last), 1)
+            recent = age_s is not None and age_s <= DEVICE_LIVE_GRACE_S
+            connected = ip in tcp_ips or recent
             devices.append(
                 {
                     "ip": ip,
@@ -433,10 +436,13 @@ class PresenceHub:
     def _snapshot_unlocked(self) -> dict[str, Any]:
         tcp = dict(self._tcp_status)
         out = dict(self._detect)
-        out["esp_active"] = int(tcp.get("active") or 0)
-        out["esp_ips"] = list(tcp.get("ips") or [])
+        devices = self._devices_unlocked()
+        live_ips = [d["ip"] for d in devices if d["connected"]]
+        out["esp_active"] = len(live_ips)
+        out["esp_connections"] = int(tcp.get("connections") or 0)
+        out["esp_ips"] = live_ips
         out["trained_ips"] = list(self._trained_order)
-        out["devices"] = self._devices_unlocked()
+        out["devices"] = devices
         return out
 
     def wait_snapshot(self, last_gen: int, timeout: float = 25.0) -> tuple[int, dict[str, Any]]:
