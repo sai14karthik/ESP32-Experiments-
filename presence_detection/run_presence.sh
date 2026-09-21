@@ -257,6 +257,11 @@ case "$cmd" in
       echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ./run_multi_ingest.sh first if it holds :9055" >&2
+    # SSH/TTY backpressure freezes print() → CSI stalls → boards reconnect → phone freezes.
+    mkdir -p "$ROOT/logs"
+    LOG="$ROOT/logs/live.log"
+    echo "Logs → $LOG   (tail -f $LOG). Watch phone/UI for live state, not SSH scroll." >&2
+    exec >>"$LOG" 2>&1
     exec "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
     ;;
   gui)
@@ -282,6 +287,11 @@ case "$cmd" in
     fi
     echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
     echo "Phone on LabPSK: http://10.128.93.23:8765  (Room 207)" >&2
+    # Critical for deploy: a stuck SSH scroll locks print() and starves TCP → all C5s drop.
+    mkdir -p "$ROOT/logs"
+    LOG="$ROOT/logs/web.log"
+    echo "Logs → $LOG   (tail -f $LOG). Continuity = phone UI, not this SSH window." >&2
+    exec >>"$LOG" 2>&1
     exec "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
     ;;
   test-web)

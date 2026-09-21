@@ -25,6 +25,15 @@ DEFAULT_FLUSH_S = 0.1
 DEFAULT_DATABASE_URL = "postgresql://localhost/csi"
 
 
+def _safe_log(msg: str) -> None:
+    """Never block the CSI path on a stuck SSH TTY (XOFF / scrollback)."""
+    try:
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
 def find_port() -> str:
     ports = sorted(
         glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*")
@@ -289,10 +298,9 @@ def iter_lines_tcp(
                 left_n = n_clients
                 n_ips = len(ip_counts)
                 _publish_status()
-            print(
+            _safe_log(
                 f"client disconnected {addr[0]}:{addr[1]} "
-                f"(sockets={left_n}, boards={n_ips}; ingest continues)",
-                flush=True,
+                f"(sockets={left_n}, boards={n_ips}; ingest continues)"
             )
 
     def _acceptor() -> None:
@@ -302,9 +310,8 @@ def iter_lines_tcp(
         srv.bind((bind, port))
         srv.listen(backlog)
         srv.settimeout(1.0)
-        print(
-            f"listening tcp://{bind}:{port} (multi-C5 fan-in, backlog={backlog})",
-            flush=True,
+        _safe_log(
+            f"listening tcp://{bind}:{port} (multi-C5 fan-in, backlog={backlog})"
         )
         try:
             while not stop.is_set():
@@ -320,10 +327,9 @@ def iter_lines_tcp(
                     active = n_clients
                     n_ips = len(ip_counts)
                     _publish_status()
-                print(
+                _safe_log(
                     f"client connected {addr[0]}:{addr[1]} "
-                    f"(sockets={active}, boards={n_ips})",
-                    flush=True,
+                    f"(sockets={active}, boards={n_ips})"
                 )
                 threading.Thread(
                     target=_client_reader,
