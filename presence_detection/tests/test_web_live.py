@@ -29,6 +29,7 @@ sys.path.insert(0, str(CSI))
 
 from detect_web import (  # noqa: E402
     DEFAULT_HTTP_PORT,
+    DEVICE_LIVE_GRACE_S,
     PAGE_HTML,
     PresenceHub,
     _make_handler,
@@ -126,6 +127,18 @@ class TestPresenceHub(unittest.TestCase):
         d = {x["ip"]: x for x in hub.snapshot()["devices"]}
         self.assertTrue(d["10.128.93.29"]["connected"])
         self.assertEqual(hub.snapshot()["esp_active"], 1)
+
+    def test_stale_packet_marks_off_after_grace(self) -> None:
+        hub = PresenceHub(trained_order=["10.128.93.29"])
+        hub.note_packet("10.128.93.29", {"rssi": -50, "seq": 1})
+        hub.tcp_status["ips"] = []
+        with hub._lock:
+            hub._per_rx["10.128.93.29"]["last_mono"] = (
+                time.monotonic() - DEVICE_LIVE_GRACE_S - 0.5
+            )
+        d = {x["ip"]: x for x in hub.snapshot()["devices"]}
+        self.assertFalse(d["10.128.93.29"]["connected"])
+        self.assertEqual(hub.snapshot()["esp_active"], 0)
 
     def test_wait_snapshot_timeout_no_deadlock(self) -> None:
         hub = PresenceHub()

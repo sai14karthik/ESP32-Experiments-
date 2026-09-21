@@ -35,7 +35,7 @@ from detect_live import (  # noqa: E402
     format_line,
     make_live_detector,
 )
-from detect_web import PresenceHub, _make_handler  # noqa: E402
+from detect_web import DEVICE_LIVE_GRACE_S, PresenceHub, _make_handler  # noqa: E402
 from ingest_serial import iter_lines_tcp  # noqa: E402
 from test_multirx_fusion import IQ_LEN, _iq, write_synthetic_csv  # noqa: E402
 
@@ -126,12 +126,29 @@ def _check_web_stack(bundle: dict, sources: list[str], cal: dict | None) -> None
 
     hub.tcp_status["active"] = 2
     hub.tcp_status["ips"] = sources[:2]
+    snap_grace = hub.snapshot()
+    dmap_g = {d["ip"]: d for d in snap_grace["devices"]}
+    # Recent CSI keeps LIVE through brief TCP gaps (anti-flicker).
+    if not dmap_g[sources[2]]["connected"] or not dmap_g[sources[0]]["connected"]:
+        fail(f"web grace should keep LIVE: {snap_grace['devices']}")
+    else:
+        ok("web TCP drop + recent CSI → still LIVE (grace)")
+
+    # Age out the dropped RX past grace → must show OFF.
+    dropped = sources[2]
+    with hub._lock:
+        if dropped in hub._per_rx:
+            hub._per_rx[dropped]["last_mono"] = (
+                time.monotonic() - DEVICE_LIVE_GRACE_S - 0.5
+            )
     snap2 = hub.snapshot()
     dmap = {d["ip"]: d for d in snap2["devices"]}
-    if dmap[sources[2]]["connected"] or not dmap[sources[0]]["connected"]:
+    if dmap[dropped]["connected"] or not dmap[sources[0]]["connected"]:
         fail(f"web disconnect reflect: {snap2['devices']}")
+    elif snap2.get("esp_active") != 2:
+        fail(f"web disconnect esp_active={snap2.get('esp_active')}")
     else:
-        ok("web disconnect → OFF for dropped RX")
+        ok("web disconnect → OFF after grace expires")
 
     port = _free_port()
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(hub))
