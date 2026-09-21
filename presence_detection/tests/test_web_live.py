@@ -195,13 +195,15 @@ class TestPageHtml(unittest.TestCase):
         for needle in (
             "viewport",
             "/api/status",
+            "/api/stream",
+            "EventSource",
             "Connected to Mini",
             "device-list",
             "{{ROOM}}",
             'id="line"',
             "PRESENCE",
             "EMPTY",
-            "poll",
+            "startSSE",
         ):
             self.assertIn(needle, PAGE_HTML, msg=f"missing {needle!r}")
 
@@ -254,7 +256,7 @@ class TestHttpApi(unittest.TestCase):
         text = body.decode("utf-8")
         self.assertIn("Room 207", text)
         self.assertIn('id="line"', text)
-        self.assertIn("poll", text)
+        self.assertIn("EventSource", text)
 
     def test_index_html_alias(self) -> None:
         status, _, body = _http_get(self.base + "/index.html")

@@ -290,19 +290,83 @@ PAGE_HTML = """<!DOCTYPE html>
     el("conn").className = "bad";
   }
 
-  // Poll is more reliable on phones than EventSource (SSE often stalls).
-  function poll() {
-    fetch("/api/status?t=" + Date.now())
-      .then((r) => {
-        if (!r.ok) throw new Error("status " + r.status);
-        return r.json();
-      })
-      .then(apply)
-      .catch(fail)
-      .finally(() => setTimeout(poll, 400));
+  let lastApply = 0;
+  let esRef = null;
+  let pollTimer = null;
+  let mode = "sse";
+
+  function applyWrapped(s) {
+    lastApply = Date.now();
+    apply(s);
   }
 
-  poll();
+  function stopPoll() {
+    if (pollTimer != null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function startPoll() {
+    mode = "poll";
+    if (esRef) {
+      try { esRef.close(); } catch (_) {}
+      esRef = null;
+    }
+    stopPoll();
+    function tick() {
+      fetch("/api/status?t=" + Date.now())
+        .then((r) => {
+          if (!r.ok) throw new Error("status " + r.status);
+          return r.json();
+        })
+        .then(applyWrapped)
+        .catch(fail)
+        .finally(() => {
+          if (mode === "poll") pollTimer = setTimeout(tick, 250);
+        });
+    }
+    tick();
+    // Try SSE again after a bit (faster path when the phone allows it).
+    setTimeout(() => {
+      if (mode === "poll") startSSE();
+    }, 8000);
+  }
+
+  function startSSE() {
+    if (!window.EventSource) {
+      startPoll();
+      return;
+    }
+    mode = "sse";
+    stopPoll();
+    if (esRef) {
+      try { esRef.close(); } catch (_) {}
+    }
+    const es = new EventSource("/api/stream");
+    esRef = es;
+    lastApply = Date.now();
+    es.onmessage = (ev) => {
+      try { applyWrapped(JSON.parse(ev.data)); } catch (_) {}
+    };
+    es.onerror = () => {
+      try { es.close(); } catch (_) {}
+      esRef = null;
+      startPoll();
+    };
+  }
+
+  setInterval(() => {
+    if (mode === "sse" && lastApply && Date.now() - lastApply > 2500) {
+      if (esRef) {
+        try { esRef.close(); } catch (_) {}
+        esRef = null;
+      }
+      startPoll();
+    }
+  }, 1000);
+
+  startSSE();
 })();
 </script>
 </body>
@@ -474,17 +538,18 @@ def _make_handler(hub: PresenceHub, *, room: str = DEFAULT_ROOM):
                 return
             if path == "/api/stream":
                 self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache, no-store")
                 self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 gen = -1
                 try:
                     while True:
-                        gen, snap = hub.wait_snapshot(gen, timeout=0.4)
-                        line = f"data: {json.dumps(snap)}\n\n"
-                        self.wfile.write(line.encode("utf-8"))
+                        gen, snap = hub.wait_snapshot(gen, timeout=0.25)
+                        self.wfile.write(f"data: {json.dumps(snap)}\n\n".encode("utf-8"))
+                        self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     return
