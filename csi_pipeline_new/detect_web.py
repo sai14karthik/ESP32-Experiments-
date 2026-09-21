@@ -34,7 +34,7 @@ from detect_live import (
 DEFAULT_HTTP_PORT = 8765
 DEFAULT_ROOM = "Room 207"
 # Keep LIVE through brief TCP reconnect gaps (boards drop old socket then reopen).
-DEVICE_LIVE_GRACE_S = 8.0
+DEVICE_LIVE_GRACE_S = 45.0
 
 PAGE_HTML = """<!DOCTYPE html>
 <html lang="en">
