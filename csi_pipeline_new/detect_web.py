@@ -565,49 +565,73 @@ def _csi_loop(
     listen_tcp: int,
     stop: threading.Event,
 ) -> None:
+    """Read CSI forever; bind failures retry. Never kill the HTTP UI."""
     pkt = 0
     last_log = time.monotonic()
-    try:
-        for source_id, iq, meta in iter_csi_from_tcp(
-            listen_tcp, status=hub.tcp_status
-        ):
+    last_pkt = time.monotonic()
+    while not stop.is_set():
+        try:
+            for source_id, iq, meta in iter_csi_from_tcp(
+                listen_tcp, status=hub.tcp_status
+            ):
+                if stop.is_set():
+                    return
+                hub.note_packet(source_id, meta)
+                kwargs = dict(
+                    rssi=float(meta.get("rssi") or 0.0),
+                    agc_gain=float(meta.get("agc_gain") or 0.0),
+                    fft_gain=float(meta.get("fft_gain") or 0.0),
+                    seq=meta.get("seq"),
+                )
+                if isinstance(detector, MultiRxLiveDetector):
+                    result = detector.on_packet(
+                        iq, source_id=source_id or meta.get("source_id"), **kwargs
+                    )
+                else:
+                    result = detector.on_packet(iq, **kwargs)
+                if result is None:
+                    now = time.monotonic()
+                    if now - last_log >= 5.0:
+                        snap = hub.snapshot()
+                        idle = now - last_pkt
+                        print(
+                            f"web csi: {pkt} pkts  boards={snap.get('esp_active')}  "
+                            f"state={snap.get('state')!r}  "
+                            f"idle={idle:.0f}s  (buffering)",
+                            flush=True,
+                        )
+                        last_log = now
+                    continue
+                hub.update_detect(result, meta)
+                pkt += 1
+                last_pkt = time.monotonic()
+                now = last_pkt
+                if now - last_log >= 5.0:
+                    snap = hub.snapshot()
+                    print(
+                        f"web csi: {pkt} pkts  boards={snap.get('esp_active')}  "
+                        f"state={snap.get('state')!r}  "
+                        f"score={snap.get('score')}",
+                        flush=True,
+                    )
+                    last_log = now
+            # Generator ended without error — restart acceptor.
             if stop.is_set():
-                break
-            hub.note_packet(source_id, meta)
-            kwargs = dict(
-                rssi=float(meta.get("rssi") or 0.0),
-                agc_gain=float(meta.get("agc_gain") or 0.0),
-                fft_gain=float(meta.get("fft_gain") or 0.0),
-                seq=meta.get("seq"),
+                return
+            print(
+                f"web csi: TCP iterator ended; re-listen :{listen_tcp} in 1s…",
+                file=sys.stderr,
+                flush=True,
             )
-            if isinstance(detector, MultiRxLiveDetector):
-                result = detector.on_packet(
-                    iq, source_id=source_id or meta.get("source_id"), **kwargs
-                )
-            else:
-                result = detector.on_packet(iq, **kwargs)
-            if result is None:
-                continue
-            hub.update_detect(result, meta)
-            pkt += 1
-            now = time.monotonic()
-            if now - last_log >= 5.0:
-                snap = hub.snapshot()
-                print(
-                    f"web csi: {pkt} pkts  boards={snap.get('esp_active')}  "
-                    f"state={snap.get('state')!r}  "
-                    f"score={snap.get('score')}",
-                    flush=True,
-                )
-                last_log = now
-    except OSError as exc:
-        print(
-            f"TCP :{listen_tcp} failed: {exc}. "
-            "Stop ./run_multi_ingest.sh / terminal live / gui first.",
-            file=sys.stderr,
-            flush=True,
-        )
-        stop.set()
+            time.sleep(1.0)
+        except OSError as exc:
+            print(
+                f"TCP :{listen_tcp} failed: {exc}. "
+                "Retrying in 2s (stop ingest/live/gui if they hold the port).",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(2.0)
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -48,10 +48,10 @@
 /** Max CSI_DATA line length (header + I/Q text). Must match TCP forwarder. */
 #define CSI_LINE_MAX 4096
 
-/** No CSI for this long → restart ping (ms). */
-#define CSI_STALL_PING_MS     8000
-/** Still no CSI after ping restart → full Wi‑Fi/CSI recycle (ms). */
-#define CSI_STALL_RECYCLE_MS  20000
+/** No CSI for this long → restart ping (ms). LabPSK can gap without a real stall. */
+#define CSI_STALL_PING_MS     15000
+/** Still no CSI with Wi‑Fi up → full Wi‑Fi/CSI recycle (ms). Keep high to avoid TCP storms. */
+#define CSI_STALL_RECYCLE_MS  90000
 #define CSI_WATCHDOG_PERIOD_MS 1000
 
 static const char *TAG = "csi_recv_router";
@@ -279,17 +279,19 @@ static void csi_recover_ping(void)
     wifi_ping_router_start();
 }
 
-/** Hard recover: drop Wi‑Fi, reconnect, re-enable CSI + ping. */
+/** Hard recover: drop Wi‑Fi, reconnect, re-enable CSI + ping.
+ *  Do not force TCP reconnect — dead sock fails send and the forwarder
+ *  reconnects once. Forcing here caused reconnect storms on Mini ingest.
+ */
 static void csi_recover_full(void)
 {
-    ESP_LOGW(TAG, "CSI stall → full Wi‑Fi/CSI recycle");
+    ESP_LOGW(TAG, "CSI stall → full Wi‑Fi/CSI recycle (TCP heals on next send)");
     wifi_ping_router_stop();
     esp_wifi_set_csi(false);
     example_disconnect();
     vTaskDelay(pdMS_TO_TICKS(1000));
     ESP_ERROR_CHECK(example_connect());
     csi_pipeline_start();
-    csi_tcp_forward_force_reconnect();
 }
 
 static void csi_watchdog_task(void *arg)
@@ -298,7 +300,7 @@ static void csi_watchdog_task(void *arg)
     ESP_LOGI(TAG, "CSI watchdog up (ping>%ds recycle>%ds)",
              CSI_STALL_PING_MS / 1000, CSI_STALL_RECYCLE_MS / 1000);
 
-    bool ping_attempted = false;
+    TickType_t last_soft_recover = 0;
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(CSI_WATCHDOG_PERIOD_MS));
@@ -312,26 +314,28 @@ static void csi_watchdog_task(void *arg)
 
         if (!wifi_up) {
             ESP_LOGW(TAG, "Wi‑Fi down → reconnect");
-            ping_attempted = false;
+            last_soft_recover = 0;
             csi_recover_full();
             continue;
         }
 
         if (idle_ms < CSI_STALL_PING_MS) {
-            ping_attempted = false;
+            last_soft_recover = 0;
             continue;
         }
 
-        if (!ping_attempted) {
-            ping_attempted = true;
-            csi_recover_ping();
+        /* Wi‑Fi up but CSI quiet: soft-ping on an interval; full recycle only after long idle. */
+        if (idle_ms < CSI_STALL_RECYCLE_MS) {
+            uint32_t since_soft = (uint32_t)((now - last_soft_recover) * portTICK_PERIOD_MS);
+            if (last_soft_recover == 0 || since_soft >= CSI_STALL_PING_MS) {
+                last_soft_recover = now;
+                csi_recover_ping();
+            }
             continue;
         }
 
-        if (idle_ms >= CSI_STALL_RECYCLE_MS) {
-            ping_attempted = false;
-            csi_recover_full();
-        }
+        last_soft_recover = 0;
+        csi_recover_full();
     }
 }
 
