@@ -14,5 +14,5 @@ ensure_uv() {
 # Run from CSI_ROOT so relative paths (fixtures/, ../sample_data/) work.
 uv_csi() {
   ensure_uv
-  (cd "$CSI_ROOT" && uv run --project "$REPO_ROOT" --group csi python "$@")
+  (cd "$CSI_ROOT" && uv run --project "$REPO_ROOT" --group csi python -u "$@")
 }

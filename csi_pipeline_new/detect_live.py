@@ -1044,6 +1044,13 @@ def main() -> None:
         gui_main()
         return
 
+    # Keep SSH/tmux from looking frozen when Python buffers lines.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     p = build_live_arg_parser()
     args = p.parse_args()
 
@@ -1170,43 +1177,12 @@ def main() -> None:
             file=sys.stderr,
             flush=True,
         )
-        print(
-            "tip: if the terminal looks frozen, you hit Ctrl+S (scroll lock) — "
-            "Ctrl+Q or Enter resumes; flow control is disabled for this run.",
-            file=sys.stderr,
-            flush=True,
-        )
-        tcp_status: dict = {}
-        pkt = 0
-        last_hb = time.monotonic()
-        last_pkt = time.monotonic()
         try:
-            for item in iter_csi_from_tcp(args.listen_tcp, status=tcp_status):
-                now = time.monotonic()
+            for item in iter_csi_from_tcp(args.listen_tcp):
                 if item is None:
-                    if now - last_hb >= 5.0:
-                        boards = tcp_status.get("active", 0)
-                        idle = now - last_pkt
-                        print(
-                            f"live heartbeat: boards={boards}  pkts={pkt}  "
-                            f"idle={idle:.0f}s  (still running)",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        last_hb = now
                     continue
                 source_id, iq, meta = item
                 handle_packet(iq, meta, source_id=source_id)
-                pkt += 1
-                last_pkt = now
-                if now - last_hb >= 5.0:
-                    boards = tcp_status.get("active", 0)
-                    print(
-                        f"live heartbeat: boards={boards}  pkts={pkt}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    last_hb = now
         except OSError as exc:
             sys.exit(
                 f"TCP listen failed on :{args.listen_tcp}: {exc}\n"
