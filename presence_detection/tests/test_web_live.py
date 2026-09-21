@@ -366,23 +366,20 @@ class TestTcpClientStatus(unittest.TestCase):
         # Fresh connections for the actual test.
         c1 = socket.create_connection(("127.0.0.1", port), timeout=1.0)
         c2 = socket.create_connection(("127.0.0.1", port), timeout=1.0)
-        time.sleep(0.25)
-        # Same IP: newer socket replaces older — settle at 1 board / 1 socket.
+        time.sleep(0.15)
+        # Same host IP can hold 2 sockets; board count stays 1.
         self.assertEqual(status.get("active"), 1)
-        self.assertEqual(status.get("connections"), 1)
+        self.assertEqual(status.get("connections"), 2)
         self.assertIn("127.0.0.1", status.get("ips") or [])
 
-        c2.sendall(b'CSI_DATA,1,aa:bb:cc:dd:ee:ff,-40,11,-90,0,0,1,1,8,0,8,1,"[1,2,3,4,5,6,7,8]"\n')
+        c1.sendall(b'CSI_DATA,1,aa:bb:cc:dd:ee:ff,-40,11,-90,0,0,1,1,8,0,8,1,"[1,2,3,4,5,6,7,8]"\n')
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not lines:
             time.sleep(0.05)
         self.assertTrue(lines, "expected CSI line from client")
         self.assertEqual(lines[0][0], "127.0.0.1")
 
-        try:
-            c1.close()
-        except OSError:
-            pass
+        c1.close()
         c2.close()
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and status.get("connections", -1) != 0:

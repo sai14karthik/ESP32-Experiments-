@@ -194,13 +194,13 @@ def _check_web_stack(bundle: dict, sources: list[str], cal: dict | None) -> None
         for _ in range(3)
     ]
     time.sleep(0.15)
-    if status.get("connections") != 1 or status.get("active") != 1:
+    if status.get("connections") != 3 or status.get("active") != 1:
         fail(
             f"web TCP sockets={status.get('connections')} "
-            f"boards={status.get('active')} (expect 1 socket / 1 local IP after replace)"
+            f"boards={status.get('active')} (expect 3 sockets / 1 local IP)"
         )
     else:
-        ok("web TCP fan-in one-socket-per-IP")
+        ok("web TCP fan-in sockets=3 boards=1 (localhost)")
         hub2 = PresenceHub(trained_order=sources)
         hub2.tcp_status.update(status)
         if hub2.snapshot()["esp_active"] != 1:
