@@ -650,14 +650,8 @@ def _csi_loop(
 
 
 def main(argv: list[str] | None = None) -> None:
-    # Leave the SSH controlling TTY so job-control STOP can't freeze CSI/UI.
-    import os
-
-    try:
-        os.setsid()
-    except OSError:
-        pass
-    for sig_name in ("SIGTTOU", "SIGTTIN"):
+    # Ignore tty job-control stops / hangup (SSH Enter was resuming a STOPPED job).
+    for sig_name in ("SIGTTOU", "SIGTTIN", "SIGHUP"):
         sig = getattr(signal, sig_name, None)
         if sig is None:
             continue

@@ -1044,15 +1044,10 @@ def main() -> None:
         gui_main()
         return
 
-    # Leave SSH controlling TTY; ignore tty-stop signals (Enter was "resuming" a STOPPED job).
-    import os
+    # Ignore tty-stop / hangup (SSH job control). Process must be started with nohup/background.
     import signal
 
-    try:
-        os.setsid()
-    except OSError:
-        pass
-    for sig_name in ("SIGTTOU", "SIGTTIN"):
+    for sig_name in ("SIGTTOU", "SIGTTIN", "SIGHUP"):
         sig = getattr(signal, sig_name, None)
         if sig is None:
             continue

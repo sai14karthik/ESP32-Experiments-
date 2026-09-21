@@ -33,17 +33,28 @@ trap '' TTOU TTIN 2>/dev/null || true
 # shellcheck disable=SC1091
 source "$CSI/uv_common.sh"
 
-# Run live/web detached from the controlling terminal (survives SSH quirks).
-run_detached() {
+# Run live/web in the background so SSH Enter/Ctrl+S/job-control cannot STOP them.
+# Returns immediately; PID written next to the log.
+run_background() {
   local log="$1"
-  shift
+  local pidfile="$2"
+  shift 2
   mkdir -p "$(dirname "$log")"
-  echo "Logs → $log" >&2
-  if command -v setsid >/dev/null 2>&1; then
-    exec setsid "$@" </dev/null >>"$log" 2>&1
-  else
-    exec "$@" </dev/null >>"$log" 2>&1
+  # Stop any prior instance we started.
+  if [[ -f "$pidfile" ]]; then
+    old="$(cat "$pidfile" 2>/dev/null || true)"
+    if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
+      kill "$old" 2>/dev/null || true
+      sleep 0.5
+    fi
   fi
+  # Prefer Python daemonize inside the app; nohup+background is the reliable Mac SSH path.
+  nohup "$@" </dev/null >>"$log" 2>&1 &
+  local pid=$!
+  echo "$pid" >"$pidfile"
+  disown "$pid" 2>/dev/null || true
+  echo "Logs → $log" >&2
+  echo "PID  → $pid  (stop: kill \$(cat $pidfile))" >&2
 }
 
 
@@ -56,10 +67,12 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh train                 # export empty+occupied → fuse train → models/
   ./run_presence.sh calibrate             # empty-room cal from training CSV
   ./run_presence.sh calibrate-live        # EMPTY room over TCP :9055 (fix live)
-  ./run_presence.sh live                  # continuous scores (--fast)
+  ./run_presence.sh web                   # phone web UI (background; http://<mini-ip>:8765)
+  ./run_presence.sh web-stop              # stop background web
+  ./run_presence.sh live                  # continuous scores (background)
+  ./run_presence.sh live-stop             # stop background live
   ./run_presence.sh live --quiet          # state changes only
   ./run_presence.sh gui                   # PyQt dashboard (TCP multi-RX)
-  ./run_presence.sh web                   # phone web UI (http://<mini-ip>:8765)
   ./run_presence.sh web --http-port 8765  # optional port override
   ./run_presence.sh test-web              # unit/integration tests (no hardware)
   ./run_presence.sh test-e2e              # full A–Z pipeline proof (no hardware)
@@ -274,7 +287,7 @@ case "$cmd" in
       echo "WARNING: no site_calibration.joblib — run ./run_presence.sh calibrate-live first" >&2
     fi
     echo "Stop ./run_multi_ingest.sh first if it holds :9055" >&2
-    run_detached "$ROOT/logs/live.log" \
+    run_background "$ROOT/logs/live.log" "$ROOT/logs/live.pid" \
       "$CSI/run_detect.sh" --skip-probe "${LIVE_ARGS[@]}" "$@"
     ;;
   gui)
@@ -300,8 +313,24 @@ case "$cmd" in
     fi
     echo "Stop ingest/terminal live/gui first if they hold :9055" >&2
     echo "UI: http://10.128.93.23:8765  (Room 207)" >&2
-    run_detached "$ROOT/logs/web.log" \
+    run_background "$ROOT/logs/web.log" "$ROOT/logs/web.pid" \
       "$CSI/run_detect.sh" --skip-probe "${WEB_ARGS[@]}" "$@"
+    ;;
+  web-stop|live-stop)
+    which="${cmd%-stop}"
+    pidfile="$ROOT/logs/${which}.pid"
+    if [[ -f "$pidfile" ]]; then
+      pid="$(cat "$pidfile")"
+      if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" && echo "stopped $which pid=$pid" >&2
+      else
+        echo "$which not running (stale pid $pid)" >&2
+      fi
+      rm -f "$pidfile"
+    else
+      echo "no pid file $pidfile" >&2
+      exit 1
+    fi
     ;;
   test-web)
     ensure_uv
