@@ -48,7 +48,7 @@
 /** Max CSI_DATA line length (header + I/Q text). Must match TCP forwarder. */
 #define CSI_LINE_MAX 4096
 
-/** No CSI for this long → restart ping only (ms). Never tear Wi‑Fi/TCP for a quiet gap. */
+/** No CSI for this long → (unused in deploy watchdog; kept for docs/tuning). */
 #define CSI_STALL_PING_MS      15000
 #define CSI_WATCHDOG_PERIOD_MS 1000
 
@@ -268,10 +268,8 @@ static void csi_pipeline_start(void)
     s_last_csi_tick = xTaskGetTickCount();
 }
 
-/** Soft recover: restart ping to re-stimulate router CSI.
- *  Do not tear down TCP — that drops Mini ingest and causes reconnect storms.
- */
-static void csi_recover_ping(void)
+/** Soft recover helper (unused by deploy watchdog — ping stays on from boot). */
+static void __attribute__((unused)) csi_recover_ping(void)
 {
     ESP_LOGW(TAG, "CSI stall → restart ping (TCP stays up)");
     wifi_ping_router_start();
@@ -292,38 +290,19 @@ static void csi_recover_wifi(void)
 static void csi_watchdog_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "CSI watchdog up (soft-ping >%ds; no Wi‑Fi recycle on CSI idle)",
-             CSI_STALL_PING_MS / 1000);
-
-    TickType_t last_soft_recover = 0;
+    /* Deploy mode: never touch ping/Wi‑Fi on CSI quiet — only heal real association loss.
+     * Soft-ping restarts were correlated with periodic multi-board TCP reconnects. */
+    ESP_LOGI(TAG, "CSI watchdog up (Wi‑Fi loss only; no soft-ping recycle)");
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(CSI_WATCHDOG_PERIOD_MS));
-
-        TickType_t last = s_last_csi_tick;
-        TickType_t now = xTaskGetTickCount();
-        uint32_t idle_ms = (uint32_t)((now - last) * portTICK_PERIOD_MS);
 
         wifi_ap_record_t ap;
         bool wifi_up = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
 
         if (!wifi_up) {
             ESP_LOGW(TAG, "Wi‑Fi down → reconnect");
-            last_soft_recover = 0;
             csi_recover_wifi();
-            continue;
-        }
-
-        /* Continuous prototype: Wi‑Fi up ⇒ keep TCP. Soft-ping only on CSI quiet. */
-        if (idle_ms < CSI_STALL_PING_MS) {
-            last_soft_recover = 0;
-            continue;
-        }
-
-        uint32_t since_soft = (uint32_t)((now - last_soft_recover) * portTICK_PERIOD_MS);
-        if (last_soft_recover == 0 || since_soft >= CSI_STALL_PING_MS) {
-            last_soft_recover = now;
-            csi_recover_ping();
         }
     }
 }

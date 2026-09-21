@@ -88,20 +88,14 @@ static bool csi_tcp_connect(void)
         return false;
     }
 
-    /* Generous timeouts: brief Mini/HTTP load must not force reconnect storms. */
-    struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
+    /* No send/recv deadline: brief Mini load must not tear the socket. */
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    /* Soft keepalive — CSI traffic is the real liveness; avoid 10s false kills. */
-    int ka = 1;
+    /* Keepalive OFF — CSI stream is the liveness probe. Aggressive KA caused ~1min reconnect storms. */
+    int ka = 0;
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
-#if defined(TCP_KEEPIDLE)
-    int idle = 120, intvl = 10, cnt = 6;
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-#endif
 
     if (connect(sock, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
         ESP_LOGW(TAG, "connect %s:%d failed errno=%d", host, port, errno);
@@ -117,10 +111,15 @@ static bool csi_tcp_connect(void)
 static bool csi_tcp_send_all(const char *data, size_t len)
 {
     size_t sent = 0;
+    int spins = 0;
     while (sent < len) {
         int n = send(s_sock, data + sent, len - sent, 0);
         if (n < 0) {
             if (errno == EINTR) {
+                continue;
+            }
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && spins++ < 50) {
+                vTaskDelay(pdMS_TO_TICKS(20));
                 continue;
             }
             return false;
@@ -128,6 +127,7 @@ static bool csi_tcp_send_all(const char *data, size_t len)
         if (n == 0) {
             return false;
         }
+        spins = 0;
         sent += (size_t)n;
     }
     return true;
@@ -153,9 +153,13 @@ static void csi_tcp_task(void *arg)
 
         bool ok = csi_tcp_send_all(msg.data, msg.len);
         if (!ok) {
+            /* One quiet retry before tearing the socket down. */
+            vTaskDelay(pdMS_TO_TICKS(100));
+            ok = csi_tcp_send_all(msg.data, msg.len);
+        }
+        if (!ok) {
             ESP_LOGW(TAG, "send failed; reconnecting");
             csi_tcp_close_sock();
-            /* Try to re-queue once; else drop. */
             if (xQueueSendToFront(s_q, &msg, 0) != pdTRUE) {
                 free(msg.data);
             }
