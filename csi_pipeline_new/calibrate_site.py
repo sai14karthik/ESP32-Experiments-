@@ -207,9 +207,12 @@ def collect_from_tcp(
         print(f"expect RXs: {', '.join(expected_sources)}", file=sys.stderr)
 
     try:
-        for source_id, iq, meta in iter_csi_from_tcp(port):
+        for item in iter_csi_from_tcp(port):
             if time.monotonic() >= deadline:
                 break
+            if item is None:
+                continue
+            source_id, iq, meta = item
             try:
                 packets.append(
                     iq_list_to_packet(

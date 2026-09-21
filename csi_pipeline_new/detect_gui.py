@@ -142,9 +142,12 @@ class DetectWorker(QThread):
                     f"({', '.join(order) if order else 'any'})"
                 )
                 try:
-                    for source_id, iq, meta in iter_csi_from_tcp(self.listen_tcp):
+                    for item in iter_csi_from_tcp(self.listen_tcp):
                         if self._stop:
                             break
+                        if item is None:
+                            continue
+                        source_id, iq, meta = item
                         self._handle(iq, meta, source_id=source_id)
                 except OSError as exc:
                     raise RuntimeError(

@@ -21,6 +21,12 @@ EXPORTS="$ROOT/exports"
 
 mkdir -p "$MODELS" "$EXPORTS"
 
+# Ctrl+S (XOFF) freezes the TTY until Enter/Ctrl+Q — looks like prediction stopped.
+if [[ -t 0 ]] && command -v stty >/dev/null 2>&1; then
+  stty -ixon 2>/dev/null || true
+fi
+export PYTHONUNBUFFERED=1
+
 # shellcheck disable=SC1091
 source "$CSI/uv_common.sh"
 

@@ -905,6 +905,7 @@ def iter_csi_from_tcp(
 
     for item in iter_lines_tcp(port, bind=bind, status=status):
         if item is None:
+            yield None  # idle tick so live can heartbeat without looking "stuck"
             continue
         source_id, line = item
         sample = parse_csi_line(line)
@@ -1167,10 +1168,45 @@ def main() -> None:
             f"tcp multi-RX: 0.0.0.0:{args.listen_tcp}  "
             f"(expect {getattr(detector, 'rx_sources_order', [])})",
             file=sys.stderr,
+            flush=True,
         )
+        print(
+            "tip: if the terminal looks frozen, you hit Ctrl+S (scroll lock) — "
+            "Ctrl+Q or Enter resumes; flow control is disabled for this run.",
+            file=sys.stderr,
+            flush=True,
+        )
+        tcp_status: dict = {}
+        pkt = 0
+        last_hb = time.monotonic()
+        last_pkt = time.monotonic()
         try:
-            for source_id, iq, meta in iter_csi_from_tcp(args.listen_tcp):
+            for item in iter_csi_from_tcp(args.listen_tcp, status=tcp_status):
+                now = time.monotonic()
+                if item is None:
+                    if now - last_hb >= 5.0:
+                        boards = tcp_status.get("active", 0)
+                        idle = now - last_pkt
+                        print(
+                            f"live heartbeat: boards={boards}  pkts={pkt}  "
+                            f"idle={idle:.0f}s  (still running)",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        last_hb = now
+                    continue
+                source_id, iq, meta = item
                 handle_packet(iq, meta, source_id=source_id)
+                pkt += 1
+                last_pkt = now
+                if now - last_hb >= 5.0:
+                    boards = tcp_status.get("active", 0)
+                    print(
+                        f"live heartbeat: boards={boards}  pkts={pkt}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    last_hb = now
         except OSError as exc:
             sys.exit(
                 f"TCP listen failed on :{args.listen_tcp}: {exc}\n"

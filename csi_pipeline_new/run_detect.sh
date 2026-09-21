@@ -22,6 +22,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/serial_helpers.sh
+# Disable terminal XOFF (Ctrl+S) — freezes scroll until Enter/Ctrl+Q; looks like live "stuck".
+if [[ -t 0 ]] && command -v stty >/dev/null 2>&1; then
+  stty -ixon 2>/dev/null || true
+fi
+export PYTHONUNBUFFERED=1
+
 # shellcheck disable=SC1091
 source "$ROOT/uv_common.sh"
 

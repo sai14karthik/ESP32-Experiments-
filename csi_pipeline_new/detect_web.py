@@ -571,11 +571,25 @@ def _csi_loop(
     last_pkt = time.monotonic()
     while not stop.is_set():
         try:
-            for source_id, iq, meta in iter_csi_from_tcp(
+            for item in iter_csi_from_tcp(
                 listen_tcp, status=hub.tcp_status
             ):
                 if stop.is_set():
                     return
+                if item is None:
+                    now = time.monotonic()
+                    if now - last_log >= 5.0:
+                        snap = hub.snapshot()
+                        idle = now - last_pkt
+                        print(
+                            f"web csi: {pkt} pkts  boards={snap.get('esp_active')}  "
+                            f"state={snap.get('state')!r}  "
+                            f"idle={idle:.0f}s  (waiting)",
+                            flush=True,
+                        )
+                        last_log = now
+                    continue
+                source_id, iq, meta = item
                 hub.note_packet(source_id, meta)
                 kwargs = dict(
                     rssi=float(meta.get("rssi") or 0.0),
