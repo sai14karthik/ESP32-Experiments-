@@ -208,6 +208,8 @@ def iter_lines_tcp(
     n_clients = 0
     # IP → open connection count (one board usually = 1; briefly 2 on reconnect).
     ip_counts: dict[str, int] = {}
+    # Newest socket per IP — closing the previous drops duplicate reconnects.
+    ip_socks: dict[str, socket.socket] = {}
     sentinel = object()
 
     def _publish_status() -> None:
@@ -278,6 +280,8 @@ def iter_lines_tcp(
             except OSError:
                 pass
             with clients_lock:
+                if ip_socks.get(source_id) is conn:
+                    ip_socks.pop(source_id, None)
                 n_clients = max(0, n_clients - 1)
                 left = ip_counts.get(source_id, 0) - 1
                 if left <= 0:
@@ -312,12 +316,25 @@ def iter_lines_tcp(
                     continue
                 except OSError:
                     break
+                prev: socket.socket | None = None
                 with clients_lock:
+                    prev = ip_socks.get(addr[0])
+                    ip_socks[addr[0]] = conn
                     n_clients += 1
                     ip_counts[addr[0]] = ip_counts.get(addr[0], 0) + 1
                     active = n_clients
                     n_ips = len(ip_counts)
                     _publish_status()
+                if prev is not None and prev is not conn:
+                    # Drop stale socket from the same board (reconnect).
+                    try:
+                        prev.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        prev.close()
+                    except OSError:
+                        pass
                 print(
                     f"client connected {addr[0]}:{addr[1]} "
                     f"(sockets={active}, boards={n_ips})",

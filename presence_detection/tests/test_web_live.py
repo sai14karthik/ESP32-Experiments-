@@ -194,15 +194,14 @@ class TestPageHtml(unittest.TestCase):
     def test_page_has_mobile_essentials(self) -> None:
         for needle in (
             "viewport",
-            "EventSource",
-            "/api/stream",
             "/api/status",
             "Connected to Mini",
             "device-list",
             "{{ROOM}}",
-            "id=\"line\"",
+            'id="line"',
             "PRESENCE",
             "EMPTY",
+            "poll",
         ):
             self.assertIn(needle, PAGE_HTML, msg=f"missing {needle!r}")
 
@@ -255,7 +254,7 @@ class TestHttpApi(unittest.TestCase):
         text = body.decode("utf-8")
         self.assertIn("Room 207", text)
         self.assertIn('id="line"', text)
-        self.assertIn("EventSource", text)
+        self.assertIn("poll", text)
 
     def test_index_html_alias(self) -> None:
         status, _, body = _http_get(self.base + "/index.html")
@@ -365,20 +364,23 @@ class TestTcpClientStatus(unittest.TestCase):
         # Fresh connections for the actual test.
         c1 = socket.create_connection(("127.0.0.1", port), timeout=1.0)
         c2 = socket.create_connection(("127.0.0.1", port), timeout=1.0)
-        time.sleep(0.15)
-        # Same host IP → 1 board, 2 sockets (reconnect-style)
+        time.sleep(0.25)
+        # Same IP: newer socket replaces older — settle at 1 board / 1 socket.
         self.assertEqual(status.get("active"), 1)
-        self.assertEqual(status.get("connections"), 2)
+        self.assertEqual(status.get("connections"), 1)
         self.assertIn("127.0.0.1", status.get("ips") or [])
 
-        c1.sendall(b'CSI_DATA,1,aa:bb:cc:dd:ee:ff,-40,11,-90,0,0,1,1,8,0,8,1,"[1,2,3,4,5,6,7,8]"\n')
+        c2.sendall(b'CSI_DATA,1,aa:bb:cc:dd:ee:ff,-40,11,-90,0,0,1,1,8,0,8,1,"[1,2,3,4,5,6,7,8]"\n')
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not lines:
             time.sleep(0.05)
         self.assertTrue(lines, "expected CSI line from client")
         self.assertEqual(lines[0][0], "127.0.0.1")
 
-        c1.close()
+        try:
+            c1.close()
+        except OSError:
+            pass
         c2.close()
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and status.get("connections", -1) != 0:

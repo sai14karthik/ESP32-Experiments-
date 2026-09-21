@@ -290,31 +290,19 @@ PAGE_HTML = """<!DOCTYPE html>
     el("conn").className = "bad";
   }
 
-  function connect() {
-    if (!window.EventSource) {
-      poll();
-      return;
-    }
-    const es = new EventSource("/api/stream");
-    es.onmessage = (ev) => {
-      try { apply(JSON.parse(ev.data)); } catch (_) {}
-    };
-    es.onerror = () => {
-      fail();
-      es.close();
-      setTimeout(connect, 1500);
-    };
-  }
-
+  // Poll is more reliable on phones than EventSource (SSE often stalls).
   function poll() {
-    fetch("/api/status")
-      .then((r) => r.json())
+    fetch("/api/status?t=" + Date.now())
+      .then((r) => {
+        if (!r.ok) throw new Error("status " + r.status);
+        return r.json();
+      })
       .then(apply)
       .catch(fail)
       .finally(() => setTimeout(poll, 400));
   }
 
-  connect();
+  poll();
 })();
 </script>
 </body>
@@ -512,6 +500,8 @@ def _csi_loop(
     listen_tcp: int,
     stop: threading.Event,
 ) -> None:
+    pkt = 0
+    last_log = time.monotonic()
     try:
         for source_id, iq, meta in iter_csi_from_tcp(
             listen_tcp, status=hub.tcp_status
@@ -534,6 +524,17 @@ def _csi_loop(
             if result is None:
                 continue
             hub.update_detect(result, meta)
+            pkt += 1
+            now = time.monotonic()
+            if now - last_log >= 5.0:
+                snap = hub.snapshot()
+                print(
+                    f"web csi: {pkt} pkts  boards={snap.get('esp_active')}  "
+                    f"state={snap.get('state')!r}  "
+                    f"score={snap.get('score')}",
+                    flush=True,
+                )
+                last_log = now
     except OSError as exc:
         print(
             f"TCP :{listen_tcp} failed: {exc}. "
