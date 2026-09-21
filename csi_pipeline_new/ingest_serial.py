@@ -228,6 +228,8 @@ def iter_lines_tcp(
         try:
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Absorb CSI bursts so boards don't hit send-timeout reconnects.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         except OSError:
             pass
         buf = b""

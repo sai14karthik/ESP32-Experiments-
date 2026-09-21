@@ -88,15 +88,16 @@ static bool csi_tcp_connect(void)
         return false;
     }
 
-    struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
+    /* Generous timeouts: brief Mini/HTTP load must not force reconnect storms. */
+    struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    /* Detect half-open sockets (Mini gone / stall) without waiting forever. */
+    /* Soft keepalive — CSI traffic is the real liveness; avoid 10s false kills. */
     int ka = 1;
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
 #if defined(TCP_KEEPIDLE)
-    int idle = 10, intvl = 3, cnt = 3;
+    int idle = 120, intvl = 10, cnt = 6;
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
