@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
-# Live Whisper while Sense A/V is streaming (preferred) or from raw /audio.
-# Default model: small.en (override with --model tiny.en / base.en / …).
+# Live Whisper from Sense PCM — default: large-v3 + local UDP tee (no MediaMTX/AAC lag).
 #
-# With MediaMTX cam_sense (VLC + recognition together) — default:
+# Terminal 1 (restart after sync so tee is active):
+#   SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
+# Terminal 2:
 #   ./scripts/sense_whisper_live.sh
-#   # on Mini: rtsp://127.0.0.1:8554/cam_sense  (override with SENSE_WHISPER_RTSP)
+#   # → --pcm-udp 19055 --model large-v3
 #
-# Direct Sense /audio (only if MediaMTX is NOT using /audio):
-#   ./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio
+# Overrides:
+#   ./scripts/sense_whisper_live.sh --model medium.en
+#   ./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio   # if MediaMTX off
+#   ./scripts/sense_whisper_live.sh --rtsp rtsp://127.0.0.1:8554/cam_sense  # slower
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Default to MediaMTX RTSP unless caller already passed --rtsp or --url.
-# Prefer loopback on the Mini (same host as MediaMTX); LAN IP for remote clients.
 has_src=0
 for a in "$@"; do
   case "$a" in
-    --rtsp|--url|--rtsp=*|--url=*) has_src=1; break ;;
+    --pcm-udp|--url|--rtsp|--pcm-udp=*|--url=*|--rtsp=*) has_src=1; break ;;
   esac
 done
 if [[ $has_src -eq 0 ]]; then
-  set -- --rtsp "${SENSE_WHISPER_RTSP:-rtsp://127.0.0.1:8554/cam_sense}" "$@"
+  set -- --pcm-udp "${SENSE_PCM_UDP_PORT:-19055}" "$@"
 fi
 
 exec uv run --group whisper python firmware/tools/sense_whisper_live.py "$@"

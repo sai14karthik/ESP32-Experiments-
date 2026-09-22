@@ -42,28 +42,30 @@ VLC (TCP, enable audio): `rtsp://10.128.93.23:8554/cam_sense`
 
 See [`mediamtx/README.md`](../../mediamtx/README.md).
 
-## Live voice recognition (with RTSP A/V)
+## Live voice recognition
 
-Whisper runs on the host. While **cam_sense** is streaming, recognition taps **RTSP audio** (does not steal Sense `/audio` from MediaMTX).
+Whisper on the Mini uses a **raw PCM UDP tee** from `ffmpeg_sense_av` (port **19055**) — not MediaMTX RTSP — so recognition skips AAC remux delay. VLC still uses `cam_sense` as usual.
+
+Default model: **`large-v3`** (biggest; override with `--model`).
 
 ```bash
-# Terminal 1 — picture + sound for VLC
+# Terminal 1 — restart MediaMTX so the PCM tee is enabled
 SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
 
-# Terminal 2 — live captions (same audio)
+# Terminal 2 — captions (no MediaMTX audio path)
 ./scripts/sense_whisper_live.sh
-# same as: --rtsp rtsp://127.0.0.1:8554/cam_sense  (on Mini; MediaMTX must be up)
+# → --pcm-udp 19055 , model large-v3 (~3GB first download)
 ```
 
-VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP). Speak → text prints in terminal 2.
+VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP). Speak → `[HH:MM:SS] …` in terminal 2.
 
-Direct `/audio` only if MediaMTX is **not** using Sense audio:
+Direct Sense `/audio` only if MediaMTX is **not** running:
 
 ```bash
 ./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio
 ```
 
-Default model `small.en`. Ctrl+C to stop.
+Avoid `--rtsp` unless you must (extra MediaMTX latency).
 
 ## Host preview (USB)
 

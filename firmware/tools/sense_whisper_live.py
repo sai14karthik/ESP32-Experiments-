@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Live speech-to-text from Sense PCM (smooth: capture never blocks on Whisper).
 
-Sources:
-  --url  http://<esp>/audio     raw s16le 16 kHz mono (Sense firmware)
-  --rtsp rtsp://host:8554/cam_sense   when MediaMTX already owns /audio
+Sources (prefer lowest latency first):
+  --pcm-udp 19055           raw s16le tee from ffmpeg_sense_av (no MediaMTX/AAC)
+  --url  http://<esp>/audio raw Sense /audio (only if MediaMTX is not using it)
+  --rtsp rtsp://…/cam_sense MediaMTX AAC path (extra remux delay — avoid)
 
-Capture thread → energy VAD → queue → Whisper worker (default small.en).
+Capture thread → energy VAD → queue → Whisper worker (default large-v3).
 If the worker falls behind, oldest pending segments are dropped (prefer fresh speech).
 """
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import queue
+import socket
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,8 @@ BYTES_PER_SAMPLE = 2
 FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 480
 FRAME_BYTES = FRAME_SAMPLES * BYTES_PER_SAMPLE
+DEFAULT_MODEL = "large-v3"
+DEFAULT_PCM_UDP_PORT = 19055
 
 
 def _pick_device(requested: str) -> str:
@@ -69,6 +73,31 @@ def write_wav(path: Path, pcm: bytes) -> None:
 # --- capture sources ---------------------------------------------------------
 
 
+def iter_udp_pcm(port: int, stop: threading.Event, host: str = "127.0.0.1") -> Iterator[bytes]:
+    """Raw s16le from ffmpeg_sense_av UDP tee (local, no AAC/RTSP)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.settimeout(0.5)
+    print(f"[capture] listening udp://{host}:{port}", file=sys.stderr, flush=True)
+    try:
+        while not stop.is_set():
+            try:
+                data, _ = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if stop.is_set():
+                    break
+                print(f"[capture] udp ({e})", file=sys.stderr, flush=True)
+                time.sleep(0.2)
+                continue
+            if data:
+                yield data
+    finally:
+        sock.close()
+
+
 def iter_http_pcm(url: str, stop: threading.Event) -> Iterator[bytes]:
     """Chunked raw s16le from Sense GET /audio."""
     while not stop.is_set():
@@ -85,7 +114,7 @@ def iter_http_pcm(url: str, stop: threading.Event) -> Iterator[bytes]:
 
 
 def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
-    """ffmpeg demux RTSP audio → raw s16le stdout."""
+    """ffmpeg demux RTSP audio → raw s16le stdout (higher latency — last resort)."""
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -143,7 +172,7 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
         print(f"[capture] rtsp reconnect ({where}): {tip}", file=sys.stderr, flush=True)
         if not got_audio and "127.0.0.1" not in rtsp_url and "localhost" not in rtsp_url:
             print(
-                "[capture] tip: on the Mini prefer --rtsp rtsp://127.0.0.1:8554/cam_sense",
+                "[capture] tip: prefer --pcm-udp 19055 (no MediaMTX lag) or --rtsp rtsp://127.0.0.1:8554/cam_sense",
                 file=sys.stderr,
                 flush=True,
             )
@@ -295,11 +324,21 @@ def whisper_worker(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Live Whisper from Sense /audio or cam_sense RTSP")
+    ap = argparse.ArgumentParser(description="Live Whisper from Sense PCM (UDP tee / HTTP / RTSP)")
     src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument(
+        "--pcm-udp",
+        type=int,
+        metavar="PORT",
+        help=f"Local UDP s16le tee from ffmpeg_sense_av (default port {DEFAULT_PCM_UDP_PORT})",
+    )
     src.add_argument("--url", help="Sense PCM URL, e.g. http://10.128.93.25/audio")
-    src.add_argument("--rtsp", help="MediaMTX RTSP with audio, e.g. rtsp://10.128.93.23:8554/cam_sense")
-    ap.add_argument("--model", default="small.en", help="Whisper model (default: small.en)")
+    src.add_argument("--rtsp", help="MediaMTX RTSP (higher latency; prefer --pcm-udp)")
+    ap.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Whisper model (default: {DEFAULT_MODEL})",
+    )
     ap.add_argument("--language", default="en")
     ap.add_argument("--device", default="auto", help="cpu | cuda | mps | auto")
     ap.add_argument(
@@ -315,7 +354,10 @@ def main() -> int:
     stop = threading.Event()
     seg_q: queue.Queue = queue.Queue(maxsize=max(1, args.queue))
 
-    if args.url:
+    if args.pcm_udp is not None:
+        pcm_iter = iter_udp_pcm(args.pcm_udp, stop)
+        print(f"[source] UDP pcm :{args.pcm_udp} (no MediaMTX lag)", flush=True)
+    elif args.url:
         pcm_iter = iter_http_pcm(args.url, stop)
         print(f"[source] HTTP {args.url}", flush=True)
     else:

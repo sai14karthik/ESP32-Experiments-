@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Sense A/V remux for MediaMTX — prioritize SMOOTH playback (delay OK).
-# Env from MediaMTX: RTSP_PORT, MTX_PATH
+# Sense A/V remux for MediaMTX — prioritize SMOOTH playback (delay OK for VLC).
+# Also tees raw s16le to udp://127.0.0.1:19055 for Whisper (no AAC/RTSP lag).
+# Env from MediaMTX: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT (default 19055)
 # Args: Sense base URL e.g. http://10.128.93.25
 #
 # Research notes (ESP dual-stream + ffmpeg mux):
 # - max_interleave_delta=0 means "wait forever for every stream" → stuck/stutter
 # - nobuffer/low_delay/flush_packets fight smoothness when ESP FPS jitters
-# - Prefer CFR + larger queues + modest mux preload (user accepts delay)
+# - Prefer CFR + larger queues + modest mux preload (user accepts delay on RTSP)
 # - Fixed ~10 fps on ESP + QVGA is the stable band for Wi‑Fi dual HTTP
+# - Whisper must NOT use RTSP — use the PCM UDP tee instead
 set -euo pipefail
 
 BASE="${1:?need http://esp-ip}"
@@ -15,6 +17,9 @@ BASE="${BASE%/}"
 VURL="${BASE}:81/stream"
 AURL="${BASE}/audio"
 OUT="rtsp://127.0.0.1:${RTSP_PORT:?}/${MTX_PATH:?}"
+# Raw PCM tee for Whisper (no AAC/RTSP delay). Override with SENSE_PCM_UDP_PORT.
+PCM_UDP_PORT="${SENSE_PCM_UDP_PORT:-19055}"
+PCM_UDP="udp://127.0.0.1:${PCM_UDP_PORT}?pkt_size=960"
 
 exec ffmpeg -hide_banner -loglevel warning \
   -fflags +genpts+discardcorrupt \
@@ -51,4 +56,10 @@ exec ffmpeg -hide_banner -loglevel warning \
   -muxpreload 0.5 \
   -f rtsp \
   -rtsp_transport tcp \
-  "$OUT"
+  "$OUT" \
+  -map 1:a:0 \
+  -c:a pcm_s16le \
+  -ac 1 \
+  -ar 16000 \
+  -f s16le \
+  "$PCM_UDP"

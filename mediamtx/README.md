@@ -86,7 +86,7 @@ VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP; enable **Audio track**).
 Live speech-to-text **while** that stream is up (same audio, no `/audio` conflict):
 
 ```bash
-./scripts/sense_whisper_live.sh   # defaults to rtsp://127.0.0.1:8554/cam_sense (Mini)
+./scripts/sense_whisper_live.sh   # UDP pcm :19055 + large-v3 (no MediaMTX lag); restart mediamtx_run after pull
 ```
 
 Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
