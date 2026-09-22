@@ -28,3 +28,6 @@
 [submodule "SeeedStudio-XIAO-ESP32S3-Sense-camera"]
 	path = SeeedStudio-XIAO-ESP32S3-Sense-camera
 	url = https://github.com/limengdu/SeeedStudio-XIAO-ESP32S3-Sense-camera
+[submodule "csi_pipeline_new/camera-recorder-with-human-detection"]
+	path = csi_pipeline_new/camera-recorder-with-human-detection
+	url = https://github.com/g4lb/camera-recorder-with-human-detection

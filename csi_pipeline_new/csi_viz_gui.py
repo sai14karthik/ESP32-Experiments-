@@ -82,32 +82,21 @@ def list_mic_devices() -> list[tuple[int, str, int]]:
 
 
 def pick_default_mic_index(devices: list[tuple[int, str, int]]) -> int | None:
-    """Prefer a live input over a silent default MacBook mic."""
+    """Pick a mic for the combo box without opening PortAudio streams.
+
+    Do not probe with ``sd.rec`` here — that blocks the Qt main thread (and can
+    hang forever on macOS permission prompts) before the CSI window appears.
+    """
     if not devices or sd is None:
         return None
-
-    def _peak(idx: int, sr: int) -> float:
-        try:
-            n = max(256, int(0.15 * sr))
-            rec = sd.rec(n, samplerate=sr, channels=1, dtype="float32", device=idx)
-            sd.wait()
-            return float(np.max(np.abs(rec)))
-        except Exception:  # noqa: BLE001
-            return 0.0
-
-    scored: list[tuple[float, int]] = []
-    for idx, _name, sr in devices:
-        scored.append((_peak(idx, sr), idx))
-    scored.sort(reverse=True)
-    best_peak, best_idx = scored[0]
-    if best_peak >= 1e-5:
-        return best_idx
-    # Fall back to system default input even if currently silent.
     try:
         info = sd.query_devices(kind="input")
-        return int(info["index"])
+        default_idx = int(info["index"])
+        if any(idx == default_idx for idx, _name, _sr in devices):
+            return default_idx
     except Exception:  # noqa: BLE001
-        return devices[0][0]
+        pass
+    return devices[0][0]
 
 
 def iq_amplitudes(iq: list[int]) -> np.ndarray:
