@@ -37,3 +37,6 @@
 [submodule "ESP32_RTSP"]
 	path = ESP32_RTSP
 	url = https://github.com/jduanen/ESP32_RTSP
+[submodule "whisper"]
+	path = whisper
+	url = https://github.com/openai/whisper
