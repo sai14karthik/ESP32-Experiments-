@@ -148,8 +148,8 @@ emit_path() {
 EOF
 }
 
-# Sense A/V: same video encode as cam_xiao, plus PCM→AAC audio.
-# Wallclock only on video; audio uses sample-rate PTS + aresample=async (avoids whoops).
+# Sense A/V: same video encode as cam_xiao, plus PCM→AAC.
+# max_interleave_delta 0 = don't hold video frames waiting on audio (fixes lag/stuck).
 emit_av_path() {
   local name="$1" base="$2"
   local vurl="${base}:81/stream"
@@ -190,6 +190,7 @@ emit_av_path() {
       -b:a 64k
       -ar 16000
       -ac 1
+      -max_interleave_delta 0
       -flush_packets 1
       -muxdelay 0
       -muxpreload 0

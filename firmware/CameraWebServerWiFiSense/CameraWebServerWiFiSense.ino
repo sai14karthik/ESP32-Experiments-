@@ -50,11 +50,12 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;
+  // Match CameraWebServerWiFi: HVGA JPEG for smoother MediaMTX remux.
+  config.frame_size = FRAMESIZE_HVGA;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
+  config.jpeg_quality = 8;
   config.fb_count = 2;
 
   if (!psramFound()) {
@@ -82,8 +83,8 @@ void setup() {
     s->set_saturation(s, -2);
   }
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_QVGA);
-    s->set_quality(s, 12);
+    s->set_framesize(s, FRAMESIZE_HVGA);  // 480x320 — same as video-only cam_xiao
+    s->set_quality(s, 8);
   }
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
@@ -113,7 +114,13 @@ void setup() {
   Serial.println("WiFi connected");
 
   startCameraServer();
+  // CSI promiscuous + ping fights MJPEG/audio on Wi‑Fi — off by default for smooth A/V RTSP.
+  // Define SENSE_ENABLE_CSI to restore USB CSI_DATA for cam_mic_preview.py.
+#if defined(SENSE_ENABLE_CSI)
   sense_csi_start();
+#else
+  Serial.println("CSI off (MediaMTX A/V). Rebuild with -DSENSE_ENABLE_CSI for USB CSI.");
+#endif
 
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
@@ -127,7 +134,7 @@ void setup() {
   Serial.print("Stream:   http://");
   Serial.print(WiFi.localIP());
   Serial.println(":81/stream");
-  Serial.println("USB:      CSI_DATA + rms: lines for cam_mic_preview.py");
+  Serial.println("USB:      rms: lines (CSI only if SENSE_ENABLE_CSI)");
 }
 
 void loop() {

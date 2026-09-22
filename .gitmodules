@@ -31,3 +31,9 @@
 [submodule "csi_pipeline_new/camera-recorder-with-human-detection"]
 	path = csi_pipeline_new/camera-recorder-with-human-detection
 	url = https://github.com/g4lb/camera-recorder-with-human-detection
+[submodule "ESP32-RTSPServer"]
+	path = ESP32-RTSPServer
+	url = https://github.com/rjsachse/ESP32-RTSPServer
+[submodule "ESP32_RTSP"]
+	path = ESP32_RTSP
+	url = https://github.com/jduanen/ESP32_RTSP
