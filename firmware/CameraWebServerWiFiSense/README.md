@@ -52,7 +52,7 @@ SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
 
 # Terminal 2 — live captions (same audio)
 ./scripts/sense_whisper_live.sh
-# same as: --rtsp rtsp://10.128.93.23:8554/cam_sense
+# same as: --rtsp rtsp://127.0.0.1:8554/cam_sense  (on Mini; MediaMTX must be up)
 ```
 
 VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP). Speak → text prints in terminal 2.

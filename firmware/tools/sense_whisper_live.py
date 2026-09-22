@@ -93,9 +93,13 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
         "error",
         "-rtsp_transport",
         "tcp",
+        "-stimeout",
+        "5000000",  # µs connect/read timeout
         "-i",
         rtsp_url,
         "-vn",
+        "-map",
+        "0:a:0",
         "-f",
         "s16le",
         "-acodec",
@@ -106,25 +110,47 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
         str(SAMPLE_RATE),
         "pipe:1",
     ]
+    backoff = 0.5
     while not stop.is_set():
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdout is not None
+        assert proc.stderr is not None
+        got_audio = False
         try:
             while not stop.is_set():
                 chunk = proc.stdout.read(FRAME_BYTES * 4)
                 if not chunk:
                     break
+                got_audio = True
+                backoff = 0.5
                 yield chunk
         finally:
-            proc.kill()
+            err = b""
             try:
-                proc.wait(timeout=2)
+                proc.kill()
             except Exception:
                 pass
+            try:
+                _, err = proc.communicate(timeout=2)
+            except Exception:
+                try:
+                    err = proc.stderr.read() if proc.stderr else b""
+                except Exception:
+                    err = b""
         if stop.is_set():
             break
-        print("[capture] rtsp reconnect", file=sys.stderr, flush=True)
-        time.sleep(0.5)
+        detail = (err or b"").decode("utf-8", errors="replace").strip().splitlines()
+        tip = detail[-1] if detail else "no audio yet (is MediaMTX publishing cam_sense?)"
+        where = "127.0.0.1" if "127.0.0.1" in rtsp_url else "LAN"
+        print(f"[capture] rtsp reconnect ({where}): {tip}", file=sys.stderr, flush=True)
+        if not got_audio and "127.0.0.1" not in rtsp_url and "localhost" not in rtsp_url:
+            print(
+                "[capture] tip: on the Mini prefer --rtsp rtsp://127.0.0.1:8554/cam_sense",
+                file=sys.stderr,
+                flush=True,
+            )
+        time.sleep(backoff)
+        backoff = min(5.0, backoff * 1.5)
 
 
 # --- VAD + threads -----------------------------------------------------------
