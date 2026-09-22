@@ -719,6 +719,66 @@ static esp_err_t mic_handler(httpd_req_t *req) {
   return httpd_resp_send(req, body, n > 0 ? n : 0);
 }
 
+// One live PCM client at a time (same idea as MJPEG stream kick).
+static volatile uint32_t s_audio_id = 0;
+static volatile int s_audio_sock = -1;
+static httpd_handle_t s_audio_handle = NULL;
+
+static void audio_kick_previous(httpd_req_t *req) {
+  int new_fd = httpd_req_to_sockfd(req);
+  int old_fd = s_audio_sock;
+  s_audio_id++;
+  if (old_fd >= 0 && old_fd != new_fd && s_audio_handle) {
+    httpd_sess_trigger_close(s_audio_handle, old_fd);
+  }
+  s_audio_sock = new_fd;
+  s_audio_handle = req->handle;
+}
+
+/** Continuous raw s16le mono @ 16 kHz for Mini ffmpeg (`-f s16le -ar 16000 -ac 1`). */
+static esp_err_t audio_handler(httpd_req_t *req) {
+  if (!sense_mic_ok()) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "mic not ready");
+    return ESP_FAIL;
+  }
+
+  audio_kick_previous(req);
+  const uint32_t my_id = s_audio_id;
+  const int my_fd = httpd_req_to_sockfd(req);
+
+  esp_err_t res = httpd_resp_set_type(req, "application/octet-stream");
+  if (res != ESP_OK) {
+    return res;
+  }
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_hdr(req, "X-Audio-Format", "s16le");
+  httpd_resp_set_hdr(req, "X-Audio-Rate", "16000");
+  httpd_resp_set_hdr(req, "X-Audio-Channels", "1");
+
+  // ~20 ms chunks @ 16 kHz mono int16
+  static const size_t CHUNK_SAMPLES = 320;
+  int16_t buf[CHUNK_SAMPLES];
+
+  while (my_id == s_audio_id && my_fd == s_audio_sock) {
+    size_t n = sense_mic_read(buf, CHUNK_SAMPLES, 200);
+    if (n == 0) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    res = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), n * sizeof(int16_t));
+    if (res != ESP_OK) {
+      break;
+    }
+  }
+
+  if (s_audio_sock == my_fd) {
+    s_audio_sock = -1;
+  }
+  httpd_resp_send_chunk(req, NULL, 0);
+  return res;
+}
+
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 20;
@@ -880,6 +940,19 @@ void startCameraServer() {
 #endif
   };
 
+  httpd_uri_t audio_uri = {
+    .uri = "/audio",
+    .method = HTTP_GET,
+    .handler = audio_handler,
+    .user_ctx = NULL
+#ifdef CONFIG_HTTPD_WS_SUPPORT
+    ,
+    .is_websocket = true,
+    .handle_ws_control_frames = false,
+    .supported_subprotocol = NULL
+#endif
+  };
+
   ra_filter_init(&ra_filter, 20);
 
   log_i("Starting web server on port: '%u'", config.server_port);
@@ -897,6 +970,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &pll_uri);
     httpd_register_uri_handler(camera_httpd, &win_uri);
     httpd_register_uri_handler(camera_httpd, &mic_uri);
+    httpd_register_uri_handler(camera_httpd, &audio_uri);
   }
 
   config.server_port += 1;

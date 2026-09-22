@@ -2,36 +2,49 @@
 
 XIAO **ESP32-S3 Sense** multimodal firmware: **Wi‑Fi camera + PDM mic + Wi‑Fi CSI**.
 
-For **MediaMTX / video-only**, flash [`../CameraWebServerWiFi`](../CameraWebServerWiFi/) instead — that sketch is unchanged camera+Wi‑Fi.
+- Video: `http://<ip>:81/stream` (MJPEG)
+- Audio PCM: `http://<ip>/audio` (raw **s16le**, 16 kHz, mono) for Mini ffmpeg → MediaMTX
+- Mic levels: `http://<ip>/mic` (JSON)
+- USB: `CSI_DATA` + `rms:` lines for `cam_mic_preview.py`
 
-## Flash (Arduino IDE)
+For **video-only** MediaMTX paths (`cam_xiao`), flash [`../CameraWebServerWiFi`](../CameraWebServerWiFi/) instead.
 
-1. Open `CameraWebServerWiFiSense.ino` in this folder.
-2. Board: **XIAO_ESP32S3** (PSRAM partition as for the camera sketch).
-3. Upload.
+## Flash
 
-Serial (115200) should show:
+```bash
+./scripts/flash_camera_sense.sh /dev/cu.usbmodem…
+```
+
+Or Arduino IDE: open `CameraWebServerWiFiSense.ino`, board **XIAO_ESP32S3** (PSRAM), Upload.
+
+Serial (115200/921600) should show:
 
 - `Mic ready (PDM Sense)`
 - `Camera Ready! Use 'http://…'`
-- `# CSI on …` / `# CSI ping …`
-- streaming `CSI_DATA,…` and `rms:… peak:…`
+- `Audio: http://…/audio`
+- `# CSI …` / `CSI_DATA,…` and `rms:…`
 
-## Host preview
+## MediaMTX (audio + video)
+
+On Mini:
+
+```bash
+# Sense IP from serial:
+SENSE_AV_URL=http://10.128.93.XX ./scripts/mediamtx_run.sh
+```
+
+Colleague / VLC (TCP, enable audio):
+
+```text
+rtsp://10.128.93.23:8554/cam_sense
+```
+
+See [`mediamtx/README.md`](../../mediamtx/README.md).
+
+## Host preview (USB)
 
 ```bash
 uv run python firmware/tools/cam_mic_preview.py --port /dev/cu.usbmodem1101
 # LabPSK laptop (no ESP IP):
 uv run python firmware/tools/cam_mic_preview.py --port /dev/cu.usbmodem1101 --no-video
 ```
-
-## MediaMTX (video)
-
-Prefer **CameraWebServerWiFi** for colleague RTSP. Same Mini command:
-
-```bash
-./scripts/mediamtx_run.sh
-# optional: ./scripts/publish_xiao.sh http://<esp-ip>:81/stream
-```
-
-See [`mediamtx/README.md`](../../mediamtx/README.md).

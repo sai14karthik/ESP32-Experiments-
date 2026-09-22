@@ -118,8 +118,15 @@ void setup() {
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
-  Serial.println("Mic JSON: http://<ip>/mic");
-  Serial.println("Stream:   http://<ip>:81/stream");
+  Serial.print("Mic JSON: http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/mic");
+  Serial.print("Audio:    http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/audio  (s16le 16kHz mono)");
+  Serial.print("Stream:   http://");
+  Serial.print(WiFi.localIP());
+  Serial.println(":81/stream");
   Serial.println("USB:      CSI_DATA + rms: lines for cam_mic_preview.py");
 }
 
