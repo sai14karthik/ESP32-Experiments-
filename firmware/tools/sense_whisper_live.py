@@ -6,7 +6,7 @@ Sources (prefer lowest latency first):
   --url  http://<esp>/audio raw Sense /audio (only if MediaMTX is not using it)
   --rtsp rtsp://…/cam_sense MediaMTX AAC path (extra remux delay — avoid)
 
-Capture thread → energy VAD → queue → Whisper worker (default large-v3).
+Capture thread → energy VAD → queue → Whisper worker (default turbo).
 If the worker falls behind, oldest pending segments are dropped (prefer fresh speech).
 """
 
@@ -34,7 +34,7 @@ BYTES_PER_SAMPLE = 2
 FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 480
 FRAME_BYTES = FRAME_SAMPLES * BYTES_PER_SAMPLE
-DEFAULT_MODEL = "large-v3"
+DEFAULT_MODEL = "turbo"
 DEFAULT_PCM_UDP_PORT = 19055
 
 

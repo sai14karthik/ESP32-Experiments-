@@ -14,11 +14,9 @@ rtsp://10.128.93.23:8554/cam_xiao2
 N× Sense A/V (CameraWebServerWiFiSense):
   :81/stream (MJPEG) + :80/audio (s16le 16 kHz)
         │
-        ▼  ffmpeg H.264 + AAC
-MediaMTX :8554/cam_sense, cam_sense2, … cam_senseN
-rtsp://10.128.93.23:8554/cam_sense
-rtsp://10.128.93.23:8554/cam_sense2
-…
+        ▼  ffmpeg_sense_av on Mini
+        ├─► H.264 + AAC → MediaMTX :8554/cam_sense… → VLC
+        └─► raw PCM UDP :19055 → sense_whisper_live (captions; no RTSP lag)
 ```
 
 ESP32-S3 has no HW H.264. Mini remuxes MJPEG (± PCM). Prefer **TCP** on LabPSK.
@@ -83,11 +81,19 @@ SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40 \
 Paths: `cam_sense`, `cam_sense2`, `cam_sense3`, …  
 VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP; enable **Audio track**).
 
-Live speech-to-text **while** that stream is up (same audio, no `/audio` conflict):
+### Live captions (Whisper)
+
+While Sense A/V is up, `ffmpeg_sense_av` also tees raw PCM to **`udp://127.0.0.1:19055`**. Whisper uses that tee — **not** MediaMTX RTSP — so captions skip AAC remux delay. VLC is unchanged.
 
 ```bash
-./scripts/sense_whisper_live.sh   # UDP pcm :19055 + large-v3 (no MediaMTX lag); restart mediamtx_run after pull
+uv sync --group whisper   # once
+# restart mediamtx_run after pulling so the tee exists
+./scripts/sense_whisper_live.sh                  # --pcm-udp 19055, model turbo
+./scripts/sense_whisper_live.sh --model large-v3 # max accuracy
+./scripts/sense_whisper_live.sh --vad-db -52      # quieter speech
 ```
+
+Full pipeline, models, VAD, latency: [`firmware/CameraWebServerWiFiSense/README.md`](../firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini).
 
 Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
 
@@ -106,4 +112,5 @@ VLC: Open Network → URL → **TCP**; caching ~50–100 ms.
 
 - Base: `mediamtx/mediamtx.yml`; runtime paths: `mediamtx.runtime.yml` (gitignored).
 - Encode defaults: ~12 fps, CRF 20 / max ~2.5 Mb/s; Sense audio AAC 64 kb/s @ 16 kHz mono.
+- Sense publish (`ffmpeg_sense_av.sh`): also tees raw s16le to `udp://127.0.0.1:19055` for Whisper (`SENSE_PCM_UDP_PORT` to override).
 - Board defaults (video-only): HVGA 480×320, JPEG q8, 12 fps.

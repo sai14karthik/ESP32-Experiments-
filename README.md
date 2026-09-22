@@ -6,8 +6,9 @@
 | **CSI methods** 4.1 / 4.2 / 4.3 | [docs/CSI_METHODS.md](docs/CSI_METHODS.md) |
 | **Presence detection** (N× C5 CSI) | [presence_detection/README.md](presence_detection/README.md) |
 | **CSI capture / Mini ingest** | [csi_pipeline_new/README.md](csi_pipeline_new/README.md) |
-| **MediaMTX** (XIAO MJPEG → Mini ffmpeg → RTSP) | [mediamtx/README.md](mediamtx/README.md) |
-| **S3 Sense multimodal** (cam+mic+CSI flash) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md) |
+| **MediaMTX** (XIAO / Sense → Mini → RTSP) | [mediamtx/README.md](mediamtx/README.md) |
+| **S3 Sense** (cam + mic + CSI) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md) |
+| **Live Whisper captions** (Sense mic → Mini) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini) |
 | **Papers / reading** | [materials/](materials/) |
 
 ## Common commands
@@ -27,4 +28,11 @@ cd csi_pipeline_new && ./count_csi_clients.sh
 
 ./scripts/monitor_csi.sh          # 4.1 IDF monitor (USB debug)
 ./scripts/set_csi_tcp_host.sh …   # flash C5 TCP → Mini
+
+# Sense A/V + live captions (Mini; keep CSI separate)
+uv sync --group whisper
+SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh   # VLC: …/cam_sense
+./scripts/sense_whisper_live.sh                              # UDP :19055, model turbo
+./scripts/sense_whisper_live.sh --model large-v3 --vad-db -52
+# details: firmware/CameraWebServerWiFiSense/README.md
 ```

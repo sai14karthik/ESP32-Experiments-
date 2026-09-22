@@ -42,30 +42,112 @@ VLC (TCP, enable audio): `rtsp://10.128.93.23:8554/cam_sense`
 
 See [`mediamtx/README.md`](../../mediamtx/README.md).
 
-## Live voice recognition
+## Live voice recognition (Whisper on Mini)
 
-Whisper on the Mini uses a **raw PCM UDP tee** from `ffmpeg_sense_av` (port **19055**) — not MediaMTX RTSP — so recognition skips AAC remux delay. VLC still uses `cam_sense` as usual.
+Local speech-to-text from the Sense mic. **Not** a cloud LLM. Runs on the Mac Mini
+(`openai-whisper`, MPS when available).
 
-Default model: **`large-v3`** (biggest; override with `--model`).
+### Pipeline
+
+```
+Sense  /audio (s16le 16 kHz) + :81/stream (MJPEG)
+        │
+        ▼  ffmpeg_sense_av.sh  (one pull from the board)
+        ├─► H.264+AAC → MediaMTX :8554/cam_sense  → VLC   (smooth; remux delay OK)
+        └─► raw PCM   → udp://127.0.0.1:19055     → sense_whisper_live
+                                                      │
+                                                      ├─ energy VAD (phrase segments)
+                                                      └─ Whisper → [HH:MM:SS] text
+```
+
+- Whisper listens on the **UDP PCM tee**, not MediaMTX RTSP — no AAC/remux lag on captions.
+- UDP is localhost-only so a slow Whisper client cannot stall VLC (unlike TCP backpressure).
+- Sense `/audio` allows **one** HTTP client; MediaMTX owns it. Do not also `--url` while MediaMTX is up.
+
+### Setup (Mini)
 
 ```bash
-# Terminal 1 — restart MediaMTX so the PCM tee is enabled
+uv sync --group whisper
+
+# Terminal 1 — restart after pulling so the PCM tee is active
 SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
 
-# Terminal 2 — captions (no MediaMTX audio path)
+# Terminal 2
 ./scripts/sense_whisper_live.sh
-# → --pcm-udp 19055 , model large-v3 (~3GB first download)
 ```
 
-VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP). Speak → `[HH:MM:SS] …` in terminal 2.
+Healthy capture looks like:
 
-Direct Sense `/audio` only if MediaMTX is **not** running:
+```
+[source] UDP pcm :19055 (no MediaMTX lag)
+[whisper] loading turbo on mps…
+[whisper] ready — speak near the Sense mic
+[capture] ~16000 samples/s
+[16:12:04] hello this is a test
+```
+
+VLC (separate): `rtsp://10.128.93.23:8554/cam_sense` (TCP, enable audio).
+
+### Models (`--model`)
+
+Default: **`turbo`** (`large-v3-turbo`) — near large-v3 quality, much faster. First download ~1.6 GB.
+
+| Model | Use when |
+|-------|----------|
+| `turbo` | **default / live captions** (recommended) |
+| `large-v3` | max accuracy; slower on Mini |
+| `medium.en` / `small.en` | faster / lighter |
+| `base.en` / `tiny.en` | quick tests |
 
 ```bash
-./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio
+./scripts/sense_whisper_live.sh --model turbo
+./scripts/sense_whisper_live.sh --model large-v3
+./scripts/sense_whisper_live.sh --model small.en
 ```
 
-Avoid `--rtsp` unless you must (extra MediaMTX latency).
+Needs `openai-whisper>=20240930` (`uv sync --group whisper`).
+
+### VAD / quiet speech (`--vad-db`)
+
+Energy gate in dBFS. **More negative = more sensitive** (quieter sounds).
+
+| `--vad-db` | Behavior |
+|------------|----------|
+| `-38` | loud speech only |
+| `-42` | default |
+| `-48` | quieter speech |
+| `-52` … `-55` | very low level |
+| `-60` | often too sensitive (room noise) |
+
+```bash
+./scripts/sense_whisper_live.sh --vad-db -52
+```
+
+Speak, then pause ~0.5 s so VAD closes a segment before Whisper runs.
+
+### Latency (what actually delays captions)
+
+| Stage | Affects captions? |
+|-------|-------------------|
+| MediaMTX AAC / muxdelay | **No** (VLC only) |
+| UDP PCM tee | negligible |
+| VAD wait for pause | ~0.5–1 s |
+| Whisper inference | **main** delay (use `turbo` to cut it) |
+
+### Other sources (optional)
+
+```bash
+# MediaMTX not running — take Sense /audio directly
+./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio
+
+# Last resort — demux RTSP AAC (extra MediaMTX latency)
+./scripts/sense_whisper_live.sh --rtsp rtsp://127.0.0.1:8554/cam_sense
+```
+
+Env: `SENSE_PCM_UDP_PORT` (default `19055`) must match `ffmpeg_sense_av.sh`.
+
+Code: `scripts/sense_whisper_live.sh` → `firmware/tools/sense_whisper_live.py`.
+Also see [`mediamtx/README.md`](../../mediamtx/README.md).
 
 ## Host preview (USB)
 
