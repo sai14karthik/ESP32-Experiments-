@@ -42,6 +42,20 @@ VLC (TCP, enable audio): `rtsp://10.128.93.23:8554/cam_sense`
 
 See [`mediamtx/README.md`](../../mediamtx/README.md).
 
+## Live voice recognition (Whisper on host)
+
+ESP only streams PCM; Whisper runs on Mini/laptop (smooth: capture thread never blocks on inference).
+
+```bash
+# Sense /audio directly (stop MediaMTX cam_sense first — one /audio client)
+./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio
+
+# While cam_sense A/V is up, tap RTSP audio instead:
+./scripts/sense_whisper_live.sh --rtsp rtsp://10.128.93.23:8554/cam_sense
+```
+
+Default model `tiny.en`. Speak, pause → text lines print. Ctrl+C to stop.
+
 ## Host preview (USB)
 
 ```bash

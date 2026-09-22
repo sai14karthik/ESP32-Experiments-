@@ -33,3 +33,7 @@ notebook = [
     "jupyter>=1.0",
     "ipykernel>=6.0",
 ]
+whisper = [
+    "openai-whisper>=20240930",
+    "torch",
+]

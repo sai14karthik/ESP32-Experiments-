@@ -80,7 +80,16 @@ mediamtx/run_xiao_publish.sh
 
 # Local reference clones (lab uses firmware/CameraRTSPWiFi/Micro-RTSP submodule)
 /ESP32-RTSP/
+/ESP32_RTSP/
+/ESP32-RTSPServer/
 /Micro-RTSP/
+/whisper/
+
+# Whisper model cache / weights (never commit)
+**/.cache/whisper/
+**/whisper_models/
+*.pt
+!yolov8n.pt
 
 # Local Cursor (rules, plans — machine / session)
 .cursor/
