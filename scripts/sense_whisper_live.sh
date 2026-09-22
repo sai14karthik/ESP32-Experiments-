@@ -13,8 +13,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [[ $# -eq 0 ]]; then
-  set -- --rtsp "${SENSE_WHISPER_RTSP:-rtsp://10.128.93.23:8554/cam_sense}"
+# Default to MediaMTX RTSP unless caller already passed --rtsp or --url.
+has_src=0
+for a in "$@"; do
+  case "$a" in
+    --rtsp|--url|--rtsp=*|--url=*) has_src=1; break ;;
+  esac
+done
+if [[ $has_src -eq 0 ]]; then
+  set -- --rtsp "${SENSE_WHISPER_RTSP:-rtsp://10.128.93.23:8554/cam_sense}" "$@"
 fi
 
 exec uv run --group whisper python firmware/tools/sense_whisper_live.py "$@"
