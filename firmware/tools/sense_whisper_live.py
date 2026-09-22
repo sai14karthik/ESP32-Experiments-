@@ -5,7 +5,7 @@ Sources:
   --url  http://<esp>/audio     raw s16le 16 kHz mono (Sense firmware)
   --rtsp rtsp://host:8554/cam_sense   when MediaMTX already owns /audio
 
-Capture thread → energy VAD → queue → Whisper worker (default tiny.en).
+Capture thread → energy VAD → queue → Whisper worker (default small.en).
 If the worker falls behind, oldest pending segments are dropped (prefer fresh speech).
 """
 
@@ -275,7 +275,7 @@ def main() -> int:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--url", help="Sense PCM URL, e.g. http://10.128.93.25/audio")
     src.add_argument("--rtsp", help="MediaMTX RTSP with audio, e.g. rtsp://10.128.93.23:8554/cam_sense")
-    ap.add_argument("--model", default="tiny.en", help="Whisper model (default: tiny.en)")
+    ap.add_argument("--model", default="small.en", help="Whisper model (default: small.en)")
     ap.add_argument("--language", default="en")
     ap.add_argument("--device", default="auto", help="cpu | cuda | mps | auto")
     ap.add_argument(

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Live Whisper while Sense A/V is streaming (preferred) or from raw /audio.
+# Default model: small.en (override with --model tiny.en / base.en / …).
 #
 # With MediaMTX cam_sense (VLC + recognition together) — default:
 #   ./scripts/sense_whisper_live.sh

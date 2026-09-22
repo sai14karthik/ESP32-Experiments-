@@ -63,7 +63,7 @@ Direct `/audio` only if MediaMTX is **not** using Sense audio:
 ./scripts/sense_whisper_live.sh --url http://10.128.93.25/audio
 ```
 
-Default model `tiny.en`. Ctrl+C to stop.
+Default model `small.en`. Ctrl+C to stop.
 
 ## Host preview (USB)
 
