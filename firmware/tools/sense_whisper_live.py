@@ -93,8 +93,6 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
         "error",
         "-rtsp_transport",
         "tcp",
-        "-stimeout",
-        "5000000",  # µs connect/read timeout
         "-i",
         rtsp_url,
         "-vn",
