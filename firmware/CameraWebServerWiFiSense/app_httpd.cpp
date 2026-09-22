@@ -226,7 +226,7 @@ static esp_err_t capture_handler(httpd_req_t *req) {
   return res;
 }
 
-#define STREAM_MAX_FPS 12
+#define STREAM_MAX_FPS 15
 
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t *fb = NULL;
@@ -963,7 +963,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &status_uri);
     httpd_register_uri_handler(camera_httpd, &capture_uri);
     httpd_register_uri_handler(camera_httpd, &bmp_uri);
-    httpd_register_uri_handler(camera_httpd, &stream_uri);
+    // /stream only on :81 — leave :80 for /audio so MJPEG and PCM don't share one httpd.
 
     httpd_register_uri_handler(camera_httpd, &xclk_uri);
     httpd_register_uri_handler(camera_httpd, &reg_uri);

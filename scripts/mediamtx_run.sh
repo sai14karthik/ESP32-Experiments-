@@ -148,55 +148,14 @@ emit_path() {
 EOF
 }
 
-# Sense A/V: same video encode as cam_xiao, plus PCM→AAC.
-# max_interleave_delta 0 = don't hold video frames waiting on audio (fixes lag/stuck).
+# Sense A/V: wrapper script (avoids wallclock lag when muxing MJPEG+PCM).
 emit_av_path() {
   local name="$1" base="$2"
-  local vurl="${base}:81/stream"
-  local aurl="${base}/audio"
+  local helper="$ROOT/scripts/ffmpeg_sense_av.sh"
   cat <<EOF
   ${name}:
     source: publisher
-    runOnInit: >-
-      ffmpeg -hide_banner -loglevel warning
-      -fflags nobuffer+genpts+discardcorrupt
-      -flags low_delay
-      -probesize 256k
-      -analyzeduration 0
-      -thread_queue_size 512
-      -f mjpeg
-      -use_wallclock_as_timestamps 1
-      -i ${vurl}
-      -thread_queue_size 512
-      -f s16le -ar 16000 -ac 1
-      -i ${aurl}
-      -map 0:v:0 -map 1:a:0
-      -vf fps=12,format=yuv420p
-      -af highpass=f=80,aresample=async=1:first_pts=0,volume=0.8
-      -c:v libx264
-      -preset veryfast
-      -tune zerolatency
-      -profile:v high
-      -level 4.0
-      -pix_fmt yuv420p
-      -bf 0
-      -g 12
-      -keyint_min 12
-      -crf 20
-      -maxrate 2500k
-      -bufsize 1250k
-      -x264-params scenecut=0:repeat-headers=1:nal-hrd=cbr
-      -c:a aac
-      -b:a 64k
-      -ar 16000
-      -ac 1
-      -max_interleave_delta 0
-      -flush_packets 1
-      -muxdelay 0
-      -muxpreload 0
-      -f rtsp
-      -rtsp_transport tcp
-      rtsp://127.0.0.1:\$RTSP_PORT/\$MTX_PATH
+    runOnInit: ${helper} ${base}
     runOnInitRestart: yes
 EOF
 }
