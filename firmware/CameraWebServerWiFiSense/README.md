@@ -40,13 +40,6 @@ SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40,http://10.128.93.41 \
 VLC (TCP, enable audio): `rtsp://10.128.93.23:8554/cam_sense`  
 (and `cam_sense2`, `cam_sense3`, …)
 
-Lip-sync tweak (audio usually leads JPEG video; delay audio in ms):
-
-```bash
-SENSE_AV_AUDIO_DELAY_MS=180 SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
-# if lips still early: try 250; if late: try 100
-```
-
 See [`mediamtx/README.md`](../../mediamtx/README.md).
 
 ## Host preview (USB)
