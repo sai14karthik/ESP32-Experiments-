@@ -756,17 +756,18 @@ static esp_err_t audio_handler(httpd_req_t *req) {
   httpd_resp_set_hdr(req, "X-Audio-Rate", "16000");
   httpd_resp_set_hdr(req, "X-Audio-Channels", "1");
 
-  // ~20 ms chunks @ 16 kHz mono int16
-  static const size_t CHUNK_SAMPLES = 320;
+  // ~40 ms chunks @ 16 kHz — always full size (pad silence) so ffmpeg never sees gaps → clicks.
+  static const size_t CHUNK_SAMPLES = 640;
   int16_t buf[CHUNK_SAMPLES];
 
   while (my_id == s_audio_id && my_fd == s_audio_sock) {
-    size_t n = sense_mic_read(buf, CHUNK_SAMPLES, 200);
-    if (n == 0) {
-      vTaskDelay(pdMS_TO_TICKS(5));
-      continue;
+    size_t n = sense_mic_read(buf, CHUNK_SAMPLES, 80);
+    if (n < CHUNK_SAMPLES) {
+      memset(buf + n, 0, (CHUNK_SAMPLES - n) * sizeof(int16_t));
     }
-    res = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), n * sizeof(int16_t));
+    res = httpd_resp_send_chunk(
+      req, reinterpret_cast<const char *>(buf), CHUNK_SAMPLES * sizeof(int16_t)
+    );
     if (res != ESP_OK) {
       break;
     }

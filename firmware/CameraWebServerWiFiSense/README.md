@@ -24,20 +24,21 @@ Serial (115200/921600) should show:
 - `Audio: http://…/audio`
 - `# CSI …` / `CSI_DATA,…` and `rms:…`
 
-## MediaMTX (audio + video)
+## MediaMTX (audio + video) — N boards
 
-On Mini:
+On Mini (each Sense board needs this firmware + `/audio`):
 
 ```bash
-# Sense IP from serial:
+# one:
 SENSE_AV_URL=http://10.128.93.XX ./scripts/mediamtx_run.sh
+
+# N:
+SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40,http://10.128.93.41 \
+  ./scripts/mediamtx_run.sh
 ```
 
-Colleague / VLC (TCP, enable audio):
-
-```text
-rtsp://10.128.93.23:8554/cam_sense
-```
+VLC (TCP, enable audio): `rtsp://10.128.93.23:8554/cam_sense`  
+(and `cam_sense2`, `cam_sense3`, …)
 
 See [`mediamtx/README.md`](../../mediamtx/README.md).
 

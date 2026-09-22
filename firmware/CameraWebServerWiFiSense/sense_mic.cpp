@@ -52,27 +52,41 @@ static void sense_mic_task(void *arg) {
   (void)arg;
   int16_t samples[256];
   uint32_t last_print_ms = 0;
+  // One-pole DC blocker + mild attenuate (PDM often has DC; sudden jumps → headphone "whoops").
+  int32_t dc_x1 = 0;
+  int32_t dc_y1 = 0;
 
   for (;;) {
     int n = s_i2s.readBytes(reinterpret_cast<char *>(samples), sizeof(samples));
     if (n < 2) {
-      vTaskDelay(pdMS_TO_TICKS(5));
+      vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
 
     int count = n / 2;
-    ring_push(samples, (size_t)count);
-
     double sum_sq = 0.0;
     int peak_raw = 0;
     for (int i = 0; i < count; i++) {
-      int v = samples[i];
-      sum_sq += (double)v * (double)v;
-      int a = abs(v);
+      int32_t x = samples[i];
+      // y = x - x1 + R*y1, R≈0.995
+      int32_t y = x - dc_x1 + ((dc_y1 * 995) / 1000);
+      dc_x1 = x;
+      dc_y1 = y;
+      // ~0.7 gain + soft clip
+      y = (y * 7) / 10;
+      if (y > 30000) {
+        y = 30000;
+      } else if (y < -30000) {
+        y = -30000;
+      }
+      samples[i] = (int16_t)y;
+      sum_sq += (double)y * (double)y;
+      int a = abs((int)y);
       if (a > peak_raw) {
         peak_raw = a;
       }
     }
+    ring_push(samples, (size_t)count);
 
     const double full_scale = 32768.0;
     double rms_lin = sqrt(sum_sq / (double)count) / full_scale;
@@ -84,9 +98,9 @@ static void sense_mic_task(void *arg) {
     s_rms_db = rms_db;
     s_peak = (float)peak;
 
-    // ~50 Hz USB prints (mutex keeps CSI_DATA lines intact).
+    // ~5 Hz USB prints — less CPU contention vs camera/HTTP (was ~50 Hz).
     uint32_t now = millis();
-    if (now - last_print_ms >= 20) {
+    if (now - last_print_ms >= 200) {
       last_print_ms = now;
       sense_serial_lock();
       Serial.printf("rms=%.1f dBFS: peak=%.3f,rms:%.1f,peak:%.3f\n", rms_db, peak, rms_db, peak);
@@ -116,7 +130,7 @@ bool sense_mic_start(void) {
   }
   s_ok = true;
   Serial.println("Mic ready (PDM Sense)");
-  xTaskCreatePinnedToCore(sense_mic_task, "sense_mic", 4096, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(sense_mic_task, "sense_mic", 4096, nullptr, 3, nullptr, 0);
   return true;
 }
 

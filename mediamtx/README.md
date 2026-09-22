@@ -11,12 +11,14 @@ rtsp://10.128.93.23:8554/cam_xiao
 rtsp://10.128.93.23:8554/cam_xiao2
 …
 
-Sense A/V (CameraWebServerWiFiSense):
+N× Sense A/V (CameraWebServerWiFiSense):
   :81/stream (MJPEG) + :80/audio (s16le 16 kHz)
         │
         ▼  ffmpeg H.264 + AAC
-MediaMTX :8554/cam_sense
+MediaMTX :8554/cam_sense, cam_sense2, … cam_senseN
 rtsp://10.128.93.23:8554/cam_sense
+rtsp://10.128.93.23:8554/cam_sense2
+…
 ```
 
 ESP32-S3 has no HW H.264. Mini remuxes MJPEG (± PCM). Prefer **TCP** on LabPSK.
@@ -60,20 +62,25 @@ XIAO_MJPEG_URLS=http://10.128.93.25:81/stream,http://10.128.93.34:81/stream \
 
 Paths are named `cam_xiao`, `cam_xiao2`, `cam_xiao3`, …
 
-## Run (Mini) — Sense audio + video
+## Run (Mini) — N× Sense audio + video
 
-Flash Sense firmware first. Then:
+Flash each board with **CameraWebServerWiFiSense**. Then:
 
 ```bash
-# Sense alone:
-SENSE_AV_URL=http://10.128.93.40 ./scripts/mediamtx_run.sh
+# N Sense A/V only:
+SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40,http://10.128.93.41 \
+  ./scripts/mediamtx_run.sh
 
-# Sense A/V + existing video-only cams:
-SENSE_AV_URL=http://10.128.93.40 ./scripts/mediamtx_run.sh \
-  http://10.128.93.25:81/stream \
+# single Sense (alias):
+SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
+
+# Sense A/V + video-only cams together:
+SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40 \
+  ./scripts/mediamtx_run.sh \
   http://10.128.93.34:81/stream
 ```
 
+Paths: `cam_sense`, `cam_sense2`, `cam_sense3`, …  
 VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP; enable **Audio track**).
 
 Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
@@ -82,10 +89,10 @@ Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
 
 | Cam | RTSP (LabPSK) | HLS |
 |-----|---------------|-----|
-| 1 | `rtsp://10.128.93.23:8554/cam_xiao` | `http://10.128.93.23:8888/cam_xiao/` |
-| 2 | `rtsp://10.128.93.23:8554/cam_xiao2` | `http://10.128.93.23:8888/cam_xiao2/` |
-| N | `rtsp://10.128.93.23:8554/cam_xiaoN` | `http://10.128.93.23:8888/cam_xiaoN/` |
-| Sense A/V | `rtsp://10.128.93.23:8554/cam_sense` | `http://10.128.93.23:8888/cam_sense/` |
+| video 1 | `rtsp://10.128.93.23:8554/cam_xiao` | `http://10.128.93.23:8888/cam_xiao/` |
+| video N | `rtsp://10.128.93.23:8554/cam_xiaoN` | `http://10.128.93.23:8888/cam_xiaoN/` |
+| Sense A/V 1 | `rtsp://10.128.93.23:8554/cam_sense` | `http://10.128.93.23:8888/cam_sense/` |
+| Sense A/V N | `rtsp://10.128.93.23:8554/cam_senseN` | `http://10.128.93.23:8888/cam_senseN/` |
 
 VLC: Open Network → URL → **TCP**; caching ~50–100 ms.
 
