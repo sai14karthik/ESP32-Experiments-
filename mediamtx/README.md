@@ -83,6 +83,12 @@ SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40 \
 Paths: `cam_sense`, `cam_sense2`, `cam_sense3`, …  
 VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP; enable **Audio track**).
 
+Live speech-to-text **while** that stream is up (same audio, no `/audio` conflict):
+
+```bash
+./scripts/sense_whisper_live.sh   # defaults to rtsp://10.128.93.23:8554/cam_sense
+```
+
 Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
 
 ## Watch
