@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Sense A/V remux for MediaMTX — smooth + A/V synced (delay OK).
-# Also tees raw s16le to udp://127.0.0.1:19055 for Whisper (no AAC/RTSP lag).
+# Also tees speech-processed s16le to udp://127.0.0.1:19055 for Whisper.
 # Env from MediaMTX: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT (default 19055)
 # Args: Sense base URL e.g. http://10.128.93.25
 #
 # Sync strategy (two HTTP inputs have no shared clock):
 # - Regenerated video PTS + aresample async for A/V lock
-# - Speech chain: highpass → compressor → light makeup (wearable / collar best practice)
-# - Whisper uses raw PCM UDP tee (not this AAC path)
+# - asplit *raw* first, then speech chain on each branch (filter-then-asplit
+#   starves the PCM tee and can block RTSP publish)
+# - Whisper uses the PCM UDP tee (not RTSP AAC)
 set -euo pipefail
 
 BASE="${1:?need http://esp-ip}"
@@ -18,6 +19,10 @@ OUT="rtsp://127.0.0.1:${RTSP_PORT:?}/${MTX_PATH:?}"
 FPS="${SENSE_AV_FPS:-8}"
 PCM_UDP_PORT="${SENSE_PCM_UDP_PORT:-19055}"
 PCM_UDP="udp://127.0.0.1:${PCM_UDP_PORT}?pkt_size=960"
+
+# MediaMTX hides runOnInit stderr — log file for debugging on Mini.
+LOG="${SENSE_AV_LOG:-/tmp/ffmpeg_sense_av.${MTX_PATH}.log}"
+echo "$(date '+%F %T') start path=${MTX_PATH} base=${BASE} out=${OUT} pcm=${PCM_UDP}" >>"$LOG"
 
 exec ffmpeg -hide_banner -loglevel warning \
   -fflags +genpts+discardcorrupt \
@@ -31,8 +36,9 @@ exec ffmpeg -hide_banner -loglevel warning \
   -i "$AURL" \
   -filter_complex \
   "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB)[v];\
-   [1:a]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=6,asplit=2[a_proc][a_pcm];\
-   [a_proc]aresample=16000:async=1000:first_pts=0[a]" \
+   [1:a]asplit=2[a0][a1];\
+   [a0]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=6,aresample=16000:async=1000:first_pts=0[a];\
+   [a1]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=6[a_pcm]" \
   -map "[v]" -map "[a]" \
   -fps_mode cfr \
   -r "$FPS" \
@@ -62,4 +68,5 @@ exec ffmpeg -hide_banner -loglevel warning \
   -ac 1 \
   -ar 16000 \
   -f s16le \
-  "$PCM_UDP"
+  "$PCM_UDP" \
+  >>"$LOG" 2>&1
