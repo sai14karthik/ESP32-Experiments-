@@ -920,8 +920,8 @@ def main() -> int:
     ap.add_argument(
         "--diarize",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Label speakers (YOU / OTHER_N). Default on. Disable with --no-diarize",
+        default=False,
+        help="Label speakers (YOU / OTHER_N). Off by default; enable with --diarize",
     )
     ap.add_argument(
         "--partials",
