@@ -37,8 +37,8 @@ exec ffmpeg -hide_banner -loglevel warning \
   -filter_complex \
   "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB)[v];\
    [1:a]asplit=2[a0][a1];\
-   [a0]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=6,aresample=16000:async=1000:first_pts=0[a];\
-   [a1]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=6[a_pcm]" \
+   [a0]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=3,alimiter=limit=0.9,aresample=16000:async=1000:first_pts=0[a];\
+   [a1]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=3,alimiter=limit=0.9[a_pcm]" \
   -map "[v]" -map "[a]" \
   -fps_mode cfr \
   -r "$FPS" \
@@ -54,7 +54,7 @@ exec ffmpeg -hide_banner -loglevel warning \
   -bufsize 16000k \
   -x264-params "scenecut=0:repeat-headers=1" \
   -c:a aac \
-  -b:a 128k \
+  -b:a 64k \
   -ar 16000 \
   -ac 1 \
   -max_interleave_delta 2000000 \
