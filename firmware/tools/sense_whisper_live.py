@@ -10,7 +10,7 @@ Backend (Apple Silicon):
   auto → mlx-whisper (Metal via MLX) → openai-whisper MPS → CPU
   MLX is the fast/accurate path on Mac Mini; openai MPS often falls back to CPU.
 
-Capture → WebRTC VAD (+ early partials) → mlx-whisper (Metal) → text.
+Capture → WebRTC VAD → mlx-whisper (Metal) → text (finals by default).
 Final phrases are speaker-labeled (YOU / OTHER_N) via Resemblyzer embeddings.
 If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
@@ -335,10 +335,10 @@ def _segment_rms_db(pcm: bytes) -> float:
 
 
 class LiveVad:
-    """WebRTC VAD (preferred) + energy fallback, pre-roll, early partials.
+    """WebRTC VAD (preferred) + energy fallback, pre-roll, optional early partials.
 
-    Research (mlx-audio / live STT): emit a partial ~1.5s into speech, finalize
-    after ~0.3–0.5s silence. WebRTC VAD beats raw energy for real speech.
+    Default: finals only (no interim … lines). With partial_ms > 0, emit a
+    draft ~1.5s into speech; finalize after hangover silence.
     """
 
     def __init__(
@@ -348,7 +348,7 @@ class LiveVad:
         min_speech_ms: int = 450,
         max_speech_ms: int = 5000,
         preroll_ms: int = 300,
-        partial_ms: int = 1800,
+        partial_ms: int = 0,  # 0 = finals only (no double text)
         webrtc_mode: int = 2,  # 0–3; 2 = stricter (less room-noise triggers)
         require_both: bool = True,  # webrtc AND energy (cuts wall-mic hallucinations)
     ):
@@ -357,7 +357,9 @@ class LiveVad:
         self.hangover_frames = max(1, hangover_ms // FRAME_MS)
         self.min_frames = max(1, min_speech_ms // FRAME_MS)
         self.max_frames = max(self.min_frames, max_speech_ms // FRAME_MS)
-        self.partial_frames = max(1, partial_ms // FRAME_MS)
+        self.partial_frames = (
+            max(1, partial_ms // FRAME_MS) if partial_ms > 0 else 0
+        )
         self._preroll: Deque[bytes] = deque(maxlen=max(1, preroll_ms // FRAME_MS))
         self._in_speech = False
         self._silence_run = 0
@@ -422,7 +424,8 @@ class LiveVad:
                     self._buf.extend(self._preroll)
                 self._buf.append(fb)
                 if (
-                    not self._partial_emitted
+                    self.partial_frames > 0
+                    and not self._partial_emitted
                     and len(self._buf) >= self.partial_frames
                 ):
                     out.append((b"".join(self._buf), False))
@@ -495,15 +498,22 @@ class LoudestSourceGate:
 _SOURCE_GATE: Optional[LoudestSourceGate] = None
 
 
+def _vad_banner(vad: LiveVad) -> str:
+    if vad.partial_frames > 0:
+        return f"{vad._vad_name} (partials @ {vad.partial_frames * FRAME_MS}ms)"
+    return f"{vad._vad_name} (finals only)"
+
+
 def capture_loop(
     pcm_iter: Iterator[bytes],
     seg_q: queue.Queue,
     stop: threading.Event,
     threshold_db: float,
     source: str = "",
+    partial_ms: int = 0,
 ) -> None:
-    vad = LiveVad(threshold_db=threshold_db)
-    print(f"[vad] {vad._vad_name} (partials @ 1.5s)", file=sys.stderr, flush=True)
+    vad = LiveVad(threshold_db=threshold_db, partial_ms=partial_ms)
+    print(f"[vad] {_vad_banner(vad)}", file=sys.stderr, flush=True)
     pending = bytearray()
     bytes_in = 0
     t0 = time.time()
@@ -538,6 +548,7 @@ def capture_loop_udp_ports(
     stop: threading.Event,
     threshold_db: float,
     host: str = "127.0.0.1",
+    partial_ms: int = 0,
 ) -> None:
     """Listen on every Sense PCM tee — works for any cam_sense / cam_sense2 order."""
     import select
@@ -560,7 +571,7 @@ def capture_loop_udp_ports(
             continue
         sock.setblocking(False)
         label = _port_label(port)
-        vad = LiveVad(threshold_db=threshold_db)
+        vad = LiveVad(threshold_db=threshold_db, partial_ms=partial_ms)
         socks.append(sock)
         sock_meta[sock.fileno()] = (port, label, vad, bytearray(), [0, time.time()])
         print(f"[capture] listening udp://{host}:{port} ({label})", file=sys.stderr, flush=True)
@@ -569,8 +580,9 @@ def capture_loop_udp_ports(
         print("[capture] no UDP ports bound", file=sys.stderr, flush=True)
         return
 
+    sample_vad = next(iter(sock_meta.values()))[2]
     print(
-        f"[vad] {next(iter(sock_meta.values()))[2]._vad_name} (partials @ 1.5s) ×{len(socks)} sources",
+        f"[vad] {_vad_banner(sample_vad)} ×{len(socks)} sources",
         file=sys.stderr,
         flush=True,
     )
@@ -911,6 +923,12 @@ def main() -> int:
         default=True,
         help="Label speakers (YOU / OTHER_N). Default on. Disable with --no-diarize",
     )
+    ap.add_argument(
+        "--partials",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show interim … drafts before each final line (default: finals only)",
+    )
     ap.add_argument("--max-speakers", type=int, default=2, help="Max distinct voices (default 2: YOU+OTHER)")
     ap.add_argument(
         "--enroll-you",
@@ -924,6 +942,7 @@ def main() -> int:
         help="Cosine similarity to reuse a speaker id (default 0.60; raise if two people merge)",
     )
     args = ap.parse_args()
+    partial_ms = 1800 if args.partials else 0
 
     backend = _pick_backend(args.backend)
     openai_device = _pick_openai_device(args.device) if backend == "openai" else "n/a"
@@ -935,7 +954,7 @@ def main() -> int:
         print(f"[source] HTTP {args.url}", flush=True)
         capture = threading.Thread(
             target=capture_loop,
-            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
+            args=(pcm_iter, seg_q, stop, args.vad_db, "", partial_ms),
             name="capture",
             daemon=True,
         )
@@ -944,7 +963,7 @@ def main() -> int:
         print(f"[source] RTSP {args.rtsp}", flush=True)
         capture = threading.Thread(
             target=capture_loop,
-            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
+            args=(pcm_iter, seg_q, stop, args.vad_db, "", partial_ms),
             name="capture",
             daemon=True,
         )
@@ -954,7 +973,7 @@ def main() -> int:
         print(f"[source] UDP pcm :{args.pcm_udp} ({label})", flush=True)
         capture = threading.Thread(
             target=capture_loop,
-            args=(pcm_iter, seg_q, stop, args.vad_db, label),
+            args=(pcm_iter, seg_q, stop, args.vad_db, label, partial_ms),
             name="capture",
             daemon=True,
         )
@@ -965,7 +984,7 @@ def main() -> int:
         print(f"[source] --ip {ip_spec} → UDP {ports} ({desc})", flush=True)
         capture = threading.Thread(
             target=capture_loop_udp_ports,
-            args=(ports, seg_q, stop, args.vad_db),
+            args=(ports, seg_q, stop, args.vad_db, "127.0.0.1", partial_ms),
             name="capture",
             daemon=True,
         )
