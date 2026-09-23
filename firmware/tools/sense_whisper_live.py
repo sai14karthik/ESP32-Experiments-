@@ -40,15 +40,14 @@ FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 480
 FRAME_BYTES = FRAME_SAMPLES * BYTES_PER_SAMPLE
 DEFAULT_MODEL = "turbo"
-DEFAULT_PCM_UDP_PORT = 19055
-# ffmpeg_sense_av tees: cam_sense→19055, cam_sense2→19056, …
-DEFAULT_PCM_UDP_PORTS = (19055, 19056, 19057, 19058)
-PORT_TO_LABEL = {
-    19055: "cam_sense",
-    19056: "cam_sense2",
-    19057: "cam_sense3",
-    19058: "cam_sense4",
+DEFAULT_PCM_UDP_PORT = 19056
+DEFAULT_PCM_UDP_PORTS = tuple(range(19050, 19060))
+# Board IP → Whisper UDP port (must match ffmpeg_sense_av.sh)
+IP_TO_PORT: dict[str, int] = {
+    "10.128.93.25": 19055,
+    "10.128.93.34": 19056,
 }
+PORT_TO_LABEL: dict[int, str] = {v: k for k, v in IP_TO_PORT.items()}
 
 # openai-whisper name → mlx-community HF repo (Metal)
 MLX_REPOS = {
@@ -166,6 +165,42 @@ def _port_label(port: int) -> str:
     return PORT_TO_LABEL.get(port, f"udp:{port}")
 
 
+def _ip_to_port(ip: str) -> int:
+    ip = ip.strip()
+    if ip.startswith("http://") or ip.startswith("https://"):
+        ip = ip.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+    if ip in IP_TO_PORT:
+        return IP_TO_PORT[ip]
+    if ip.count(".") == 3:
+        octet = ip.rsplit(".", 1)[-1]
+        if octet.isdigit():
+            return 19050 + (int(octet) % 10)
+    raise SystemExit(f"Bad --ip {ip!r}. Example: --ip 10.128.93.34")
+
+
+def _resolve_ips(spec: str) -> tuple[list[int], str]:
+    """--ip 10.128.93.34 | --ip 10.128.93.25,10.128.93.34 | --ip all"""
+    raw = spec.strip().lower()
+    if raw in ("all", "both", "*"):
+        ports = sorted(set(IP_TO_PORT.values()))
+        return ports, "all known boards"
+    parts = [p.strip() for p in spec.replace(";", ",").split(",") if p.strip()]
+    ports: list[int] = []
+    labels: list[str] = []
+    for p in parts:
+        port = _ip_to_port(p)
+        ports.append(port)
+        labels.append(_port_label(port))
+    # unique preserve order
+    seen: set[int] = set()
+    uniq: list[int] = []
+    for port in ports:
+        if port not in seen:
+            seen.add(port)
+            uniq.append(port)
+    return uniq, "+".join(labels)
+
+
 def iter_http_pcm(url: str, stop: threading.Event) -> Iterator[bytes]:
     while not stop.is_set():
         try:
@@ -233,7 +268,7 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
 
 # --- VAD ---------------------------------------------------------------------
 
-# Common Whisper garbage on short / quiet clips
+# Common Whisper garbage on short / quiet / noisy clips
 _HALLUCINATIONS = {
     "",
     ".",
@@ -249,20 +284,52 @@ _HALLUCINATIONS = {
     "ok",
     "um",
     "uh",
+    "so",
+    "the",
+    "no",
 }
+
+# Filler loops Whisper invents on room noise / distant wall mics
+_HALLUCINATION_PHRASES = (
+    "i'm going to go ahead",
+    "i am going to go ahead",
+    "going to go ahead and get",
+    "thanks for watching",
+    "please subscribe",
+    "see you in the next",
+)
 
 
 def _clean_text(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return ""
-    if t.lower().rstrip(".!") in _HALLUCINATIONS:
+    low = t.lower().rstrip(".!")
+    if low in _HALLUCINATIONS:
         return ""
-    # repetition loops (yeah yeah yeah…)
+    for phrase in _HALLUCINATION_PHRASES:
+        if phrase in low:
+            # whole line is that filler (or mostly repeats of it)
+            if low.count(phrase) >= 1 and len(low) < 40 + 40 * low.count(phrase):
+                return ""
+            if low.count(phrase) >= 2:
+                return ""
     words = t.lower().split()
     if len(words) >= 6 and len(set(words)) <= 2:
         return ""
+    # same 4+ word chunk repeated
+    if len(words) >= 12:
+        for n in (4, 5, 6, 7, 8):
+            chunk = " ".join(words[:n])
+            if chunk and t.lower().count(chunk) >= 3:
+                return ""
     return t
+
+
+def _segment_rms_db(pcm: bytes) -> float:
+    if len(pcm) < 2:
+        return -80.0
+    return _rms_db(np.frombuffer(pcm, dtype=np.int16))
 
 
 class LiveVad:
@@ -274,15 +341,17 @@ class LiveVad:
 
     def __init__(
         self,
-        threshold_db: float = -48.0,
-        hangover_ms: int = 350,
-        min_speech_ms: int = 300,
+        threshold_db: float = -50.0,
+        hangover_ms: int = 400,
+        min_speech_ms: int = 450,
         max_speech_ms: int = 5000,
-        preroll_ms: int = 350,  # collar: keep a bit more lead-in
-        partial_ms: int = 1500,
-        webrtc_mode: int = 1,  # 0–3; lower = more sensitive (collar / quiet speech)
+        preroll_ms: int = 300,
+        partial_ms: int = 1800,
+        webrtc_mode: int = 2,  # 0–3; 2 = stricter (less room-noise triggers)
+        require_both: bool = True,  # webrtc AND energy (cuts wall-mic hallucinations)
     ):
         self.threshold_db = threshold_db
+        self.require_both = require_both
         self.hangover_frames = max(1, hangover_ms // FRAME_MS)
         self.min_frames = max(1, min_speech_ms // FRAME_MS)
         self.max_frames = max(self.min_frames, max_speech_ms // FRAME_MS)
@@ -312,7 +381,7 @@ class LiveVad:
             import webrtcvad
 
             self._webrtc = webrtcvad.Vad(int(webrtc_mode))
-            self._vad_name = f"webrtc:{webrtc_mode}"
+            self._vad_name = f"webrtc:{webrtc_mode}+energy"
         except Exception:
             self._vad_name = "energy"
 
@@ -320,10 +389,13 @@ class LiveVad:
         energy_ok = _rms_db(np.frombuffer(fb, dtype=np.int16)) >= self.threshold_db
         if self._webrtc is not None:
             try:
-                # OR with energy so quiet collar speech still passes
-                return bool(self._webrtc.is_speech(fb, SAMPLE_RATE)) or energy_ok
+                speech = bool(self._webrtc.is_speech(fb, SAMPLE_RATE))
             except Exception:
-                pass
+                return energy_ok
+            # AND: stops distant wall noise; collar still works if spoken near mic
+            if self.require_both:
+                return speech and energy_ok
+            return speech or energy_ok
         return energy_ok
 
     def push(self, frame_bytes: bytes) -> list[tuple[bytes, bool]]:
@@ -386,6 +458,41 @@ def _enqueue_seg(seg_q: queue.Queue, item: tuple) -> None:
                 return
 
 
+class LoudestSourceGate:
+    """When N boards are live, only keep segments from near-loudest mic (cuts wall hallucinations)."""
+
+    def __init__(self, margin_db: float = 8.0, hold_s: float = 2.5):
+        self.margin_db = margin_db
+        self.hold_s = hold_s
+        self._best_db = -80.0
+        self._best_src = ""
+        self._best_t = 0.0
+        self._lock = threading.Lock()
+
+    def allow(self, source: str, seg_db: float) -> bool:
+        now = time.time()
+        with self._lock:
+            if now - self._best_t > self.hold_s:
+                self._best_db = -80.0
+                self._best_src = ""
+            if seg_db >= self._best_db:
+                self._best_db = seg_db
+                self._best_src = source
+                self._best_t = now
+                return True
+            # same source can continue a turn even if slightly quieter
+            if source and source == self._best_src and seg_db >= self._best_db - 3.0:
+                self._best_t = now
+                return True
+            if seg_db >= self._best_db - self.margin_db:
+                return True
+            return False
+
+
+# Shared gate for multi-UDP capture (created in capture_loop_udp_ports)
+_SOURCE_GATE: Optional[LoudestSourceGate] = None
+
+
 def capture_loop(
     pcm_iter: Iterator[bytes],
     seg_q: queue.Queue,
@@ -432,6 +539,9 @@ def capture_loop_udp_ports(
 ) -> None:
     """Listen on every Sense PCM tee — works for any cam_sense / cam_sense2 order."""
     import select
+
+    global _SOURCE_GATE
+    _SOURCE_GATE = LoudestSourceGate(margin_db=8.0, hold_s=2.5)
 
     socks: list[socket.socket] = []
     sock_meta: dict[int, tuple[int, str, LiveVad, bytearray, list]] = {}
@@ -487,6 +597,12 @@ def capture_loop_udp_ports(
                     frame = bytes(pending[:FRAME_BYTES])
                     del pending[:FRAME_BYTES]
                     for pcm, is_final in vad.push(frame):
+                        seg_db = _segment_rms_db(pcm)
+                        # Drop near-silent / noise floor segments (Whisper invents filler)
+                        if seg_db < threshold_db + 2.0:
+                            continue
+                        if _SOURCE_GATE is not None and not _SOURCE_GATE.allow(label, seg_db):
+                            continue
                         _enqueue_seg(seg_q, (pcm, is_final, label))
                 if stats[0] >= SAMPLE_RATE * BYTES_PER_SAMPLE * 5:
                     elapsed = max(0.001, time.time() - stats[1])
@@ -614,10 +730,10 @@ def _transcribe_mlx(audio: np.ndarray, repo: str, language: str) -> str:
         verbose=False,
         condition_on_previous_text=False,  # avoids repetition loops on live chunks
         temperature=0.0,
-        no_speech_threshold=0.6,
-        compression_ratio_threshold=2.4,
-        logprob_threshold=-1.0,
-        hallucination_silence_threshold=0.4,
+        no_speech_threshold=0.75,
+        compression_ratio_threshold=2.2,
+        logprob_threshold=-0.8,
+        hallucination_silence_threshold=0.3,
     )
     return _clean_text(result.get("text") or "")
 
@@ -715,6 +831,9 @@ def whisper_worker(
 
             if not text:
                 continue
+            # Reject low-level noise that still slipped past VAD (hallucination fuel)
+            if _segment_rms_db(seg) < -42.0 and is_final:
+                continue
             if not is_final and text == last_partial:
                 continue
 
@@ -738,22 +857,22 @@ def whisper_worker(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Live Whisper from Sense PCM — MLX Metal on Apple Silicon"
+        description="Live Whisper from Sense PCM — pick board with --ip"
     )
     src = ap.add_mutually_exclusive_group(required=False)
+    src.add_argument(
+        "--ip",
+        metavar="ADDR",
+        help="Board IP(s) for captions, e.g. 10.128.93.34 or 10.128.93.25,10.128.93.34 or all",
+    )
     src.add_argument(
         "--pcm-udp",
         type=int,
         metavar="PORT",
-        help="Single UDP s16le tee port (override; default listens on ALL Sense ports)",
+        help="Raw UDP port override (advanced)",
     )
-    src.add_argument(
-        "--pcm-udp-all",
-        action="store_true",
-        help="Listen on 19055–19058 (cam_sense…cam_sense4). Default when no source given.",
-    )
-    src.add_argument("--url", help="Sense PCM URL, e.g. http://10.128.93.25/audio")
-    src.add_argument("--rtsp", help="MediaMTX RTSP (higher latency; prefer --pcm-udp)")
+    src.add_argument("--url", help="Sense PCM URL, e.g. http://10.128.93.34/audio")
+    src.add_argument("--rtsp", help="MediaMTX RTSP (higher latency; prefer --ip)")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"default: {DEFAULT_MODEL}")
     ap.add_argument("--language", default="en")
     ap.add_argument(
@@ -763,15 +882,16 @@ def main() -> int:
         help="auto prefers mlx-whisper (Metal) on Apple Silicon",
     )
     ap.add_argument(
-        "--device",
+        "--torch-device",
         default="auto",
+        dest="device",
         help="openai backend only: cpu | cuda | mps | auto",
     )
     ap.add_argument(
         "--vad-db",
         type=float,
-        default=-55.0,
-        help="Energy VAD dBFS (default -55 for collar/quiet; try -48 if too noisy)",
+        default=-50.0,
+        help="Energy VAD dBFS (default -50; try -55 quiet, -45 noisy)",
     )
     ap.add_argument("--queue", type=int, default=2, help="Max pending segments (drop stale)")
     ap.add_argument(
@@ -799,19 +919,21 @@ def main() -> int:
     stop = threading.Event()
     seg_q: queue.Queue = queue.Queue(maxsize=max(1, args.queue))
 
-    use_all = args.pcm_udp_all or (
-        args.pcm_udp is None and args.url is None and args.rtsp is None
-    )
-
-    if use_all:
-        print(
-            f"[source] UDP pcm ports {list(DEFAULT_PCM_UDP_PORTS)} "
-            "(auto — any cam_sense / collar board)",
-            flush=True,
-        )
+    if args.url:
+        pcm_iter = iter_http_pcm(args.url, stop)
+        print(f"[source] HTTP {args.url}", flush=True)
         capture = threading.Thread(
-            target=capture_loop_udp_ports,
-            args=(list(DEFAULT_PCM_UDP_PORTS), seg_q, stop, args.vad_db),
+            target=capture_loop,
+            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
+            name="capture",
+            daemon=True,
+        )
+    elif args.rtsp:
+        pcm_iter = iter_rtsp_pcm(args.rtsp, stop)
+        print(f"[source] RTSP {args.rtsp}", flush=True)
+        capture = threading.Thread(
+            target=capture_loop,
+            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
             name="capture",
             daemon=True,
         )
@@ -825,21 +947,14 @@ def main() -> int:
             name="capture",
             daemon=True,
         )
-    elif args.url:
-        pcm_iter = iter_http_pcm(args.url, stop)
-        print(f"[source] HTTP {args.url}", flush=True)
-        capture = threading.Thread(
-            target=capture_loop,
-            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
-            name="capture",
-            daemon=True,
-        )
     else:
-        pcm_iter = iter_rtsp_pcm(args.rtsp, stop)
-        print(f"[source] RTSP {args.rtsp}", flush=True)
+        # Default: wearable Sense 10.128.93.34 — override with --ip
+        ip_spec = args.ip or "10.128.93.34"
+        ports, desc = _resolve_ips(ip_spec)
+        print(f"[source] --ip {ip_spec} → UDP {ports} ({desc})", flush=True)
         capture = threading.Thread(
-            target=capture_loop,
-            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
+            target=capture_loop_udp_ports,
+            args=(ports, seg_q, stop, args.vad_db),
             name="capture",
             daemon=True,
         )

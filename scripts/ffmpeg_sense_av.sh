@@ -12,14 +12,18 @@ AURL="${BASE}/audio"
 OUT="rtsp://127.0.0.1:${RTSP_PORT:?}/${MTX_PATH:?}"
 FPS="${SENSE_AV_FPS:-8}"
 
-# cam_sense → 19055, cam_sense2 → 19056, …
+# PCM UDP port is tied to board IP (stable) — not MediaMTX path order.
+# Lab: wall .25 → 19055, collar .34 → 19056. Override with SENSE_PCM_UDP_PORT.
 if [[ -z "${SENSE_PCM_UDP_PORT:-}" ]]; then
-  case "${MTX_PATH}" in
-    cam_sense) PCM_UDP_PORT=19055 ;;
-    cam_sense2) PCM_UDP_PORT=19056 ;;
-    cam_sense3) PCM_UDP_PORT=19057 ;;
-    cam_sense4) PCM_UDP_PORT=19058 ;;
-    *) PCM_UDP_PORT=19055 ;;
+  _host="${BASE#http://}"
+  _host="${_host#https://}"
+  _host="${_host%%/*}"
+  _host="${_host%%:*}"
+  _octet="${_host##*.}"
+  case "${_octet}" in
+    25) PCM_UDP_PORT=19055 ;;  # wall
+    34) PCM_UDP_PORT=19056 ;;  # collar
+    *)  PCM_UDP_PORT=$((19050 + (${_octet} % 10))) ;;
   esac
 else
   PCM_UDP_PORT="${SENSE_PCM_UDP_PORT}"

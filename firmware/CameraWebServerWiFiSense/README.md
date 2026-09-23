@@ -76,21 +76,21 @@ uv sync --group whisper   # installs mlx-whisper + mlx-metal
 # Terminal 1 — PCM tee must be active
 SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.34 ./scripts/mediamtx_run.sh
 
-# Terminal 2 — captions from ANY Sense board (auto :19055–19058)
-./scripts/sense_whisper_live.sh
+# Terminal 2 — captions from the board IP you want
+./scripts/sense_whisper_live.sh --ip 10.128.93.34
+# ./scripts/sense_whisper_live.sh --ip 10.128.93.25
+# ./scripts/sense_whisper_live.sh --ip 10.128.93.25,10.128.93.34
 ```
 
 Healthy log:
 
 ```
-[source] UDP pcm ports [19055, 19056, 19057, 19058] (auto — any cam_sense / collar board)
+[source] --ip 10.128.93.34 → UDP [19056] (10.128.93.34)
 [backend] mlx / Metal
-[vad] webrtc:1 (partials @ 1.5s) ×2 sources
-[whisper] loading MLX Metal model mlx-community/whisper-large-v3-turbo …
-[whisper] ready on Apple Metal (MLX) in …s — speak near Sense mic
-[capture] cam_sense2 ~16000 samples/s
-[16:12:03] [cam_sense2] … hello this  (280 ms partial)
-[16:12:04] [cam_sense2] [YOU] hello this is a test  (310 ms)
+[capture] listening udp://127.0.0.1:19056 (10.128.93.34)
+[whisper] ready on Apple Metal (MLX) …
+[capture] 10.128.93.34 ~16000 samples/s
+[16:12:04] [10.128.93.34] [YOU] hello this is a test  (310 ms)
 ```
 
 Speaker labels (`--diarize`, on by default): first voice ≈ **YOU**, next distinct voices **OTHER_1**….  
@@ -142,20 +142,21 @@ Then restart stream + captions on Mini:
 
 ```bash
 SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.34 ./scripts/mediamtx_run.sh
-./scripts/sense_whisper_live.sh   # auto: all boards (collar or wall)
+./scripts/sense_whisper_live.sh --ip 10.128.93.34
 ```
 
 If room noise fires captions: `--vad-db -48`. If quiet speech is missed: `--vad-db -58`.
 
 ### VAD / quiet speech (`--vad-db`)
 
-Default **`-55`** (collar / quiet speech). More negative = more sensitive.
+Default **`-50`**. More negative = more sensitive.
 
 | `--vad-db` | Behavior |
 |------------|----------|
 | `-42` | louder / noisy room |
-| `-48` | open desk / noisier |
-| `-55` | **default** (wearable) |
+| `-48` | open desk |
+| `-50` | **default** (multi-board) |
+| `-55` | quiet collar only |
 | `-58` … `-60` | very quiet; may false-trigger |
 
 Pause briefly after speaking (~0.3 s) so VAD closes the phrase. Captions print with inference ms.
@@ -187,7 +188,7 @@ Also see [`mediamtx/README.md`](../../mediamtx/README.md).
 
 ### Later (not built)
 
-**N× Whisper streams:** Default `./scripts/sense_whisper_live.sh` already listens on **19055–19058** and tags lines `[cam_sense]` / `[cam_sense2]`.
+**N× Whisper:** `--ip 10.128.93.25,10.128.93.34` or `--ip all`.
 
 ## Host preview (USB)
 
