@@ -8,7 +8,7 @@
 # - max_interleave_delta=0 means "wait forever for every stream" → stuck/stutter
 # - nobuffer/low_delay/flush_packets fight smoothness when ESP FPS jitters
 # - Prefer CFR + larger queues + modest mux preload (user accepts delay on RTSP)
-# - Fixed ~10 fps on ESP + QVGA is the stable band for Wi‑Fi dual HTTP
+# - Fixed ~10 fps on ESP + HVGA is the quality/smooth band for Wi‑Fi dual HTTP
 # - Whisper must NOT use RTSP — use the PCM UDP tee instead
 set -euo pipefail
 
@@ -38,17 +38,17 @@ exec ffmpeg -hide_banner -loglevel warning \
   -r 10 \
   -c:v libx264 \
   -preset veryfast \
-  -profile:v baseline \
+  -profile:v main \
   -pix_fmt yuv420p \
   -bf 0 \
   -g 20 \
   -keyint_min 20 \
-  -crf 23 \
-  -maxrate 2000k \
-  -bufsize 4000k \
+  -crf 20 \
+  -maxrate 3500k \
+  -bufsize 7000k \
   -x264-params "scenecut=0:repeat-headers=1" \
   -c:a aac \
-  -b:a 64k \
+  -b:a 96k \
   -ar 16000 \
   -ac 1 \
   -max_interleave_delta 1000000 \
