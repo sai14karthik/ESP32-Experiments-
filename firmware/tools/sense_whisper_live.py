@@ -10,7 +10,8 @@ Backend (Apple Silicon):
   auto → mlx-whisper (Metal via MLX) → openai-whisper MPS → CPU
   MLX is the fast/accurate path on Mac Mini; openai MPS often falls back to CPU.
 
-Capture → WebRTC VAD (fallback energy) + early partials → queue → Whisper.
+Capture → WebRTC VAD (+ early partials) → mlx-whisper (Metal) → text.
+Final phrases are speaker-labeled (YOU / OTHER_N) via Resemblyzer embeddings.
 If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
 
@@ -407,6 +408,107 @@ def capture_loop(
             t0 = time.time()
 
 
+# --- Speaker diarization (who spoke) ----------------------------------------
+
+
+class SpeakerTracker:
+    """Online speaker IDs via Resemblyzer embeddings (YOU vs OTHER / SPEAKER_N).
+
+    Whisper alone cannot tell speakers apart — this labels each *final* phrase.
+    Best when people take turns (overlap is hard on one mic).
+    """
+
+    def __init__(
+        self,
+        max_speakers: int = 4,
+        sim_threshold: float = 0.72,
+        enroll_you: Optional[Path] = None,
+    ):
+        from resemblyzer import VoiceEncoder, preprocess_wav
+
+        self._preprocess_wav = preprocess_wav
+        self._encoder = VoiceEncoder()
+        self.max_speakers = max(1, max_speakers)
+        self.sim_threshold = sim_threshold
+        self._names: list[str] = []
+        self._centroids: list[np.ndarray] = []
+        self._counts: list[int] = []
+        if enroll_you is not None:
+            path = Path(enroll_you).expanduser()
+            wav = self._preprocess_wav(path)
+            emb = self._encoder.embed_utterance(wav)
+            self._names.append("YOU")
+            self._centroids.append(emb.astype(np.float64))
+            self._counts.append(1)
+            print(f"[diarize] enrolled YOU from {path}", flush=True)
+        print(
+            f"[diarize] on (max {self.max_speakers} speakers, sim≥{self.sim_threshold})",
+            flush=True,
+        )
+
+    def _embed(self, audio_f32: np.ndarray) -> Optional[np.ndarray]:
+        if audio_f32.size < SAMPLE_RATE // 2:  # <0.5s — too short
+            return None
+        try:
+            wav = self._preprocess_wav(audio_f32, source_sr=SAMPLE_RATE)
+            if wav.size < SAMPLE_RATE // 2:
+                return None
+            return self._encoder.embed_utterance(wav).astype(np.float64)
+        except Exception as e:
+            print(f"[diarize] embed failed: {e}", file=sys.stderr, flush=True)
+            return None
+
+    @staticmethod
+    def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+        na = float(np.linalg.norm(a))
+        nb = float(np.linalg.norm(b))
+        if na < 1e-9 or nb < 1e-9:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+
+    def label(self, audio_f32: np.ndarray) -> str:
+        emb = self._embed(audio_f32)
+        if emb is None:
+            return "UNKNOWN"
+
+        best_i = -1
+        best_sim = -1.0
+        for i, c in enumerate(self._centroids):
+            sim = self._cosine(emb, c)
+            if sim > best_sim:
+                best_sim = sim
+                best_i = i
+
+        if best_i >= 0 and best_sim >= self.sim_threshold:
+            # running mean update
+            n = self._counts[best_i]
+            self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
+            self._counts[best_i] = n + 1
+            return self._names[best_i]
+
+        if len(self._centroids) >= self.max_speakers:
+            # force assign to nearest
+            if best_i < 0:
+                return "UNKNOWN"
+            n = self._counts[best_i]
+            self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
+            self._counts[best_i] = n + 1
+            return self._names[best_i]
+
+        # new speaker
+        if not self._names:
+            name = "YOU"  # first voice heard = YOU (or enroll override already set)
+        elif "YOU" in self._names:
+            name = f"OTHER_{len(self._names)}"
+        else:
+            name = f"SPEAKER_{len(self._names) + 1}"
+        self._names.append(name)
+        self._centroids.append(emb)
+        self._counts.append(1)
+        print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
+        return name
+
+
 # --- Whisper workers ---------------------------------------------------------
 
 
@@ -448,10 +550,15 @@ def whisper_worker(
     language: str,
     backend: str,
     openai_device: str,
+    diarize: bool,
+    max_speakers: int,
+    enroll_you: Optional[Path],
+    sim_threshold: float,
 ) -> None:
     t_load = time.time()
     openai_model = None
     mlx_repo = ""
+    speakers: Optional[SpeakerTracker] = None
 
     if backend == "mlx":
         mlx_repo = _mlx_repo(model_name)
@@ -476,6 +583,17 @@ def whisper_worker(
             f"[whisper] ready on {openai_device} in {time.time() - t_load:.1f}s — speak near Sense mic",
             flush=True,
         )
+
+    if diarize:
+        try:
+            speakers = SpeakerTracker(
+                max_speakers=max_speakers,
+                sim_threshold=sim_threshold,
+                enroll_you=enroll_you,
+            )
+        except Exception as e:
+            print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
+            speakers = None
 
     last_partial = ""
     while not stop.is_set():
@@ -502,14 +620,19 @@ def whisper_worker(
 
             if not text:
                 continue
-            # Skip partial if identical to last (noise)
             if not is_final and text == last_partial:
                 continue
+
+            who = ""
+            if is_final and speakers is not None:
+                who = speakers.label(_pcm_to_float32(seg))
+
             ts = datetime.now().strftime("%H:%M:%S")
             ms = (time.time() - t0) * 1000
             if is_final:
                 last_partial = ""
-                print(f"[{ts}] {text}  ({ms:.0f} ms)", flush=True)
+                tag = f"[{who}] " if who else ""
+                print(f"[{ts}] {tag}{text}  ({ms:.0f} ms)", flush=True)
             else:
                 last_partial = text
                 print(f"[{ts}] … {text}  ({ms:.0f} ms partial)", flush=True)
@@ -550,6 +673,24 @@ def main() -> int:
         help="Energy VAD dBFS (default -48; try -52 for quieter speech, -42 if noisy)",
     )
     ap.add_argument("--queue", type=int, default=2, help="Max pending segments (drop stale)")
+    ap.add_argument(
+        "--diarize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Label speakers (YOU / OTHER_N). Default on. Disable with --no-diarize",
+    )
+    ap.add_argument("--max-speakers", type=int, default=4, help="Max distinct voices to track")
+    ap.add_argument(
+        "--enroll-you",
+        type=Path,
+        help="WAV/MP3 of YOUR voice (5–20s) → label YOU; others become OTHER_1…",
+    )
+    ap.add_argument(
+        "--speaker-sim",
+        type=float,
+        default=0.72,
+        help="Cosine similarity to reuse a speaker id (raise if voices merge, lower if split)",
+    )
     args = ap.parse_args()
 
     backend = _pick_backend(args.backend)
@@ -571,7 +712,18 @@ def main() -> int:
 
     worker = threading.Thread(
         target=whisper_worker,
-        args=(seg_q, stop, args.model, args.language, backend, openai_device),
+        args=(
+            seg_q,
+            stop,
+            args.model,
+            args.language,
+            backend,
+            openai_device,
+            args.diarize,
+            args.max_speakers,
+            args.enroll_you,
+            args.speaker_sim,
+        ),
         name="whisper",
         daemon=True,
     )

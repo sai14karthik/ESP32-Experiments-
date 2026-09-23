@@ -9,11 +9,11 @@
 #   SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh   # terminal 1
 #   ./scripts/sense_whisper_live.sh                               # terminal 2
 #
-# Expect: [backend] mlx / Metal
+# Expect: [backend] mlx / Metal , [diarize] on , [YOU] / [OTHER_1] labels
 # Overrides:
 #   ./scripts/sense_whisper_live.sh --vad-db -52
-#   ./scripts/sense_whisper_live.sh --model large-v3
-#   ./scripts/sense_whisper_live.sh --backend openai --device mps
+#   ./scripts/sense_whisper_live.sh --enroll-you ~/myvoice.wav
+#   ./scripts/sense_whisper_live.sh --no-diarize
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

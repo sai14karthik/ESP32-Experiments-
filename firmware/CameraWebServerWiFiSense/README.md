@@ -89,8 +89,18 @@ Healthy log:
 [whisper] ready on Apple Metal (MLX) in …s — speak near Sense mic
 [capture] ~16000 samples/s
 [16:12:03] … hello this  (280 ms partial)
-[16:12:04] hello this is a test  (310 ms)
+[16:12:04] [YOU] hello this is a test  (310 ms)
+[16:12:09] [OTHER_1] can you hear me  (290 ms)
 ```
+
+Speaker labels (`--diarize`, on by default): first voice ≈ **YOU**, next distinct voices **OTHER_1**….  
+Optional: enroll your voice for clearer YOU tagging:
+
+```bash
+./scripts/sense_whisper_live.sh --enroll-you ~/Desktop/myvoice.wav
+```
+
+Record a clean 5–20 s clip of only you speaking first. Take turns (overlap on one mic is hard). Disable with `--no-diarize`.
 
 If you see `openai` / `cpu`, re-run `uv sync --group whisper`. Force MLX: `--backend mlx`.
 

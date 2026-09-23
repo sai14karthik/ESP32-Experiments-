@@ -40,4 +40,5 @@ whisper = [
     "mlx>=0.20",
     "webrtcvad>=2.0.10",
     "setuptools>=84.0.0",
+    "resemblyzer>=0.1.4",
 ]
