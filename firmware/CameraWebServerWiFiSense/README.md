@@ -44,8 +44,11 @@ See [`mediamtx/README.md`](../../mediamtx/README.md).
 
 ## Live voice recognition (Whisper on Mini)
 
-Local speech-to-text from the Sense mic. **Not** a cloud LLM. Runs on the Mac Mini
-(`openai-whisper`, MPS when available).
+Local speech-to-text from the Sense mic. **Not** a cloud LLM.
+
+On Apple Silicon Mini, default backend is **`mlx-whisper` (Apple Metal / MLX)** — much
+faster than openai-whisper on CPU or flaky MPS. Falls back to openai-whisper only if MLX
+is missing.
 
 ### Pipeline
 
@@ -56,83 +59,71 @@ Sense  /audio (s16le 16 kHz) + :81/stream (MJPEG)
         ├─► H.264+AAC → MediaMTX :8554/cam_sense  → VLC   (smooth; remux delay OK)
         └─► raw PCM   → udp://127.0.0.1:19055     → sense_whisper_live
                                                       │
-                                                      ├─ energy VAD (phrase segments)
-                                                      └─ Whisper → [HH:MM:SS] text
+                                                      ├─ energy VAD (pre-roll + short hangover)
+                                                      └─ mlx-whisper (Metal) → [HH:MM:SS] text
 ```
 
 - Whisper listens on the **UDP PCM tee**, not MediaMTX RTSP — no AAC/remux lag on captions.
-- UDP is localhost-only so a slow Whisper client cannot stall VLC (unlike TCP backpressure).
+- UDP is localhost-only so a slow Whisper client cannot stall VLC.
 - Sense `/audio` allows **one** HTTP client; MediaMTX owns it. Do not also `--url` while MediaMTX is up.
 
 ### Setup (Mini)
 
 ```bash
-uv sync --group whisper
+uv sync --group whisper   # installs mlx-whisper + mlx-metal
 
-# Terminal 1 — restart after pulling so the PCM tee is active
+# Terminal 1 — PCM tee must be active
 SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
 
 # Terminal 2
 ./scripts/sense_whisper_live.sh
 ```
 
-Healthy capture looks like:
+Healthy log:
 
 ```
 [source] UDP pcm :19055 (no MediaMTX lag)
-[whisper] loading turbo on mps…
-[whisper] ready — speak near the Sense mic
+[backend] mlx / Metal
+[whisper] loading MLX Metal model mlx-community/whisper-large-v3-turbo …
+[whisper] ready on Apple Metal (MLX) in …s — speak near Sense mic
 [capture] ~16000 samples/s
-[16:12:04] hello this is a test
+[16:12:04] hello this is a test  (320 ms)
 ```
 
-VLC (separate): `rtsp://10.128.93.23:8554/cam_sense` (TCP, enable audio).
+If you see `openai` / `cpu`, re-run `uv sync --group whisper`. Force MLX: `--backend mlx`.
 
 ### Models (`--model`)
 
-Default: **`turbo`** (`large-v3-turbo`) — near large-v3 quality, much faster. First download ~1.6 GB.
+Default: **`turbo`** → `mlx-community/whisper-large-v3-turbo` (best live speed/accuracy).
 
 | Model | Use when |
 |-------|----------|
-| `turbo` | **default / live captions** (recommended) |
-| `large-v3` | max accuracy; slower on Mini |
-| `medium.en` / `small.en` | faster / lighter |
-| `base.en` / `tiny.en` | quick tests |
-
-```bash
-./scripts/sense_whisper_live.sh --model turbo
-./scripts/sense_whisper_live.sh --model large-v3
-./scripts/sense_whisper_live.sh --model small.en
-```
-
-Needs `openai-whisper>=20240930` (`uv sync --group whisper`).
+| `turbo` | **default / live** (recommended) |
+| `large-v3` | max accuracy; slower |
+| `small.en` / `base.en` | lighter tests |
 
 ### VAD / quiet speech (`--vad-db`)
 
-Energy gate in dBFS. **More negative = more sensitive** (quieter sounds).
+Default **`-48`**. More negative = more sensitive.
 
 | `--vad-db` | Behavior |
 |------------|----------|
-| `-38` | loud speech only |
-| `-42` | default |
-| `-48` | quieter speech |
-| `-52` … `-55` | very low level |
-| `-60` | often too sensitive (room noise) |
+| `-42` | louder / noisy room |
+| `-48` | default |
+| `-52` … `-55` | quiet speech |
+| `-60` | often too sensitive |
 
-```bash
-./scripts/sense_whisper_live.sh --vad-db -52
-```
+Pause briefly after speaking (~0.3 s) so VAD closes the phrase. Captions print with inference ms.
 
-Speak, then pause ~0.5 s so VAD closes a segment before Whisper runs.
+### Latency
 
-### Latency (what actually delays captions)
+| Stage | Notes |
+|-------|--------|
+| MediaMTX | not on caption path |
+| VAD hangover | ~0.3 s after you stop talking (required to know phrase end) |
+| MLX turbo | main compute; usually a few hundred ms per phrase on Mini |
 
-| Stage | Affects captions? |
-|-------|-------------------|
-| MediaMTX AAC / muxdelay | **No** (VLC only) |
-| UDP PCM tee | negligible |
-| VAD wait for pause | ~0.5–1 s |
-| Whisper inference | **main** delay (use `turbo` to cut it) |
+True zero-lag captions are impossible (must wait for end of speech). MLX + short VAD is the practical minimum on Mini.
 
 ### Other sources (optional)
 

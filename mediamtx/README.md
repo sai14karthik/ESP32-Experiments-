@@ -88,7 +88,7 @@ While Sense A/V is up, `ffmpeg_sense_av` also tees raw PCM to **`udp://127.0.0.1
 ```bash
 uv sync --group whisper   # once
 # restart mediamtx_run after pulling so the tee exists
-./scripts/sense_whisper_live.sh                  # --pcm-udp 19055, model turbo
+./scripts/sense_whisper_live.sh                  # UDP :19055, mlx Metal turbo
 ./scripts/sense_whisper_live.sh --model large-v3 # max accuracy
 ./scripts/sense_whisper_live.sh --vad-db -52      # quieter speech
 ```

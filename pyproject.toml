@@ -36,4 +36,6 @@ notebook = [
 whisper = [
     "openai-whisper>=20240930",
     "torch",
+    "mlx-whisper>=0.4.0",
+    "mlx>=0.20",
 ]

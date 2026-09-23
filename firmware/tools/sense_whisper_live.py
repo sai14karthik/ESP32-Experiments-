@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Live speech-to-text from Sense PCM (smooth: capture never blocks on Whisper).
+"""Live speech-to-text from Sense PCM (capture never blocks on Whisper).
 
-Sources (prefer lowest latency first):
+Sources (prefer lowest latency):
   --pcm-udp 19055           raw s16le tee from ffmpeg_sense_av (no MediaMTX/AAC)
   --url  http://<esp>/audio raw Sense /audio (only if MediaMTX is not using it)
   --rtsp rtsp://…/cam_sense MediaMTX AAC path (extra remux delay — avoid)
 
-Capture thread → energy VAD → queue → Whisper worker (default turbo).
-If the worker falls behind, oldest pending segments are dropped (prefer fresh speech).
+Backend (Apple Silicon):
+  auto → mlx-whisper (Metal via MLX) → openai-whisper MPS → CPU
+  MLX is the fast/accurate path on Mac Mini; openai MPS often falls back to CPU.
+
+Capture → energy VAD (pre-roll + short hangover) → queue → Whisper.
+If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
 
 from __future__ import annotations
@@ -37,24 +41,28 @@ FRAME_BYTES = FRAME_SAMPLES * BYTES_PER_SAMPLE
 DEFAULT_MODEL = "turbo"
 DEFAULT_PCM_UDP_PORT = 19055
 
+# openai-whisper name → mlx-community HF repo (Metal)
+MLX_REPOS = {
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-v3": "mlx-community/whisper-large-v3",
+    "large": "mlx-community/whisper-large-v3",
+    "medium.en": "mlx-community/whisper-medium.en",
+    "medium": "mlx-community/whisper-medium",
+    "small.en": "mlx-community/whisper-small.en",
+    "small": "mlx-community/whisper-small",
+    "base.en": "mlx-community/whisper-base.en",
+    "base": "mlx-community/whisper-base",
+    "tiny.en": "mlx-community/whisper-tiny.en",
+    "tiny": "mlx-community/whisper-tiny",
+}
 
-def _pick_device(requested: str) -> str:
-    if requested != "auto":
-        return requested
-    try:
-        import torch
 
-        if torch.cuda.is_available():
-            return "cuda"
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            return "mps"
-    except Exception:
-        pass
-    return "cpu"
+def _pcm_to_float32(pcm: bytes) -> np.ndarray:
+    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def _rms_db(frame: np.ndarray) -> float:
-    # frame: int16
     x = frame.astype(np.float64)
     ms = float(np.mean(x * x))
     if ms < 1.0:
@@ -70,11 +78,58 @@ def write_wav(path: Path, pcm: bytes) -> None:
         w.writeframes(pcm)
 
 
+def _mlx_available() -> bool:
+    try:
+        import mlx.core as mx  # noqa: F401
+        import mlx_whisper  # noqa: F401
+
+        # Apple Silicon only
+        return True
+    except Exception:
+        return False
+
+
+def _pick_backend(requested: str) -> str:
+    """Return mlx | openai."""
+    if requested == "mlx":
+        if not _mlx_available():
+            raise SystemExit(
+                "mlx-whisper not available. On Mini: uv sync --group whisper"
+            )
+        return "mlx"
+    if requested == "openai":
+        return "openai"
+    # auto
+    if _mlx_available():
+        return "mlx"
+    return "openai"
+
+
+def _pick_openai_device(requested: str) -> str:
+    if requested != "auto":
+        return requested
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _mlx_repo(model_name: str) -> str:
+    if model_name.startswith("mlx-community/") or model_name.startswith("./"):
+        return model_name
+    return MLX_REPOS.get(model_name, f"mlx-community/whisper-{model_name}")
+
+
 # --- capture sources ---------------------------------------------------------
 
 
 def iter_udp_pcm(port: int, stop: threading.Event, host: str = "127.0.0.1") -> Iterator[bytes]:
-    """Raw s16le from ffmpeg_sense_av UDP tee (local, no AAC/RTSP)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
@@ -99,7 +154,6 @@ def iter_udp_pcm(port: int, stop: threading.Event, host: str = "127.0.0.1") -> I
 
 
 def iter_http_pcm(url: str, stop: threading.Event) -> Iterator[bytes]:
-    """Chunked raw s16le from Sense GET /audio."""
     while not stop.is_set():
         try:
             with urlopen(url, timeout=15) as resp:
@@ -114,7 +168,6 @@ def iter_http_pcm(url: str, stop: threading.Event) -> Iterator[bytes]:
 
 
 def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
-    """ffmpeg demux RTSP audio → raw s16le stdout (higher latency — last resort)."""
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -142,61 +195,48 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdout is not None
         assert proc.stderr is not None
-        got_audio = False
         try:
             while not stop.is_set():
                 chunk = proc.stdout.read(FRAME_BYTES * 4)
                 if not chunk:
                     break
-                got_audio = True
                 backoff = 0.5
                 yield chunk
         finally:
-            err = b""
             try:
                 proc.kill()
             except Exception:
                 pass
             try:
-                _, err = proc.communicate(timeout=2)
+                proc.communicate(timeout=2)
             except Exception:
-                try:
-                    err = proc.stderr.read() if proc.stderr else b""
-                except Exception:
-                    err = b""
+                pass
         if stop.is_set():
             break
-        detail = (err or b"").decode("utf-8", errors="replace").strip().splitlines()
-        tip = detail[-1] if detail else "no audio yet (is MediaMTX publishing cam_sense?)"
-        where = "127.0.0.1" if "127.0.0.1" in rtsp_url else "LAN"
-        print(f"[capture] rtsp reconnect ({where}): {tip}", file=sys.stderr, flush=True)
-        if not got_audio and "127.0.0.1" not in rtsp_url and "localhost" not in rtsp_url:
-            print(
-                "[capture] tip: prefer --pcm-udp 19055 (no MediaMTX lag) or --rtsp rtsp://127.0.0.1:8554/cam_sense",
-                file=sys.stderr,
-                flush=True,
-            )
+        print("[capture] rtsp reconnect", file=sys.stderr, flush=True)
         time.sleep(backoff)
         backoff = min(5.0, backoff * 1.5)
 
 
-# --- VAD + threads -----------------------------------------------------------
+# --- VAD ---------------------------------------------------------------------
 
 
 class EnergyVad:
-    """Simple energy VAD with hangover (no webrtcvad required)."""
+    """Energy VAD with pre-roll (catch leading consonants) + short hangover (live)."""
 
     def __init__(
         self,
-        threshold_db: float = -42.0,
-        hangover_ms: int = 450,
-        min_speech_ms: int = 800,
-        max_speech_ms: int = 8000,
+        threshold_db: float = -48.0,
+        hangover_ms: int = 280,
+        min_speech_ms: int = 350,
+        max_speech_ms: int = 5000,
+        preroll_ms: int = 250,
     ):
         self.threshold_db = threshold_db
         self.hangover_frames = max(1, hangover_ms // FRAME_MS)
         self.min_frames = max(1, min_speech_ms // FRAME_MS)
         self.max_frames = max(self.min_frames, max_speech_ms // FRAME_MS)
+        self._preroll: Deque[bytes] = deque(maxlen=max(1, preroll_ms // FRAME_MS))
         self._in_speech = False
         self._silence_run = 0
         self._buf: Deque[bytes] = deque()
@@ -204,7 +244,6 @@ class EnergyVad:
     def push(self, frame_bytes: bytes) -> Optional[bytes]:
         if len(frame_bytes) < FRAME_BYTES:
             return None
-        # use first FRAME_BYTES only for energy; keep full aligned frames in buf
         n = (len(frame_bytes) // FRAME_BYTES) * FRAME_BYTES
         out_seg: Optional[bytes] = None
         for i in range(0, n, FRAME_BYTES):
@@ -213,16 +252,21 @@ class EnergyVad:
             db = _rms_db(samples)
             voiced = db >= self.threshold_db
 
+            if not self._in_speech:
+                self._preroll.append(fb)
+
             if voiced:
                 self._silence_run = 0
                 if not self._in_speech:
                     self._in_speech = True
                     self._buf.clear()
+                    self._buf.extend(self._preroll)
                 self._buf.append(fb)
                 if len(self._buf) >= self.max_frames:
                     out_seg = b"".join(self._buf)
                     self._buf.clear()
                     self._in_speech = False
+                    self._preroll.clear()
             elif self._in_speech:
                 self._buf.append(fb)
                 self._silence_run += 1
@@ -232,6 +276,7 @@ class EnergyVad:
                     self._buf.clear()
                     self._in_speech = False
                     self._silence_run = 0
+                    self._preroll.clear()
         return out_seg
 
 
@@ -261,7 +306,6 @@ def capture_loop(
             del pending[:FRAME_BYTES]
             seg = vad.push(frame)
             if seg:
-                # drop oldest if backlog
                 while True:
                     try:
                         seg_q.put_nowait(seg)
@@ -280,77 +324,142 @@ def capture_loop(
             t0 = time.time()
 
 
+# --- Whisper workers ---------------------------------------------------------
+
+
+def _transcribe_mlx(audio: np.ndarray, repo: str, language: str) -> str:
+    import mlx_whisper
+
+    result = mlx_whisper.transcribe(
+        audio,
+        path_or_hf_repo=repo,
+        language=language,
+        fp16=True,
+        verbose=False,
+        condition_on_previous_text=False,
+        temperature=0.0,
+        no_speech_threshold=0.5,
+        compression_ratio_threshold=2.4,
+        logprob_threshold=-0.8,
+    )
+    return (result.get("text") or "").strip()
+
+
+def _transcribe_openai(model, audio_path: Path, language: str, device: str) -> str:
+    result = model.transcribe(
+        str(audio_path),
+        language=language,
+        fp16=(device == "cuda"),
+        verbose=False,
+        condition_on_previous_text=False,
+        temperature=0.0,
+    )
+    return (result.get("text") or "").strip()
+
+
 def whisper_worker(
     seg_q: queue.Queue,
     stop: threading.Event,
     model_name: str,
     language: str,
-    device: str,
+    backend: str,
+    openai_device: str,
 ) -> None:
-    print(f"[whisper] loading {model_name} on {device}…", flush=True)
-    import whisper
+    t_load = time.time()
+    openai_model = None
+    mlx_repo = ""
 
-    model = whisper.load_model(model_name, device=device)
-    print("[whisper] ready — speak near the Sense mic", flush=True)
+    if backend == "mlx":
+        mlx_repo = _mlx_repo(model_name)
+        print(f"[whisper] loading MLX Metal model {mlx_repo} …", flush=True)
+        # Warm-up: load weights once with a tiny silent buffer
+        _transcribe_mlx(np.zeros(SAMPLE_RATE, dtype=np.float32), mlx_repo, language)
+        print(
+            f"[whisper] ready on Apple Metal (MLX) in {time.time() - t_load:.1f}s — speak near Sense mic",
+            flush=True,
+        )
+    else:
+        print(f"[whisper] loading openai-whisper {model_name} on {openai_device}…", flush=True)
+        if openai_device == "cpu":
+            print(
+                "[whisper] WARNING: running on CPU (slow). Prefer: uv sync --group whisper (mlx-whisper)",
+                file=sys.stderr,
+                flush=True,
+            )
+        import whisper
+
+        openai_model = whisper.load_model(model_name, device=openai_device)
+        print(
+            f"[whisper] ready on {openai_device} in {time.time() - t_load:.1f}s — speak near Sense mic",
+            flush=True,
+        )
 
     while not stop.is_set():
         try:
-            seg = seg_q.get(timeout=0.3)
+            seg = seg_q.get(timeout=0.2)
         except queue.Empty:
             continue
         if seg is None:
             break
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            path = Path(tmp.name)
+
+        t0 = time.time()
         try:
-            write_wav(path, seg)
-            result = model.transcribe(
-                str(path),
-                language=language,
-                fp16=(device == "cuda"),
-                verbose=False,
-            )
-            text = (result.get("text") or "").strip()
+            if backend == "mlx":
+                text = _transcribe_mlx(_pcm_to_float32(seg), mlx_repo, language)
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    path = Path(tmp.name)
+                try:
+                    write_wav(path, seg)
+                    text = _transcribe_openai(openai_model, path, language, openai_device)
+                finally:
+                    path.unlink(missing_ok=True)
+
             if text:
                 ts = datetime.now().strftime("%H:%M:%S")
-                print(f"[{ts}] {text}", flush=True)
+                ms = (time.time() - t0) * 1000
+                print(f"[{ts}] {text}  ({ms:.0f} ms)", flush=True)
         except Exception as e:
             print(f"[whisper] {e}", file=sys.stderr, flush=True)
-        finally:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Live Whisper from Sense PCM (UDP tee / HTTP / RTSP)")
+    ap = argparse.ArgumentParser(
+        description="Live Whisper from Sense PCM — MLX Metal on Apple Silicon"
+    )
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument(
         "--pcm-udp",
         type=int,
         metavar="PORT",
-        help=f"Local UDP s16le tee from ffmpeg_sense_av (default port {DEFAULT_PCM_UDP_PORT})",
+        help=f"Local UDP s16le tee (default port {DEFAULT_PCM_UDP_PORT})",
     )
     src.add_argument("--url", help="Sense PCM URL, e.g. http://10.128.93.25/audio")
     src.add_argument("--rtsp", help="MediaMTX RTSP (higher latency; prefer --pcm-udp)")
-    ap.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"Whisper model (default: {DEFAULT_MODEL})",
-    )
+    ap.add_argument("--model", default=DEFAULT_MODEL, help=f"default: {DEFAULT_MODEL}")
     ap.add_argument("--language", default="en")
-    ap.add_argument("--device", default="auto", help="cpu | cuda | mps | auto")
+    ap.add_argument(
+        "--backend",
+        choices=("auto", "mlx", "openai"),
+        default="auto",
+        help="auto prefers mlx-whisper (Metal) on Apple Silicon",
+    )
+    ap.add_argument(
+        "--device",
+        default="auto",
+        help="openai backend only: cpu | cuda | mps | auto",
+    )
     ap.add_argument(
         "--vad-db",
         type=float,
-        default=-42.0,
-        help="Energy VAD threshold dBFS (raise if too sensitive, e.g. -38)",
+        default=-48.0,
+        help="Energy VAD dBFS (default -48; try -52 for quieter speech, -42 if noisy)",
     )
-    ap.add_argument("--queue", type=int, default=3, help="Max pending speech segments")
+    ap.add_argument("--queue", type=int, default=2, help="Max pending segments (drop stale)")
     args = ap.parse_args()
 
-    device = _pick_device(args.device)
+    backend = _pick_backend(args.backend)
+    openai_device = _pick_openai_device(args.device) if backend == "openai" else "n/a"
     stop = threading.Event()
     seg_q: queue.Queue = queue.Queue(maxsize=max(1, args.queue))
 
@@ -364,9 +473,11 @@ def main() -> int:
         pcm_iter = iter_rtsp_pcm(args.rtsp, stop)
         print(f"[source] RTSP {args.rtsp}", flush=True)
 
+    print(f"[backend] {backend}" + (f" / {openai_device}" if backend == "openai" else " / Metal"), flush=True)
+
     worker = threading.Thread(
         target=whisper_worker,
-        args=(seg_q, stop, args.model, args.language, device),
+        args=(seg_q, stop, args.model, args.language, backend, openai_device),
         name="whisper",
         daemon=True,
     )
