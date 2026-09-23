@@ -59,8 +59,8 @@ Sense  /audio (s16le 16 kHz) + :81/stream (MJPEG)
         ├─► H.264+AAC → MediaMTX :8554/cam_sense  → VLC   (smooth; remux delay OK)
         └─► raw PCM   → udp://127.0.0.1:19055     → sense_whisper_live
                                                       │
-                                                      ├─ energy VAD (pre-roll + short hangover)
-                                                      └─ mlx-whisper (Metal) → [HH:MM:SS] text
+                                                      ├─ WebRTC VAD (+ early partial ~1.5s)
+                                                      └─ mlx-whisper (Metal) → text
 ```
 
 - Whisper listens on the **UDP PCM tee**, not MediaMTX RTSP — no AAC/remux lag on captions.
@@ -84,10 +84,12 @@ Healthy log:
 ```
 [source] UDP pcm :19055 (no MediaMTX lag)
 [backend] mlx / Metal
+[vad] webrtc:2 (partials @ 1.5s)
 [whisper] loading MLX Metal model mlx-community/whisper-large-v3-turbo …
 [whisper] ready on Apple Metal (MLX) in …s — speak near Sense mic
 [capture] ~16000 samples/s
-[16:12:04] hello this is a test  (320 ms)
+[16:12:03] … hello this  (280 ms partial)
+[16:12:04] hello this is a test  (310 ms)
 ```
 
 If you see `openai` / `cpu`, re-run `uv sync --group whisper`. Force MLX: `--backend mlx`.

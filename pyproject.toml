@@ -38,4 +38,6 @@ whisper = [
     "torch",
     "mlx-whisper>=0.4.0",
     "mlx>=0.20",
+    "webrtcvad>=2.0.10",
+    "setuptools>=84.0.0",
 ]

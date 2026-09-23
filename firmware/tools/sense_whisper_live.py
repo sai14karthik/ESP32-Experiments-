@@ -10,7 +10,7 @@ Backend (Apple Silicon):
   auto → mlx-whisper (Metal via MLX) → openai-whisper MPS → CPU
   MLX is the fast/accurate path on Mac Mini; openai MPS often falls back to CPU.
 
-Capture → energy VAD (pre-roll + short hangover) → queue → Whisper.
+Capture → WebRTC VAD (fallback energy) + early partials → queue → Whisper.
 If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
 
@@ -220,37 +220,107 @@ def iter_rtsp_pcm(rtsp_url: str, stop: threading.Event) -> Iterator[bytes]:
 
 # --- VAD ---------------------------------------------------------------------
 
+# Common Whisper garbage on short / quiet clips
+_HALLUCINATIONS = {
+    "",
+    ".",
+    "..",
+    "...",
+    "thank you",
+    "thanks for watching",
+    "thanks for watching.",
+    "subscribe",
+    "you",
+    "bye",
+    "okay",
+    "ok",
+    "um",
+    "uh",
+}
 
-class EnergyVad:
-    """Energy VAD with pre-roll (catch leading consonants) + short hangover (live)."""
+
+def _clean_text(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if t.lower().rstrip(".!") in _HALLUCINATIONS:
+        return ""
+    # repetition loops (yeah yeah yeah…)
+    words = t.lower().split()
+    if len(words) >= 6 and len(set(words)) <= 2:
+        return ""
+    return t
+
+
+class LiveVad:
+    """WebRTC VAD (preferred) + energy fallback, pre-roll, early partials.
+
+    Research (mlx-audio / live STT): emit a partial ~1.5s into speech, finalize
+    after ~0.3–0.5s silence. WebRTC VAD beats raw energy for real speech.
+    """
 
     def __init__(
         self,
         threshold_db: float = -48.0,
-        hangover_ms: int = 280,
+        hangover_ms: int = 300,
         min_speech_ms: int = 350,
         max_speech_ms: int = 5000,
         preroll_ms: int = 250,
+        partial_ms: int = 1500,
+        webrtc_mode: int = 2,
     ):
         self.threshold_db = threshold_db
         self.hangover_frames = max(1, hangover_ms // FRAME_MS)
         self.min_frames = max(1, min_speech_ms // FRAME_MS)
         self.max_frames = max(self.min_frames, max_speech_ms // FRAME_MS)
+        self.partial_frames = max(1, partial_ms // FRAME_MS)
         self._preroll: Deque[bytes] = deque(maxlen=max(1, preroll_ms // FRAME_MS))
         self._in_speech = False
         self._silence_run = 0
         self._buf: Deque[bytes] = deque()
+        self._partial_emitted = False
+        self._webrtc = None
+        try:
+            # webrtcvad 2.0.10 imports deprecated pkg_resources; stub if missing
+            import sys
+            import types
 
-    def push(self, frame_bytes: bytes) -> Optional[bytes]:
+            if "pkg_resources" not in sys.modules:
+                try:
+                    import pkg_resources  # noqa: F401
+                except ImportError:
+                    stub = types.ModuleType("pkg_resources")
+
+                    class _Dist:
+                        version = "2.0.10"
+
+                    stub.get_distribution = lambda name: _Dist()  # type: ignore[attr-defined]
+                    sys.modules["pkg_resources"] = stub
+            import webrtcvad
+
+            self._webrtc = webrtcvad.Vad(int(webrtc_mode))
+            self._vad_name = f"webrtc:{webrtc_mode}"
+        except Exception:
+            self._vad_name = "energy"
+
+    def _is_voiced(self, fb: bytes) -> bool:
+        if self._webrtc is not None:
+            try:
+                return bool(self._webrtc.is_speech(fb, SAMPLE_RATE))
+            except Exception:
+                pass
+        samples = np.frombuffer(fb, dtype=np.int16)
+        return _rms_db(samples) >= self.threshold_db
+
+    def push(self, frame_bytes: bytes) -> list[tuple[bytes, bool]]:
+        """Return zero or more (pcm, is_final) segments."""
+        out: list[tuple[bytes, bool]] = []
         if len(frame_bytes) < FRAME_BYTES:
-            return None
+            return out
         n = (len(frame_bytes) // FRAME_BYTES) * FRAME_BYTES
-        out_seg: Optional[bytes] = None
         for i in range(0, n, FRAME_BYTES):
             fb = frame_bytes[i : i + FRAME_BYTES]
-            samples = np.frombuffer(fb, dtype=np.int16)
-            db = _rms_db(samples)
-            voiced = db >= self.threshold_db
+            voiced = self._is_voiced(fb)
 
             if not self._in_speech:
                 self._preroll.append(fb)
@@ -259,25 +329,47 @@ class EnergyVad:
                 self._silence_run = 0
                 if not self._in_speech:
                     self._in_speech = True
+                    self._partial_emitted = False
                     self._buf.clear()
                     self._buf.extend(self._preroll)
                 self._buf.append(fb)
+                if (
+                    not self._partial_emitted
+                    and len(self._buf) >= self.partial_frames
+                ):
+                    out.append((b"".join(self._buf), False))
+                    self._partial_emitted = True
                 if len(self._buf) >= self.max_frames:
-                    out_seg = b"".join(self._buf)
+                    out.append((b"".join(self._buf), True))
                     self._buf.clear()
                     self._in_speech = False
+                    self._partial_emitted = False
                     self._preroll.clear()
             elif self._in_speech:
                 self._buf.append(fb)
                 self._silence_run += 1
                 if self._silence_run >= self.hangover_frames:
                     if len(self._buf) >= self.min_frames:
-                        out_seg = b"".join(self._buf)
+                        out.append((b"".join(self._buf), True))
                     self._buf.clear()
                     self._in_speech = False
                     self._silence_run = 0
+                    self._partial_emitted = False
                     self._preroll.clear()
-        return out_seg
+        return out
+
+
+def _enqueue_seg(seg_q: queue.Queue, item: tuple[bytes, bool]) -> None:
+    while True:
+        try:
+            seg_q.put_nowait(item)
+            return
+        except queue.Full:
+            try:
+                seg_q.get_nowait()
+                print("[vad] drop stale segment", file=sys.stderr, flush=True)
+            except queue.Empty:
+                return
 
 
 def capture_loop(
@@ -286,7 +378,8 @@ def capture_loop(
     stop: threading.Event,
     threshold_db: float,
 ) -> None:
-    vad = EnergyVad(threshold_db=threshold_db)
+    vad = LiveVad(threshold_db=threshold_db)
+    print(f"[vad] {vad._vad_name} (partials @ 1.5s)", file=sys.stderr, flush=True)
     pending = bytearray()
     bytes_in = 0
     t0 = time.time()
@@ -304,18 +397,8 @@ def capture_loop(
         while len(pending) >= FRAME_BYTES:
             frame = bytes(pending[:FRAME_BYTES])
             del pending[:FRAME_BYTES]
-            seg = vad.push(frame)
-            if seg:
-                while True:
-                    try:
-                        seg_q.put_nowait(seg)
-                        break
-                    except queue.Full:
-                        try:
-                            seg_q.get_nowait()
-                            print("[vad] drop stale segment", file=sys.stderr, flush=True)
-                        except queue.Empty:
-                            pass
+            for item in vad.push(frame):
+                _enqueue_seg(seg_q, item)
         if bytes_in >= SAMPLE_RATE * BYTES_PER_SAMPLE * 5:
             elapsed = max(0.001, time.time() - t0)
             rate = bytes_in / BYTES_PER_SAMPLE / elapsed
@@ -336,13 +419,14 @@ def _transcribe_mlx(audio: np.ndarray, repo: str, language: str) -> str:
         language=language,
         fp16=True,
         verbose=False,
-        condition_on_previous_text=False,
+        condition_on_previous_text=False,  # avoids repetition loops on live chunks
         temperature=0.0,
-        no_speech_threshold=0.5,
+        no_speech_threshold=0.6,
         compression_ratio_threshold=2.4,
-        logprob_threshold=-0.8,
+        logprob_threshold=-1.0,
+        hallucination_silence_threshold=0.4,
     )
-    return (result.get("text") or "").strip()
+    return _clean_text(result.get("text") or "")
 
 
 def _transcribe_openai(model, audio_path: Path, language: str, device: str) -> str:
@@ -354,7 +438,7 @@ def _transcribe_openai(model, audio_path: Path, language: str, device: str) -> s
         condition_on_previous_text=False,
         temperature=0.0,
     )
-    return (result.get("text") or "").strip()
+    return _clean_text(result.get("text") or "")
 
 
 def whisper_worker(
@@ -372,7 +456,6 @@ def whisper_worker(
     if backend == "mlx":
         mlx_repo = _mlx_repo(model_name)
         print(f"[whisper] loading MLX Metal model {mlx_repo} …", flush=True)
-        # Warm-up: load weights once with a tiny silent buffer
         _transcribe_mlx(np.zeros(SAMPLE_RATE, dtype=np.float32), mlx_repo, language)
         print(
             f"[whisper] ready on Apple Metal (MLX) in {time.time() - t_load:.1f}s — speak near Sense mic",
@@ -394,13 +477,15 @@ def whisper_worker(
             flush=True,
         )
 
+    last_partial = ""
     while not stop.is_set():
         try:
-            seg = seg_q.get(timeout=0.2)
+            item = seg_q.get(timeout=0.2)
         except queue.Empty:
             continue
-        if seg is None:
+        if item is None:
             break
+        seg, is_final = item
 
         t0 = time.time()
         try:
@@ -415,10 +500,19 @@ def whisper_worker(
                 finally:
                     path.unlink(missing_ok=True)
 
-            if text:
-                ts = datetime.now().strftime("%H:%M:%S")
-                ms = (time.time() - t0) * 1000
+            if not text:
+                continue
+            # Skip partial if identical to last (noise)
+            if not is_final and text == last_partial:
+                continue
+            ts = datetime.now().strftime("%H:%M:%S")
+            ms = (time.time() - t0) * 1000
+            if is_final:
+                last_partial = ""
                 print(f"[{ts}] {text}  ({ms:.0f} ms)", flush=True)
+            else:
+                last_partial = text
+                print(f"[{ts}] … {text}  ({ms:.0f} ms partial)", flush=True)
         except Exception as e:
             print(f"[whisper] {e}", file=sys.stderr, flush=True)
 
