@@ -40,3 +40,6 @@
 [submodule "whisper"]
 	path = whisper
 	url = https://github.com/openai/whisper
+[submodule "luma-esp32-ai-assistant"]
+	path = luma-esp32-ai-assistant
+	url = https://github.com/Arush-Reddy/luma-esp32-ai-assistant
