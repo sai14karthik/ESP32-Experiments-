@@ -50,13 +50,13 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  // A/V = two HTTP streams. HVGA (480×320) @ q10 ≈ video-only sharpness; keep ~10 fps.
-  // (QVGA was the conservative band; bump if LabPSK stays smooth with mux delay.)
-  config.frame_size = FRAMESIZE_HVGA;
+  // Highest practical A/V on LabPSK: VGA 640×480 @ q8, ~8–10 fps (delay OK on Mini).
+  // If VLC stutters, drop to FRAMESIZE_HVGA / q10.
+  config.frame_size = FRAMESIZE_VGA;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 10;  // lower = sharper JPEG (8 = video-only default)
+  config.jpeg_quality = 8;
   config.fb_count = 3;
 
   if (!psramFound()) {
@@ -84,8 +84,8 @@ void setup() {
     s->set_saturation(s, -2);
   }
   if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_HVGA);  // 480×320
-    s->set_quality(s, 10);
+    s->set_framesize(s, FRAMESIZE_VGA);  // 640×480
+    s->set_quality(s, 8);
   }
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)

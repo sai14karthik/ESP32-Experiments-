@@ -2,7 +2,7 @@
 
 XIAO **ESP32-S3 Sense** multimodal firmware: **Wi‑Fi camera + PDM mic + Wi‑Fi CSI**.
 
-- Video: `http://<ip>:81/stream` (MJPEG) — default **HVGA 480×320**, JPEG q10 (~10 fps) for MediaMTX A/V
+- Video: `http://<ip>:81/stream` (MJPEG) — default **VGA 640×480**, JPEG q8 (max practical A/V on LabPSK)
 - Audio PCM: `http://<ip>/audio` (raw **s16le**, 16 kHz, mono) for Mini ffmpeg → MediaMTX
 - Mic levels: `http://<ip>/mic` (JSON)
 - USB: `CSI_DATA` + `rms:` lines for `cam_mic_preview.py` (CSI off by default for smooth A/V)
