@@ -54,8 +54,8 @@ exec ffmpeg -hide_banner -loglevel warning \
   -filter_complex \
   "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB)[v];\
    [1:a]asplit=2[a0][a1];\
-   [a0]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=3,alimiter=limit=0.9,aresample=16000:async=1000:first_pts=0[a];\
-   [a1]highpass=f=100,lowpass=f=7000,equalizer=f=1200:t=q:w=1.2:g=4,acompressor=threshold=-30dB:ratio=4:attack=10:release=120:makeup=6,alimiter=limit=0.95[a_pcm]" \
+   [a0]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=2,alimiter=limit=0.89,aresample=16000:async=1000:first_pts=0[a];\
+   [a1]highpass=f=100,lowpass=f=7000,equalizer=f=1200:t=q:w=1.2:g=2,acompressor=threshold=-30dB:ratio=3:attack=10:release=120:makeup=3,alimiter=limit=0.89[a_pcm]" \
   -map "[v]" -map "[a]" \
   -fps_mode cfr \
   -r "$FPS" \
