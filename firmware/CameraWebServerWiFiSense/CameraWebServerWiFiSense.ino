@@ -50,15 +50,15 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  // Collar / powerbank: HVGA + gentler JPEG (VGA@q8 brownouts → :81 dies, RTSP i/o timeout).
-  // Desk / wall USB: rebuild with -DSENSE_CAM_HIGH_QUALITY for VGA q8.
+  // Default: VGA q10 (sharp enough, delay OK; survives powerbank better than q8).
+  // Max desk quality: rebuild with -DSENSE_CAM_HIGH_QUALITY (VGA q8, 3 fbs).
 #if defined(SENSE_CAM_HIGH_QUALITY)
   config.frame_size = FRAMESIZE_VGA;
   config.jpeg_quality = 8;
   config.fb_count = 3;
 #else
-  config.frame_size = FRAMESIZE_HVGA;  // 480×320
-  config.jpeg_quality = 12;
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 10;
   config.fb_count = 2;
 #endif
   config.pixel_format = PIXFORMAT_JPEG;
@@ -94,8 +94,8 @@ void setup() {
     s->set_framesize(s, FRAMESIZE_VGA);
     s->set_quality(s, 8);
 #else
-    s->set_framesize(s, FRAMESIZE_HVGA);
-    s->set_quality(s, 12);
+    s->set_framesize(s, FRAMESIZE_VGA);
+    s->set_quality(s, 10);
 #endif
   }
 

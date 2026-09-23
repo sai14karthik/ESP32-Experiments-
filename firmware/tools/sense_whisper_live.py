@@ -41,6 +41,14 @@ FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 480
 FRAME_BYTES = FRAME_SAMPLES * BYTES_PER_SAMPLE
 DEFAULT_MODEL = "turbo"
 DEFAULT_PCM_UDP_PORT = 19055
+# ffmpeg_sense_av tees: cam_sense→19055, cam_sense2→19056, …
+DEFAULT_PCM_UDP_PORTS = (19055, 19056, 19057, 19058)
+PORT_TO_LABEL = {
+    19055: "cam_sense",
+    19056: "cam_sense2",
+    19057: "cam_sense3",
+    19058: "cam_sense4",
+}
 
 # openai-whisper name → mlx-community HF repo (Metal)
 MLX_REPOS = {
@@ -152,6 +160,10 @@ def iter_udp_pcm(port: int, stop: threading.Event, host: str = "127.0.0.1") -> I
                 yield data
     finally:
         sock.close()
+
+
+def _port_label(port: int) -> str:
+    return PORT_TO_LABEL.get(port, f"udp:{port}")
 
 
 def iter_http_pcm(url: str, stop: threading.Event) -> Iterator[bytes]:
@@ -361,7 +373,7 @@ class LiveVad:
         return out
 
 
-def _enqueue_seg(seg_q: queue.Queue, item: tuple[bytes, bool]) -> None:
+def _enqueue_seg(seg_q: queue.Queue, item: tuple) -> None:
     while True:
         try:
             seg_q.put_nowait(item)
@@ -379,6 +391,7 @@ def capture_loop(
     seg_q: queue.Queue,
     stop: threading.Event,
     threshold_db: float,
+    source: str = "",
 ) -> None:
     vad = LiveVad(threshold_db=threshold_db)
     print(f"[vad] {vad._vad_name} (partials @ 1.5s)", file=sys.stderr, flush=True)
@@ -399,14 +412,91 @@ def capture_loop(
         while len(pending) >= FRAME_BYTES:
             frame = bytes(pending[:FRAME_BYTES])
             del pending[:FRAME_BYTES]
-            for item in vad.push(frame):
-                _enqueue_seg(seg_q, item)
+            for pcm, is_final in vad.push(frame):
+                _enqueue_seg(seg_q, (pcm, is_final, source))
         if bytes_in >= SAMPLE_RATE * BYTES_PER_SAMPLE * 5:
             elapsed = max(0.001, time.time() - t0)
             rate = bytes_in / BYTES_PER_SAMPLE / elapsed
-            print(f"[capture] ~{rate:.0f} samples/s", file=sys.stderr, flush=True)
+            tag = f" {source}" if source else ""
+            print(f"[capture]{tag} ~{rate:.0f} samples/s", file=sys.stderr, flush=True)
             bytes_in = 0
             t0 = time.time()
+
+
+def capture_loop_udp_ports(
+    ports: list[int],
+    seg_q: queue.Queue,
+    stop: threading.Event,
+    threshold_db: float,
+    host: str = "127.0.0.1",
+) -> None:
+    """Listen on every Sense PCM tee — works for any cam_sense / cam_sense2 order."""
+    import select
+
+    socks: list[socket.socket] = []
+    sock_meta: dict[int, tuple[int, str, LiveVad, bytearray, list]] = {}
+    # fd → (port, label, vad, pending, [bytes_in, t0])
+
+    for port in ports:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError as e:
+            print(f"[capture] skip :{port} ({e})", file=sys.stderr, flush=True)
+            sock.close()
+            continue
+        sock.setblocking(False)
+        label = _port_label(port)
+        vad = LiveVad(threshold_db=threshold_db)
+        socks.append(sock)
+        sock_meta[sock.fileno()] = (port, label, vad, bytearray(), [0, time.time()])
+        print(f"[capture] listening udp://{host}:{port} ({label})", file=sys.stderr, flush=True)
+
+    if not socks:
+        print("[capture] no UDP ports bound", file=sys.stderr, flush=True)
+        return
+
+    print(
+        f"[vad] {next(iter(sock_meta.values()))[2]._vad_name} (partials @ 1.5s) ×{len(socks)} sources",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    try:
+        while not stop.is_set():
+            readable, _, _ = select.select(socks, [], [], 0.5)
+            for sock in readable:
+                meta = sock_meta.get(sock.fileno())
+                if not meta:
+                    continue
+                port, label, vad, pending, stats = meta
+                try:
+                    while True:
+                        data, _ = sock.recvfrom(8192)
+                        if not data:
+                            break
+                        pending.extend(data)
+                        stats[0] += len(data)
+                except BlockingIOError:
+                    pass
+                except OSError as e:
+                    print(f"[capture] udp :{port} ({e})", file=sys.stderr, flush=True)
+                    continue
+                while len(pending) >= FRAME_BYTES:
+                    frame = bytes(pending[:FRAME_BYTES])
+                    del pending[:FRAME_BYTES]
+                    for pcm, is_final in vad.push(frame):
+                        _enqueue_seg(seg_q, (pcm, is_final, label))
+                if stats[0] >= SAMPLE_RATE * BYTES_PER_SAMPLE * 5:
+                    elapsed = max(0.001, time.time() - stats[1])
+                    rate = stats[0] / BYTES_PER_SAMPLE / elapsed
+                    print(f"[capture] {label} ~{rate:.0f} samples/s", file=sys.stderr, flush=True)
+                    stats[0] = 0
+                    stats[1] = time.time()
+    finally:
+        for sock in socks:
+            sock.close()
 
 
 # --- Speaker diarization (who spoke) ----------------------------------------
@@ -604,7 +694,11 @@ def whisper_worker(
             continue
         if item is None:
             break
-        seg, is_final = item
+        if len(item) == 3:
+            seg, is_final, source = item
+        else:
+            seg, is_final = item
+            source = ""
 
         t0 = time.time()
         try:
@@ -630,13 +724,14 @@ def whisper_worker(
 
             ts = datetime.now().strftime("%H:%M:%S")
             ms = (time.time() - t0) * 1000
+            src_tag = f"[{source}] " if source else ""
             if is_final:
                 last_partial = ""
-                tag = f"[{who}] " if who else ""
-                print(f"[{ts}] {tag}{text}  ({ms:.0f} ms)", flush=True)
+                who_tag = f"[{who}] " if who else ""
+                print(f"[{ts}] {src_tag}{who_tag}{text}  ({ms:.0f} ms)", flush=True)
             else:
                 last_partial = text
-                print(f"[{ts}] … {text}  ({ms:.0f} ms partial)", flush=True)
+                print(f"[{ts}] {src_tag}… {text}  ({ms:.0f} ms partial)", flush=True)
         except Exception as e:
             print(f"[whisper] {e}", file=sys.stderr, flush=True)
 
@@ -645,12 +740,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Live Whisper from Sense PCM — MLX Metal on Apple Silicon"
     )
-    src = ap.add_mutually_exclusive_group(required=True)
+    src = ap.add_mutually_exclusive_group(required=False)
     src.add_argument(
         "--pcm-udp",
         type=int,
         metavar="PORT",
-        help=f"Local UDP s16le tee (default port {DEFAULT_PCM_UDP_PORT})",
+        help="Single UDP s16le tee port (override; default listens on ALL Sense ports)",
+    )
+    src.add_argument(
+        "--pcm-udp-all",
+        action="store_true",
+        help="Listen on 19055–19058 (cam_sense…cam_sense4). Default when no source given.",
     )
     src.add_argument("--url", help="Sense PCM URL, e.g. http://10.128.93.25/audio")
     src.add_argument("--rtsp", help="MediaMTX RTSP (higher latency; prefer --pcm-udp)")
@@ -699,15 +799,50 @@ def main() -> int:
     stop = threading.Event()
     seg_q: queue.Queue = queue.Queue(maxsize=max(1, args.queue))
 
-    if args.pcm_udp is not None:
+    use_all = args.pcm_udp_all or (
+        args.pcm_udp is None and args.url is None and args.rtsp is None
+    )
+
+    if use_all:
+        print(
+            f"[source] UDP pcm ports {list(DEFAULT_PCM_UDP_PORTS)} "
+            "(auto — any cam_sense / collar board)",
+            flush=True,
+        )
+        capture = threading.Thread(
+            target=capture_loop_udp_ports,
+            args=(list(DEFAULT_PCM_UDP_PORTS), seg_q, stop, args.vad_db),
+            name="capture",
+            daemon=True,
+        )
+    elif args.pcm_udp is not None:
+        label = _port_label(args.pcm_udp)
         pcm_iter = iter_udp_pcm(args.pcm_udp, stop)
-        print(f"[source] UDP pcm :{args.pcm_udp} (no MediaMTX lag)", flush=True)
+        print(f"[source] UDP pcm :{args.pcm_udp} ({label})", flush=True)
+        capture = threading.Thread(
+            target=capture_loop,
+            args=(pcm_iter, seg_q, stop, args.vad_db, label),
+            name="capture",
+            daemon=True,
+        )
     elif args.url:
         pcm_iter = iter_http_pcm(args.url, stop)
         print(f"[source] HTTP {args.url}", flush=True)
+        capture = threading.Thread(
+            target=capture_loop,
+            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
+            name="capture",
+            daemon=True,
+        )
     else:
         pcm_iter = iter_rtsp_pcm(args.rtsp, stop)
         print(f"[source] RTSP {args.rtsp}", flush=True)
+        capture = threading.Thread(
+            target=capture_loop,
+            args=(pcm_iter, seg_q, stop, args.vad_db, ""),
+            name="capture",
+            daemon=True,
+        )
 
     print(f"[backend] {backend}" + (f" / {openai_device}" if backend == "openai" else " / Metal"), flush=True)
 
@@ -726,12 +861,6 @@ def main() -> int:
             args.speaker_sim,
         ),
         name="whisper",
-        daemon=True,
-    )
-    capture = threading.Thread(
-        target=capture_loop,
-        args=(pcm_iter, seg_q, stop, args.vad_db),
-        name="capture",
         daemon=True,
     )
     worker.start()

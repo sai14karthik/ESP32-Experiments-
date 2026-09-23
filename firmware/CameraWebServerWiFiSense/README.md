@@ -57,14 +57,15 @@ Sense  /audio (s16le 16 kHz) + :81/stream (MJPEG)
         │
         ▼  ffmpeg_sense_av.sh  (one pull from the board)
         ├─► H.264+AAC → MediaMTX :8554/cam_sense  → VLC   (smooth; remux delay OK)
-        └─► raw PCM   → udp://127.0.0.1:19055     → sense_whisper_live
+        └─► speech PCM → udp://127.0.0.1:19055(+n) → sense_whisper_live
                                                       │
                                                       ├─ WebRTC VAD (+ early partial ~1.5s)
                                                       └─ mlx-whisper (Metal) → text
 ```
 
 - Whisper listens on the **UDP PCM tee**, not MediaMTX RTSP — no AAC/remux lag on captions.
-- UDP is localhost-only so a slow Whisper client cannot stall VLC.
+- Per-board ports: `cam_sense` → **19055**, `cam_sense2` → **19056**, …
+- Whisper branch is speech-EQ + stronger compressor (separate from RTSP AAC).
 - Sense `/audio` allows **one** HTTP client; MediaMTX owns it. Do not also `--url` while MediaMTX is up.
 
 ### Setup (Mini)
@@ -73,24 +74,23 @@ Sense  /audio (s16le 16 kHz) + :81/stream (MJPEG)
 uv sync --group whisper   # installs mlx-whisper + mlx-metal
 
 # Terminal 1 — PCM tee must be active
-SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
+SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.34 ./scripts/mediamtx_run.sh
 
-# Terminal 2
+# Terminal 2 — captions from ANY Sense board (auto :19055–19058)
 ./scripts/sense_whisper_live.sh
 ```
 
 Healthy log:
 
 ```
-[source] UDP pcm :19055 (no MediaMTX lag)
+[source] UDP pcm ports [19055, 19056, 19057, 19058] (auto — any cam_sense / collar board)
 [backend] mlx / Metal
-[vad] webrtc:2 (partials @ 1.5s)
+[vad] webrtc:1 (partials @ 1.5s) ×2 sources
 [whisper] loading MLX Metal model mlx-community/whisper-large-v3-turbo …
 [whisper] ready on Apple Metal (MLX) in …s — speak near Sense mic
-[capture] ~16000 samples/s
-[16:12:03] … hello this  (280 ms partial)
-[16:12:04] [YOU] hello this is a test  (310 ms)
-[16:12:09] [OTHER_1] can you hear me  (290 ms)
+[capture] cam_sense2 ~16000 samples/s
+[16:12:03] [cam_sense2] … hello this  (280 ms partial)
+[16:12:04] [cam_sense2] [YOU] hello this is a test  (310 ms)
 ```
 
 Speaker labels (`--diarize`, on by default): first voice ≈ **YOU**, next distinct voices **OTHER_1**….  
@@ -141,8 +141,8 @@ curl -s http://10.128.93.34/mic
 Then restart stream + captions on Mini:
 
 ```bash
-SENSE_AV_URL=http://10.128.93.34 ./scripts/mediamtx_run.sh
-./scripts/sense_whisper_live.sh   # --vad-db -55 already default
+SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.34 ./scripts/mediamtx_run.sh
+./scripts/sense_whisper_live.sh   # auto: all boards (collar or wall)
 ```
 
 If room noise fires captions: `--vad-db -48`. If quiet speech is missed: `--vad-db -58`.
@@ -187,7 +187,7 @@ Also see [`mediamtx/README.md`](../../mediamtx/README.md).
 
 ### Later (not built)
 
-**N× Whisper streams:** VLC already has `cam_sense`, `cam_sense2`, … All boards currently share PCM UDP **19055**, so multi-board captions would collide. When asked: per-board ports (`19055+i`) + N Whisper listeners (or one labeled process).
+**N× Whisper streams:** Default `./scripts/sense_whisper_live.sh` already listens on **19055–19058** and tags lines `[cam_sense]` / `[cam_sense2]`.
 
 ## Host preview (USB)
 
