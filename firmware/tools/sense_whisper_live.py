@@ -307,9 +307,12 @@ def _clean_text(text: str) -> str:
     low = t.lower().rstrip(".!")
     if low in _HALLUCINATIONS:
         return ""
+    # long hum / stutter loops (Ummm…, aaaa…)
+    letters = [c for c in low if c.isalpha()]
+    if len(letters) >= 20 and len(set(letters)) <= 2:
+        return ""
     for phrase in _HALLUCINATION_PHRASES:
         if phrase in low:
-            # whole line is that filler (or mostly repeats of it)
             if low.count(phrase) >= 1 and len(low) < 40 + 40 * low.count(phrase):
                 return ""
             if low.count(phrase) >= 2:
@@ -317,7 +320,6 @@ def _clean_text(text: str) -> str:
     words = t.lower().split()
     if len(words) >= 6 and len(set(words)) <= 2:
         return ""
-    # same 4+ word chunk repeated
     if len(words) >= 12:
         for n in (4, 5, 6, 7, 8):
             chunk = " ".join(words[:n])
@@ -627,8 +629,8 @@ class SpeakerTracker:
 
     def __init__(
         self,
-        max_speakers: int = 4,
-        sim_threshold: float = 0.72,
+        max_speakers: int = 2,
+        sim_threshold: float = 0.60,
         enroll_you: Optional[Path] = None,
     ):
         from resemblyzer import VoiceEncoder, preprocess_wav
@@ -640,6 +642,8 @@ class SpeakerTracker:
         self._names: list[str] = []
         self._centroids: list[np.ndarray] = []
         self._counts: list[int] = []
+        self._last_name = "YOU"
+        self._min_new_samples = SAMPLE_RATE  # ≥1.0s before creating OTHER_*
         if enroll_you is not None:
             path = Path(enroll_you).expanduser()
             wav = self._preprocess_wav(path)
@@ -647,6 +651,7 @@ class SpeakerTracker:
             self._names.append("YOU")
             self._centroids.append(emb.astype(np.float64))
             self._counts.append(1)
+            self._last_name = "YOU"
             print(f"[diarize] enrolled YOU from {path}", flush=True)
         print(
             f"[diarize] on (max {self.max_speakers} speakers, sim≥{self.sim_threshold})",
@@ -654,7 +659,7 @@ class SpeakerTracker:
         )
 
     def _embed(self, audio_f32: np.ndarray) -> Optional[np.ndarray]:
-        if audio_f32.size < SAMPLE_RATE // 2:  # <0.5s — too short
+        if audio_f32.size < SAMPLE_RATE // 2:  # <0.5s — too short for a reliable embed
             return None
         try:
             wav = self._preprocess_wav(audio_f32, source_sr=SAMPLE_RATE)
@@ -675,8 +680,9 @@ class SpeakerTracker:
 
     def label(self, audio_f32: np.ndarray) -> str:
         emb = self._embed(audio_f32)
+        # Short "yeah"/"ok" — keep current speaker (don't invent UNKNOWN/OTHER)
         if emb is None:
-            return "UNKNOWN"
+            return self._last_name
 
         best_i = -1
         best_sim = -1.0
@@ -687,24 +693,28 @@ class SpeakerTracker:
                 best_i = i
 
         if best_i >= 0 and best_sim >= self.sim_threshold:
-            # running mean update
             n = self._counts[best_i]
             self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
             self._counts[best_i] = n + 1
-            return self._names[best_i]
+            self._last_name = self._names[best_i]
+            return self._last_name
 
-        if len(self._centroids) >= self.max_speakers:
-            # force assign to nearest
-            if best_i < 0:
-                return "UNKNOWN"
-            n = self._counts[best_i]
-            self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
-            self._counts[best_i] = n + 1
-            return self._names[best_i]
+        # Not enough audio / room for a new identity → stick with nearest or last
+        can_add = (
+            len(self._centroids) < self.max_speakers
+            and audio_f32.size >= self._min_new_samples
+        )
+        if not can_add:
+            if best_i >= 0:
+                n = self._counts[best_i]
+                self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
+                self._counts[best_i] = n + 1
+                self._last_name = self._names[best_i]
+                return self._last_name
+            return self._last_name
 
-        # new speaker
         if not self._names:
-            name = "YOU"  # first voice heard = YOU (or enroll override already set)
+            name = "YOU"
         elif "YOU" in self._names:
             name = f"OTHER_{len(self._names)}"
         else:
@@ -712,6 +722,7 @@ class SpeakerTracker:
         self._names.append(name)
         self._centroids.append(emb)
         self._counts.append(1)
+        self._last_name = name
         print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
         return name
 
@@ -900,7 +911,7 @@ def main() -> int:
         default=True,
         help="Label speakers (YOU / OTHER_N). Default on. Disable with --no-diarize",
     )
-    ap.add_argument("--max-speakers", type=int, default=4, help="Max distinct voices to track")
+    ap.add_argument("--max-speakers", type=int, default=2, help="Max distinct voices (default 2: YOU+OTHER)")
     ap.add_argument(
         "--enroll-you",
         type=Path,
@@ -909,8 +920,8 @@ def main() -> int:
     ap.add_argument(
         "--speaker-sim",
         type=float,
-        default=0.72,
-        help="Cosine similarity to reuse a speaker id (raise if voices merge, lower if split)",
+        default=0.60,
+        help="Cosine similarity to reuse a speaker id (default 0.60; raise if two people merge)",
     )
     args = ap.parse_args()
 

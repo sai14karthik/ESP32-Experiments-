@@ -50,15 +50,15 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  // Default: VGA q10 (sharp enough, delay OK; survives powerbank better than q8).
-  // Max desk quality: rebuild with -DSENSE_CAM_HIGH_QUALITY (VGA q8, 3 fbs).
+  // Wearable / powerbank default: HVGA (480×320) — VGA often kills :81 under ffmpeg load.
+  // Max quality on wall USB: rebuild with -DSENSE_CAM_HIGH_QUALITY (VGA q8).
 #if defined(SENSE_CAM_HIGH_QUALITY)
   config.frame_size = FRAMESIZE_VGA;
   config.jpeg_quality = 8;
   config.fb_count = 3;
 #else
-  config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 10;
+  config.frame_size = FRAMESIZE_HVGA;
+  config.jpeg_quality = 12;
   config.fb_count = 2;
 #endif
   config.pixel_format = PIXFORMAT_JPEG;
@@ -94,8 +94,8 @@ void setup() {
     s->set_framesize(s, FRAMESIZE_VGA);
     s->set_quality(s, 8);
 #else
-    s->set_framesize(s, FRAMESIZE_VGA);
-    s->set_quality(s, 10);
+    s->set_framesize(s, FRAMESIZE_HVGA);
+    s->set_quality(s, 12);
 #endif
   }
 
