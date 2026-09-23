@@ -7,6 +7,7 @@
 | **Presence detection** (N× C5 CSI) | [presence_detection/README.md](presence_detection/README.md) |
 | **CSI capture / Mini ingest** | [csi_pipeline_new/README.md](csi_pipeline_new/README.md) |
 | **MediaMTX** (XIAO / Sense → Mini → RTSP) | [mediamtx/README.md](mediamtx/README.md) |
+| **Record RTSP** (MP4 video+audio) | `./scripts/record_rtsp.py` — see [mediamtx/README.md](mediamtx/README.md#record-video--audio) |
 | **S3 Sense** (cam + mic + CSI) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md) |
 | **Live Whisper captions** (Sense mic → Mini) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini) |
 | **Papers / reading** | [materials/](materials/) |
@@ -33,6 +34,6 @@ cd csi_pipeline_new && ./count_csi_clients.sh
 uv sync --group whisper
 SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh   # VLC: …/cam_sense
 ./scripts/sense_whisper_live.sh                              # UDP :19055, model turbo
-./scripts/sense_whisper_live.sh --model large-v3 --vad-db -52
-# details: firmware/CameraWebServerWiFiSense/README.md
+./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_sense      # save MP4 (A/V); Ctrl-C to stop
+# details: firmware/CameraWebServerWiFiSense/README.md · mediamtx/README.md
 ```

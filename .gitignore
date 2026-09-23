@@ -78,6 +78,9 @@ presence_detection/models/*.joblib
 mediamtx/mediamtx.runtime.yml
 mediamtx/run_xiao_publish.sh
 
+# Local RTSP recordings (record_rtsp.py)
+/recordings/
+
 # Local reference clones (lab uses firmware/CameraRTSPWiFi/Micro-RTSP submodule)
 /ESP32-RTSP/
 /ESP32_RTSP/

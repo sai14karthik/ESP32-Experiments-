@@ -149,6 +149,10 @@ Env: `SENSE_PCM_UDP_PORT` (default `19055`) must match `ffmpeg_sense_av.sh`.
 Code: `scripts/sense_whisper_live.sh` → `firmware/tools/sense_whisper_live.py`.
 Also see [`mediamtx/README.md`](../../mediamtx/README.md).
 
+### Later (not built)
+
+**N× Whisper streams:** VLC already has `cam_sense`, `cam_sense2`, … All boards currently share PCM UDP **19055**, so multi-board captions would collide. When asked: per-board ports (`19055+i`) + N Whisper listeners (or one labeled process).
+
 ## Host preview (USB)
 
 ```bash

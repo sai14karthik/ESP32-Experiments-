@@ -108,6 +108,24 @@ Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
 
 VLC: Open Network → URL → **TCP**; caching ~50–100 ms.
 
+## Record (video + audio)
+
+While MediaMTX is publishing, save a clip with both tracks (Sense A/V) or video-only (`cam_xiao`):
+
+```bash
+# Sense (H.264 + AAC) — until Ctrl-C → recordings/rtsp-….mp4
+./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_sense
+
+# timed + named file
+./scripts/record_rtsp.py rtsp://10.128.93.23:8554/cam_sense \
+  -o recordings/sense-demo.mp4 -t 120
+
+# video-only path
+./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_xiao --no-audio
+```
+
+Default is **stream-copy** (no re-encode). Use `--reencode` if the player needs H.264/yuv420p. Ctrl-C finishes a playable MP4. See `scripts/record_rtsp.py -h`.
+
 ## Config notes
 
 - Base: `mediamtx/mediamtx.yml`; runtime paths: `mediamtx.runtime.yml` (gitignored).
