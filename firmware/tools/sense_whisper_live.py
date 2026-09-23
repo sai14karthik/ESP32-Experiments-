@@ -284,9 +284,24 @@ _HALLUCINATIONS = {
     "ok",
     "um",
     "uh",
+    "uhm",
+    "uh huh",
     "so",
     "the",
     "no",
+    "yeah",
+    "yep",
+    "yup",
+    "hmm",
+    "hm",
+    "mmm",
+    "mm",
+    "mm-hmm",
+    "mm hmm",
+    "mhm",
+    "ah",
+    "oh",
+    "huh",
 }
 
 # Filler loops Whisper invents on room noise / distant wall mics
@@ -304,11 +319,14 @@ def _clean_text(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return ""
-    low = t.lower().rstrip(".!")
+    low = t.lower().rstrip(".!,?")
     if low in _HALLUCINATIONS:
         return ""
-    # long hum / stutter loops (Ummm…, aaaa…)
+    # Pure hum / filler (Mmm…, Uhhh…) — not real words
     letters = [c for c in low if c.isalpha()]
+    if letters and len(set(letters)) <= 2 and all(c in "mnhuaeiou" for c in letters):
+        return ""
+    # long hum / stutter loops (Ummm…, aaaa…)
     if len(letters) >= 20 and len(set(letters)) <= 2:
         return ""
     for phrase in _HALLUCINATION_PHRASES:
@@ -655,7 +673,10 @@ class SpeakerTracker:
         self._centroids: list[np.ndarray] = []
         self._counts: list[int] = []
         self._last_name = "YOU"
-        self._min_new_samples = SAMPLE_RATE  # ≥1.0s before creating OTHER_*
+        # Need solid speech before enrolling YOU / inventing OTHER_*
+        self._min_you_samples = int(SAMPLE_RATE * 1.5)  # ≥1.5s for first YOU
+        self._min_new_samples = int(SAMPLE_RATE * 2.0)  # ≥2.0s before OTHER_*
+        self._you_sticky_sim = 0.48  # below threshold but still treat as YOU
         if enroll_you is not None:
             path = Path(enroll_you).expanduser()
             wav = self._preprocess_wav(path)
@@ -711,10 +732,33 @@ class SpeakerTracker:
             self._last_name = self._names[best_i]
             return self._last_name
 
+        # Soft match to YOU — same person, different clip length/AGC (don't spawn OTHER)
+        if self._names and "YOU" in self._names:
+            you_i = self._names.index("YOU")
+            you_sim = self._cosine(emb, self._centroids[you_i])
+            if you_sim >= self._you_sticky_sim:
+                n = self._counts[you_i]
+                self._centroids[you_i] = (self._centroids[you_i] * n + emb) / (n + 1)
+                self._counts[you_i] = n + 1
+                self._last_name = "YOU"
+                return "YOU"
+
+        # First enrollment needs longer clear speech (avoid Mmm → YOU, Hello → OTHER)
+        if not self._names:
+            if audio_f32.size < self._min_you_samples:
+                return self._last_name
+            self._names.append("YOU")
+            self._centroids.append(emb)
+            self._counts.append(1)
+            self._last_name = "YOU"
+            print("[diarize] new voice → YOU", file=sys.stderr, flush=True)
+            return "YOU"
+
         # Not enough audio / room for a new identity → stick with nearest or last
         can_add = (
             len(self._centroids) < self.max_speakers
             and audio_f32.size >= self._min_new_samples
+            and (best_i < 0 or best_sim < self._you_sticky_sim)
         )
         if not can_add:
             if best_i >= 0:
@@ -725,9 +769,7 @@ class SpeakerTracker:
                 return self._last_name
             return self._last_name
 
-        if not self._names:
-            name = "YOU"
-        elif "YOU" in self._names:
+        if "YOU" in self._names:
             name = f"OTHER_{len(self._names)}"
         else:
             name = f"SPEAKER_{len(self._names) + 1}"
@@ -920,8 +962,8 @@ def main() -> int:
     ap.add_argument(
         "--diarize",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Label speakers (YOU / OTHER_N). Off by default; enable with --diarize",
+        default=True,
+        help="Label speakers (YOU / OTHER_N). Default on. Disable with --no-diarize",
     )
     ap.add_argument(
         "--partials",
