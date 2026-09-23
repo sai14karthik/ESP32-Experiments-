@@ -114,16 +114,49 @@ Default: **`turbo`** → `mlx-community/whisper-large-v3-turbo` (best live speed
 | `large-v3` | max accuracy; slower |
 | `small.en` / `base.en` | lighter tests |
 
+### Collar / wearable (best practice)
+
+Physical first — software cannot fix a mic facing fabric:
+
+1. Mic hole **toward your mouth**, not into shirt or collar fold
+2. Keep the hole **clear** (no tape/case over the PDM port)
+3. Prefer **upper chest / lapel**, ~15–25 cm from mouth
+
+Audio chain (already wired):
+
+| Stage | What |
+|-------|------|
+| Board | Soft AGC from pre-gain (idle ~3×, speech → ~−22 dBFS, max 10×) + DC block |
+| Mini `ffmpeg_sense_av` | Speech band 80–7500 Hz + compressor → RTSP **and** Whisper UDP |
+| Whisper | VAD default **−55 dBFS**, webrtc mode 1, longer preroll |
+
+Check levels after flash (speak normally while wearing):
+
+```bash
+curl -s http://10.128.93.34/mic
+# While talking: rms roughly −35 … −18 dBFS is healthy
+# Silent room: often below −45
+```
+
+Then restart stream + captions on Mini:
+
+```bash
+SENSE_AV_URL=http://10.128.93.34 ./scripts/mediamtx_run.sh
+./scripts/sense_whisper_live.sh   # --vad-db -55 already default
+```
+
+If room noise fires captions: `--vad-db -48`. If quiet speech is missed: `--vad-db -58`.
+
 ### VAD / quiet speech (`--vad-db`)
 
-Default **`-48`**. More negative = more sensitive.
+Default **`-55`** (collar / quiet speech). More negative = more sensitive.
 
 | `--vad-db` | Behavior |
 |------------|----------|
 | `-42` | louder / noisy room |
-| `-48` | default |
-| `-52` … `-55` | quiet speech |
-| `-60` | often too sensitive |
+| `-48` | open desk / noisier |
+| `-55` | **default** (wearable) |
+| `-58` … `-60` | very quiet; may false-trigger |
 
 Pause briefly after speaking (~0.3 s) so VAD closes the phrase. Captions print with inference ms.
 

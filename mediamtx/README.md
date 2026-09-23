@@ -83,7 +83,7 @@ VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP; enable **Audio track**).
 
 ### Live captions (Whisper)
 
-While Sense A/V is up, `ffmpeg_sense_av` also tees raw PCM to **`udp://127.0.0.1:19055`**. Whisper uses that tee — **not** MediaMTX RTSP — so captions skip AAC remux delay. VLC is unchanged.
+While Sense A/V is up, `ffmpeg_sense_av` also tees speech-processed PCM to **`udp://127.0.0.1:19055`**. Whisper uses that tee — **not** MediaMTX RTSP — so captions skip AAC remux delay. VLC is unchanged. Collar/wearable: board soft AGC + ffmpeg speech band/compressor (see Sense README).
 
 ```bash
 uv sync --group whisper   # once

@@ -52,9 +52,21 @@ static void sense_mic_task(void *arg) {
   (void)arg;
   int16_t samples[256];
   uint32_t last_print_ms = 0;
-  // One-pole DC blocker + mild attenuate (PDM often has DC; sudden jumps → headphone "whoops").
+  // One-pole DC blocker (PDM often has DC offset).
   int32_t dc_x1 = 0;
   int32_t dc_y1 = 0;
+  // Soft AGC for collar/wearable: adapt from *pre-gain* levels so room noise
+  // does not peg gain at max. Idle settles ~3×; speech targets ~−22 dBFS.
+  float agc_gain = 3.0f;
+  const float agc_idle = 3.0f;
+  const float agc_target = 0.08f;  // linear ≈ −22 dBFS after gain
+  const float agc_min = 1.0f;
+  const float agc_max = 10.0f;
+  const float agc_attack = 0.25f;   // louder → pull gain down faster
+  const float agc_release = 0.04f;  // quieter → raise gain slowly
+  const float agc_idle_tau = 0.01f;
+  // Pre-gain floor: below this, treat as silence (do not chase target).
+  const float agc_gate = 0.0008f;  // ≈ −62 dBFS pre-gain
 
   for (;;) {
     int n = s_i2s.readBytes(reinterpret_cast<char *>(samples), sizeof(samples));
@@ -65,23 +77,23 @@ static void sense_mic_task(void *arg) {
 
     int count = n / 2;
     double sum_sq = 0.0;
+    double pre_sum_sq = 0.0;
     int peak_raw = 0;
     for (int i = 0; i < count; i++) {
       int32_t x = samples[i];
-      // y = x - x1 + R*y1, R≈0.995
       int32_t y = x - dc_x1 + ((dc_y1 * 995) / 1000);
       dc_x1 = x;
       dc_y1 = y;
-      // ~0.7 gain + soft clip
-      y = (y * 7) / 10;
-      if (y > 30000) {
-        y = 30000;
-      } else if (y < -30000) {
-        y = -30000;
+      pre_sum_sq += (double)y * (double)y;
+      float yf = (float)y * agc_gain;
+      if (yf > 30000.0f) {
+        yf = 30000.0f;
+      } else if (yf < -30000.0f) {
+        yf = -30000.0f;
       }
-      samples[i] = (int16_t)y;
-      sum_sq += (double)y * (double)y;
-      int a = abs((int)y);
+      samples[i] = (int16_t)yf;
+      sum_sq += (double)yf * (double)yf;
+      int a = abs((int)yf);
       if (a > peak_raw) {
         peak_raw = a;
       }
@@ -90,9 +102,22 @@ static void sense_mic_task(void *arg) {
 
     const double full_scale = 32768.0;
     double rms_lin = sqrt(sum_sq / (double)count) / full_scale;
+    double pre_rms = sqrt(pre_sum_sq / (double)count) / full_scale;
     double peak = (double)peak_raw / full_scale;
     if (rms_lin < 1e-9) {
       rms_lin = 1e-9;
+    }
+    if (pre_rms > agc_gate) {
+      float desired = agc_target / (float)pre_rms;
+      if (desired > agc_max) {
+        desired = agc_max;
+      } else if (desired < agc_min) {
+        desired = agc_min;
+      }
+      float alpha = (desired < agc_gain) ? agc_attack : agc_release;
+      agc_gain += alpha * (desired - agc_gain);
+    } else {
+      agc_gain += agc_idle_tau * (agc_idle - agc_gain);
     }
     float rms_db = (float)(20.0 * log10(rms_lin));
     s_rms_db = rms_db;
@@ -103,7 +128,13 @@ static void sense_mic_task(void *arg) {
     if (now - last_print_ms >= 200) {
       last_print_ms = now;
       sense_serial_lock();
-      Serial.printf("rms=%.1f dBFS: peak=%.3f,rms:%.1f,peak:%.3f\n", rms_db, peak, rms_db, peak);
+      Serial.printf(
+          "rms=%.1f dBFS: peak=%.3f,agc=%.2f,rms:%.1f,peak:%.3f\n",
+          rms_db,
+          peak,
+          agc_gain,
+          rms_db,
+          peak);
       sense_serial_unlock();
     }
   }

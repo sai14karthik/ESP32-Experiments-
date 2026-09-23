@@ -263,12 +263,12 @@ class LiveVad:
     def __init__(
         self,
         threshold_db: float = -48.0,
-        hangover_ms: int = 300,
-        min_speech_ms: int = 350,
+        hangover_ms: int = 350,
+        min_speech_ms: int = 300,
         max_speech_ms: int = 5000,
-        preroll_ms: int = 250,
+        preroll_ms: int = 350,  # collar: keep a bit more lead-in
         partial_ms: int = 1500,
-        webrtc_mode: int = 2,
+        webrtc_mode: int = 1,  # 0–3; lower = more sensitive (collar / quiet speech)
     ):
         self.threshold_db = threshold_db
         self.hangover_frames = max(1, hangover_ms // FRAME_MS)
@@ -305,13 +305,14 @@ class LiveVad:
             self._vad_name = "energy"
 
     def _is_voiced(self, fb: bytes) -> bool:
+        energy_ok = _rms_db(np.frombuffer(fb, dtype=np.int16)) >= self.threshold_db
         if self._webrtc is not None:
             try:
-                return bool(self._webrtc.is_speech(fb, SAMPLE_RATE))
+                # OR with energy so quiet collar speech still passes
+                return bool(self._webrtc.is_speech(fb, SAMPLE_RATE)) or energy_ok
             except Exception:
                 pass
-        samples = np.frombuffer(fb, dtype=np.int16)
-        return _rms_db(samples) >= self.threshold_db
+        return energy_ok
 
     def push(self, frame_bytes: bytes) -> list[tuple[bytes, bool]]:
         """Return zero or more (pcm, is_final) segments."""
@@ -669,8 +670,8 @@ def main() -> int:
     ap.add_argument(
         "--vad-db",
         type=float,
-        default=-48.0,
-        help="Energy VAD dBFS (default -48; try -52 for quieter speech, -42 if noisy)",
+        default=-55.0,
+        help="Energy VAD dBFS (default -55 for collar/quiet; try -48 if too noisy)",
     )
     ap.add_argument("--queue", type=int, default=2, help="Max pending segments (drop stale)")
     ap.add_argument(

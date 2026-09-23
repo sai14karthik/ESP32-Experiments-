@@ -11,7 +11,7 @@
 #
 # Expect: [backend] mlx / Metal , [diarize] on , [YOU] / [OTHER_1] labels
 # Overrides:
-#   ./scripts/sense_whisper_live.sh --vad-db -52
+#   ./scripts/sense_whisper_live.sh --vad-db -58   # even more sensitive (collar)
 #   ./scripts/sense_whisper_live.sh --enroll-you ~/myvoice.wav
 #   ./scripts/sense_whisper_live.sh --no-diarize
 #

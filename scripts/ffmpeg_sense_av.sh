@@ -5,11 +5,9 @@
 # Args: Sense base URL e.g. http://10.128.93.25
 #
 # Sync strategy (two HTTP inputs have no shared clock):
-# - Regenerate video PTS as perfect CFR (setpts=N/(fps*TB)) so jitter does not drift audio
-# - aresample async stretches/squeezes PCM to stay on that timeline (first_pts=0)
-# - Modest muxdelay/preload buffers both tracks together (smooth; delay OK)
-# - max_interleave_delta=0 is forbidden (stalls); ~2s allows A/V to stay interleaved
-# - Whisper must NOT use RTSP — use the PCM UDP tee instead
+# - Regenerated video PTS + aresample async for A/V lock
+# - Speech chain: highpass → compressor → light makeup (wearable / collar best practice)
+# - Whisper uses raw PCM UDP tee (not this AAC path)
 set -euo pipefail
 
 BASE="${1:?need http://esp-ip}"
@@ -33,7 +31,8 @@ exec ffmpeg -hide_banner -loglevel warning \
   -i "$AURL" \
   -filter_complex \
   "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB)[v];\
-   [1:a]aresample=16000:async=1000:first_pts=0,highpass=f=80,volume=0.8[a]" \
+   [1:a]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=6,asplit=2[a_proc][a_pcm];\
+   [a_proc]aresample=16000:async=1000:first_pts=0[a]" \
   -map "[v]" -map "[a]" \
   -fps_mode cfr \
   -r "$FPS" \
@@ -58,7 +57,7 @@ exec ffmpeg -hide_banner -loglevel warning \
   -f rtsp \
   -rtsp_transport tcp \
   "$OUT" \
-  -map 1:a:0 \
+  -map "[a_pcm]" \
   -c:a pcm_s16le \
   -ac 1 \
   -ar 16000 \
