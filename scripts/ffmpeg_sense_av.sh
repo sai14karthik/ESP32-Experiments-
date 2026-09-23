@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Sense A/V remux for MediaMTX — smooth + A/V synced (delay OK).
-# Also tees speech-processed s16le to udp://127.0.0.1:19055 for Whisper.
-# Env from MediaMTX: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT (default 19055)
+# Also tees speech-processed s16le to udp://127.0.0.1:19055(+n) for Whisper.
+# Env from MediaMTX: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT
 # Args: Sense base URL e.g. http://10.128.93.25
 #
 # Sync strategy (two HTTP inputs have no shared clock):
 # - Regenerated video PTS + aresample async for A/V lock
-# - asplit *raw* first, then speech chain on each branch (filter-then-asplit
-#   starves the PCM tee and can block RTSP publish)
-# - Whisper uses the PCM UDP tee (not RTSP AAC)
+# - asplit *raw* first, then speech chain on each branch
+# - HTTP reconnect so a Wi‑Fi blip does not leave RTSP “available” then i/o-timeout
 set -euo pipefail
 
 BASE="${1:?need http://esp-ip}"
@@ -17,20 +16,39 @@ VURL="${BASE}:81/stream"
 AURL="${BASE}/audio"
 OUT="rtsp://127.0.0.1:${RTSP_PORT:?}/${MTX_PATH:?}"
 FPS="${SENSE_AV_FPS:-8}"
-PCM_UDP_PORT="${SENSE_PCM_UDP_PORT:-19055}"
+
+# cam_sense → 19055, cam_sense2 → 19056, …
+if [[ -z "${SENSE_PCM_UDP_PORT:-}" ]]; then
+  case "${MTX_PATH}" in
+    cam_sense) PCM_UDP_PORT=19055 ;;
+    cam_sense2) PCM_UDP_PORT=19056 ;;
+    cam_sense3) PCM_UDP_PORT=19057 ;;
+    cam_sense4) PCM_UDP_PORT=19058 ;;
+    *) PCM_UDP_PORT=19055 ;;
+  esac
+else
+  PCM_UDP_PORT="${SENSE_PCM_UDP_PORT}"
+fi
 PCM_UDP="udp://127.0.0.1:${PCM_UDP_PORT}?pkt_size=960"
 
-# MediaMTX hides runOnInit stderr — log file for debugging on Mini.
 LOG="${SENSE_AV_LOG:-/tmp/ffmpeg_sense_av.${MTX_PATH}.log}"
 echo "$(date '+%F %T') start path=${MTX_PATH} base=${BASE} out=${OUT} pcm=${PCM_UDP}" >>"$LOG"
 
 exec ffmpeg -hide_banner -loglevel warning \
   -fflags +genpts+discardcorrupt \
+  -reconnect 1 \
+  -reconnect_streamed 1 \
+  -reconnect_delay_max 5 \
+  -rw_timeout 15000000 \
   -probesize 512k \
   -analyzeduration 500000 \
   -thread_queue_size 2048 \
   -f mjpeg -framerate "$FPS" \
   -i "$VURL" \
+  -reconnect 1 \
+  -reconnect_streamed 1 \
+  -reconnect_delay_max 5 \
+  -rw_timeout 15000000 \
   -thread_queue_size 2048 \
   -f s16le -ar 16000 -ac 1 \
   -i "$AURL" \
@@ -44,22 +62,22 @@ exec ffmpeg -hide_banner -loglevel warning \
   -r "$FPS" \
   -c:v libx264 \
   -preset veryfast \
-  -profile:v high \
+  -profile:v baseline \
   -pix_fmt yuv420p \
   -bf 0 \
   -g $((FPS * 2)) \
   -keyint_min $((FPS * 2)) \
-  -crf 18 \
-  -maxrate 8000k \
-  -bufsize 16000k \
+  -crf 23 \
+  -maxrate 2500k \
+  -bufsize 5000k \
   -x264-params "scenecut=0:repeat-headers=1" \
   -c:a aac \
   -b:a 64k \
   -ar 16000 \
   -ac 1 \
   -max_interleave_delta 2000000 \
-  -muxdelay 1.5 \
-  -muxpreload 1.5 \
+  -muxdelay 1.0 \
+  -muxpreload 1.0 \
   -f rtsp \
   -rtsp_transport tcp \
   "$OUT" \
