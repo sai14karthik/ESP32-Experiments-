@@ -129,6 +129,6 @@ Default is **stream-copy** (no re-encode). Use `--reencode` if the player needs 
 ## Config notes
 
 - Base: `mediamtx/mediamtx.yml`; runtime paths: `mediamtx.runtime.yml` (gitignored).
-- Encode defaults: Sense A/V **VGA 640×480** q8 → Mini ~8 fps CFR, CRF 18 / max ~8 Mb/s, AAC 128 kb/s; **A/V synced** via regenerated video PTS + `aresample=async` (muxdelay ~1.5 s — delay OK).
+- Encode defaults: Sense A/V CFR ~8 fps, CRF 18, AAC 96 kb/s; **A/V sync** via CFR video PTS + ~300 ms audio delay + soft `aresample=async` + 2 s mux preload (delay OK, smooth play). Override delay with `SENSE_AV_AUDIO_DELAY_MS` (raise if lips behind speech, lower if audio lags).
 - Sense publish (`ffmpeg_sense_av.sh`): also tees raw s16le to `udp://127.0.0.1:19055` for Whisper (`SENSE_PCM_UDP_PORT` to override).
 - Board defaults (video-only): HVGA 480×320, JPEG q8, 12 fps.

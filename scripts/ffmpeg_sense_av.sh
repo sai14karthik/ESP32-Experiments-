@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# Sense A/V remux for MediaMTX — high quality + A/V synced (delay OK).
-# Tees speech-processed s16le to udp://127.0.0.1:19055(+n) for Whisper.
-# Env from MediaMTX: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT, SENSE_AV_FPS
-# Args: Sense base URL e.g. http://10.128.93.25
+# Sense A/V remux for MediaMTX — A/V locked & smooth (extra delay OK).
+#
+# Two HTTP sources (MJPEG + PCM) drift easily. Strategy:
+#   • CFR video timeline (setpts by frame index) so video never "runs away"
+#   • Delay audio slightly (video path is usually slower on ESP)
+#   • Gentle aresample async + fifos to absorb jitter without pitch warble
+#   • Larger mux preload so VLC starts with both tracks buffered
+#
+# Tees speech PCM to udp://127.0.0.1:19055(+n) for Whisper.
+# Env: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT, SENSE_AV_FPS,
+#      SENSE_AV_AUDIO_DELAY_MS (default 300 — raise if lips behind speech)
+# Args: Sense base URL e.g. http://10.128.93.34
 set -euo pipefail
 
 BASE="${1:?need http://esp-ip}"
@@ -11,6 +19,8 @@ VURL="${BASE}:81/stream"
 AURL="${BASE}/audio"
 OUT="rtsp://127.0.0.1:${RTSP_PORT:?}/${MTX_PATH:?}"
 FPS="${SENSE_AV_FPS:-8}"
+# Audio usually arrives ahead of MJPEG; delay PCM so mouths match words.
+AUDIO_DELAY_MS="${SENSE_AV_AUDIO_DELAY_MS:-300}"
 
 # PCM UDP port is tied to board IP (stable) — not MediaMTX path order.
 # Lab: wall .25 → 19055, collar .34 → 19056. Override with SENSE_PCM_UDP_PORT.
@@ -31,8 +41,10 @@ fi
 PCM_UDP="udp://127.0.0.1:${PCM_UDP_PORT}?pkt_size=960"
 
 LOG="${SENSE_AV_LOG:-/tmp/ffmpeg_sense_av.${MTX_PATH}.log}"
-echo "$(date '+%F %T') start path=${MTX_PATH} base=${BASE} out=${OUT} pcm=${PCM_UDP}" >>"$LOG"
+echo "$(date '+%F %T') start path=${MTX_PATH} base=${BASE} out=${OUT} pcm=${PCM_UDP} fps=${FPS} audio_delay_ms=${AUDIO_DELAY_MS}" >>"$LOG"
 
+# Shared start: both inputs get generated PTS; video is forced CFR; audio is
+# delayed then lightly stretched to stay on that timeline. Fifos absorb bursts.
 exec ffmpeg -hide_banner -loglevel warning \
   -fflags +genpts+discardcorrupt \
   -reconnect 1 \
@@ -41,20 +53,20 @@ exec ffmpeg -hide_banner -loglevel warning \
   -rw_timeout 15000000 \
   -probesize 512k \
   -analyzeduration 500000 \
-  -thread_queue_size 2048 \
+  -thread_queue_size 4096 \
   -f mjpeg -framerate "$FPS" \
   -i "$VURL" \
   -reconnect 1 \
   -reconnect_streamed 1 \
   -reconnect_delay_max 5 \
   -rw_timeout 15000000 \
-  -thread_queue_size 2048 \
+  -thread_queue_size 4096 \
   -f s16le -ar 16000 -ac 1 \
   -i "$AURL" \
   -filter_complex \
-  "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB)[v];\
+  "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB),fifo[v];\
    [1:a]asplit=2[a0][a1];\
-   [a0]highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=2,alimiter=limit=0.89,aresample=16000:async=1000:first_pts=0[a];\
+   [a0]adelay=${AUDIO_DELAY_MS}:all=1,highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=2,alimiter=limit=0.89,aresample=16000:async=1:first_pts=0,afifo[a];\
    [a1]highpass=f=100,lowpass=f=7000,equalizer=f=1200:t=q:w=1.2:g=2,acompressor=threshold=-30dB:ratio=3:attack=10:release=120:makeup=3,alimiter=limit=0.89[a_pcm]" \
   -map "[v]" -map "[a]" \
   -fps_mode cfr \
@@ -74,9 +86,10 @@ exec ffmpeg -hide_banner -loglevel warning \
   -b:a 96k \
   -ar 16000 \
   -ac 1 \
-  -max_interleave_delta 2000000 \
-  -muxdelay 1.5 \
-  -muxpreload 1.5 \
+  -max_interleave_delta 0 \
+  -muxdelay 2.0 \
+  -muxpreload 2.0 \
+  -flush_packets 1 \
   -f rtsp \
   -rtsp_transport tcp \
   "$OUT" \
