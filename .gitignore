@@ -98,6 +98,14 @@ mediamtx/run_xiao_publish.sh
 # Local Cursor (rules, plans — machine / session)
 .cursor/
 
+# Local unzipped reference trees (do not publish)
+/rpm-main/
+/gpu-cluster-main/
+/wifi-sensing-main/
+/wifi sensing/
+/docs_nivdia/
+/docs_nvidia/
+
 # Local reference materials (do not publish)
 /materials/
 /heartrate estimation/
