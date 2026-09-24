@@ -93,14 +93,26 @@ Healthy log:
 [16:12:04] [10.128.93.34] [YOU] hello this is a test  (310 ms)
 ```
 
-Speaker labels (`--diarize`, on by default): first voice ≈ **YOU**, next distinct voices **OTHER_1**….  
-Optional: enroll your voice for clearer YOU tagging:
+Speaker labels (`--diarize`, on by default) use **SpeechBrain ECAPA** (Whisper itself has no speakers).
+
+**Best on one Sense mic — live enroll (recommended):**
 
 ```bash
-./scripts/sense_whisper_live.sh --enroll-you ~/Desktop/myvoice.wav
+uv sync --group whisper   # pulls speechbrain + torchaudio
+./scripts/sense_whisper_live.sh --ip 10.128.93.34
+# 1) You speak a clear sentence ~3s → locks YOU
+# 2) Friend speaks ~3s → locks OTHER
+# Then conversation is labeled [YOU] / [OTHER]
 ```
 
-Record a clean 5–20 s clip of only you speaking first. Take turns (overlap on one mic is hard). Disable with `--no-diarize`.
+Or enroll from WAV files:
+
+```bash
+./scripts/sense_whisper_live.sh --ip 10.128.93.34 \
+  --enroll-you ~/Desktop/me.wav --enroll-other ~/Desktop/friend.wav
+```
+
+Take turns (overlap on one mic is hard). Disable with `--no-diarize`.
 
 If you see `openai` / `cpu`, re-run `uv sync --group whisper`. Force MLX: `--backend mlx`.
 

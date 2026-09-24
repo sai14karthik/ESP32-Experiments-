@@ -11,7 +11,7 @@ Backend (Apple Silicon):
   MLX is the fast/accurate path on Mac Mini; openai MPS often falls back to CPU.
 
 Capture → WebRTC VAD → mlx-whisper (Metal) → text (finals by default).
-Final phrases are speaker-labeled (YOU / OTHER_N) via Resemblyzer embeddings.
+Optional speaker labels via SpeechBrain ECAPA (--diarize / --enroll-live).
 If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
 
@@ -650,135 +650,233 @@ def capture_loop_udp_ports(
 # --- Speaker diarization (who spoke) ----------------------------------------
 
 
-class SpeakerTracker:
-    """Online speaker IDs via Resemblyzer embeddings (YOU vs OTHER / SPEAKER_N).
+def _load_mono_16k(path: Path) -> np.ndarray:
+    """Load enroll clip → float32 mono @ 16 kHz."""
+    path = Path(path).expanduser()
+    try:
+        import torchaudio
 
-    Whisper alone cannot tell speakers apart — this labels each *final* phrase.
-    Best when people take turns (overlap is hard on one mic).
+        wav, sr = torchaudio.load(str(path))
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if int(sr) != SAMPLE_RATE:
+            wav = torchaudio.functional.resample(wav, int(sr), SAMPLE_RATE)
+        return wav.squeeze(0).numpy().astype(np.float32)
+    except Exception:
+        import wave
+
+        with wave.open(str(path), "rb") as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                raise RuntimeError(f"enroll WAV must be mono s16le (or use torchaudio): {path}")
+            sr = w.getframerate()
+            pcm = w.readframes(w.getnframes())
+        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        if sr != SAMPLE_RATE:
+            # crude linear resample
+            n = int(len(audio) * SAMPLE_RATE / sr)
+            x = np.linspace(0, len(audio) - 1, n)
+            audio = np.interp(x, np.arange(len(audio)), audio).astype(np.float32)
+        return audio
+
+
+class SpeakerTracker:
+    """Speaker IDs via SpeechBrain ECAPA embeddings (far stronger than Resemblyzer).
+
+    Best accuracy: enroll each person once (WAV or --enroll-live), then match.
+    Closed gallery = only enrolled names (YOU / OTHER / custom). Open set can
+    invent OTHER_N when a new voice is clearly different.
     """
 
     def __init__(
         self,
         max_speakers: int = 2,
-        sim_threshold: float = 0.60,
-        enroll_you: Optional[Path] = None,
+        sim_threshold: float = 0.55,
+        margin: float = 0.06,
+        enrollments: Optional[dict[str, Path]] = None,
+        enroll_live: bool = False,
+        open_set: bool = False,
     ):
-        from resemblyzer import VoiceEncoder, preprocess_wav
+        import torch
+        from speechbrain.inference.speaker import EncoderClassifier
 
-        self._preprocess_wav = preprocess_wav
-        self._encoder = VoiceEncoder()
+        self._torch = torch
+        device = "cpu"
+        if torch.backends.mps.is_available():
+            # ECAPA encode is fine on CPU; MPS can be flaky for this model
+            device = "cpu"
+        self._encoder = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            savedir=str(Path.home() / ".cache" / "speechbrain" / "spkrec-ecapa-voxceleb"),
+            run_opts={"device": device},
+        )
         self.max_speakers = max(1, max_speakers)
         self.sim_threshold = sim_threshold
+        self.margin = margin
+        self.open_set = open_set
         self._names: list[str] = []
         self._centroids: list[np.ndarray] = []
         self._counts: list[int] = []
         self._last_name = "YOU"
-        # Need solid speech before enrolling YOU / inventing OTHER_*
-        self._min_you_samples = int(SAMPLE_RATE * 1.5)  # ≥1.5s for first YOU
-        self._min_new_samples = int(SAMPLE_RATE * 2.0)  # ≥2.0s before OTHER_*
-        self._you_sticky_sim = 0.48  # below threshold but still treat as YOU
-        if enroll_you is not None:
-            path = Path(enroll_you).expanduser()
-            wav = self._preprocess_wav(path)
-            emb = self._encoder.embed_utterance(wav)
-            self._names.append("YOU")
-            self._centroids.append(emb.astype(np.float64))
-            self._counts.append(1)
-            self._last_name = "YOU"
-            print(f"[diarize] enrolled YOU from {path}", flush=True)
+        self._min_enroll_samples = int(SAMPLE_RATE * 2.5)  # ≥2.5s clear speech
+        self._min_match_samples = int(SAMPLE_RATE * 0.6)
+        self._enroll_live = enroll_live
+        self._live_phase = "match"
+        if enroll_live and not (enrollments or {}):
+            self._live_phase = "enroll_you"
+            print(
+                "[diarize] LIVE ENROLL — speak clearly ~3s near the mic to lock YOU",
+                flush=True,
+            )
+
+        for name, path in (enrollments or {}).items():
+            emb = self._embed(_load_mono_16k(path), min_samples=SAMPLE_RATE)
+            if emb is None:
+                raise RuntimeError(f"could not embed enroll clip for {name}: {path}")
+            self._add(name, emb, announce=False)
+            print(f"[diarize] enrolled {name} from {path}", flush=True)
+            self._last_name = name
+
+        if self._names and enroll_live and "YOU" in self._names and len(self._names) < self.max_speakers:
+            self._live_phase = "enroll_other"
+            print(
+                "[diarize] LIVE ENROLL — have the other person speak ~3s to lock OTHER",
+                flush=True,
+            )
+        elif self._names:
+            self._live_phase = "match"
+
+        backend = "speechbrain/ECAPA"
         print(
-            f"[diarize] on (max {self.max_speakers} speakers, sim≥{self.sim_threshold})",
+            f"[diarize] on ({backend}, max {self.max_speakers}, "
+            f"sim≥{self.sim_threshold}, margin≥{self.margin}, "
+            f"gallery={self._names or 'empty'})",
             flush=True,
         )
 
-    def _embed(self, audio_f32: np.ndarray) -> Optional[np.ndarray]:
-        if audio_f32.size < SAMPLE_RATE // 2:  # <0.5s — too short for a reliable embed
+    def _embed(self, audio_f32: np.ndarray, min_samples: Optional[int] = None) -> Optional[np.ndarray]:
+        need = min_samples if min_samples is not None else self._min_match_samples
+        if audio_f32.size < need:
             return None
         try:
-            wav = self._preprocess_wav(audio_f32, source_sr=SAMPLE_RATE)
-            if wav.size < SAMPLE_RATE // 2:
+            wav = self._torch.from_numpy(np.ascontiguousarray(audio_f32)).float().unsqueeze(0)
+            with self._torch.no_grad():
+                emb = self._encoder.encode_batch(wav)
+            v = emb.squeeze().detach().cpu().numpy().astype(np.float64)
+            n = float(np.linalg.norm(v))
+            if n < 1e-9:
                 return None
-            return self._encoder.embed_utterance(wav).astype(np.float64)
+            return v / n
         except Exception as e:
             print(f"[diarize] embed failed: {e}", file=sys.stderr, flush=True)
             return None
 
     @staticmethod
     def _cosine(a: np.ndarray, b: np.ndarray) -> float:
-        na = float(np.linalg.norm(a))
-        nb = float(np.linalg.norm(b))
-        if na < 1e-9 or nb < 1e-9:
-            return 0.0
-        return float(np.dot(a, b) / (na * nb))
+        return float(np.dot(a, b))  # both L2-normalized
 
-    def label(self, audio_f32: np.ndarray) -> str:
-        emb = self._embed(audio_f32)
-        # Short "yeah"/"ok" — keep current speaker (don't invent UNKNOWN/OTHER)
-        if emb is None:
-            return self._last_name
-
-        best_i = -1
-        best_sim = -1.0
-        for i, c in enumerate(self._centroids):
-            sim = self._cosine(emb, c)
-            if sim > best_sim:
-                best_sim = sim
-                best_i = i
-
-        if best_i >= 0 and best_sim >= self.sim_threshold:
-            n = self._counts[best_i]
-            self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
-            self._counts[best_i] = n + 1
-            self._last_name = self._names[best_i]
-            return self._last_name
-
-        # Soft match to YOU — same person, different clip length/AGC (don't spawn OTHER)
-        if self._names and "YOU" in self._names:
-            you_i = self._names.index("YOU")
-            you_sim = self._cosine(emb, self._centroids[you_i])
-            if you_sim >= self._you_sticky_sim:
-                n = self._counts[you_i]
-                self._centroids[you_i] = (self._centroids[you_i] * n + emb) / (n + 1)
-                self._counts[you_i] = n + 1
-                self._last_name = "YOU"
-                return "YOU"
-
-        # First enrollment needs longer clear speech (avoid Mmm → YOU, Hello → OTHER)
-        if not self._names:
-            if audio_f32.size < self._min_you_samples:
-                return self._last_name
-            self._names.append("YOU")
-            self._centroids.append(emb)
-            self._counts.append(1)
-            self._last_name = "YOU"
-            print("[diarize] new voice → YOU", file=sys.stderr, flush=True)
-            return "YOU"
-
-        # Not enough audio / room for a new identity → stick with nearest or last
-        can_add = (
-            len(self._centroids) < self.max_speakers
-            and audio_f32.size >= self._min_new_samples
-            and (best_i < 0 or best_sim < self._you_sticky_sim)
-        )
-        if not can_add:
-            if best_i >= 0:
-                n = self._counts[best_i]
-                self._centroids[best_i] = (self._centroids[best_i] * n + emb) / (n + 1)
-                self._counts[best_i] = n + 1
-                self._last_name = self._names[best_i]
-                return self._last_name
-            return self._last_name
-
-        if "YOU" in self._names:
-            name = f"OTHER_{len(self._names)}"
-        else:
-            name = f"SPEAKER_{len(self._names) + 1}"
+    def _add(self, name: str, emb: np.ndarray, announce: bool = True) -> str:
         self._names.append(name)
         self._centroids.append(emb)
         self._counts.append(1)
         self._last_name = name
-        print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
+        if announce:
+            print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
         return name
+
+    def _update(self, i: int, emb: np.ndarray) -> str:
+        n = self._counts[i]
+        # slow centroid move — avoid one odd clip dragging the identity
+        self._centroids[i] = (self._centroids[i] * n + emb) / (n + 1)
+        nn = float(np.linalg.norm(self._centroids[i]))
+        if nn > 1e-9:
+            self._centroids[i] /= nn
+        self._counts[i] = n + 1
+        self._last_name = self._names[i]
+        return self._last_name
+
+    def _best_two(self, emb: np.ndarray) -> tuple[int, float, float]:
+        best_i, best_sim, second = -1, -1.0, -1.0
+        for i, c in enumerate(self._centroids):
+            sim = self._cosine(emb, c)
+            if sim > best_sim:
+                second = best_sim
+                best_sim = sim
+                best_i = i
+            elif sim > second:
+                second = sim
+        return best_i, best_sim, second
+
+    def label(self, audio_f32: np.ndarray) -> str:
+        # Live enrollment: need long clear speech before locking an identity
+        if self._live_phase == "enroll_you":
+            emb = self._embed(audio_f32, min_samples=self._min_enroll_samples)
+            if emb is None:
+                return ""
+            self._add("YOU", emb)
+            if self.max_speakers >= 2:
+                self._live_phase = "enroll_other"
+                print(
+                    "[diarize] YOU locked — now have the OTHER person speak ~3s",
+                    flush=True,
+                )
+            else:
+                self._live_phase = "match"
+                print("[diarize] enrollment done — matching speakers", flush=True)
+            return "YOU"
+
+        if self._live_phase == "enroll_other":
+            emb = self._embed(audio_f32, min_samples=self._min_enroll_samples)
+            if emb is None:
+                return self._last_name
+            # Must be clearly different from YOU
+            you_i = self._names.index("YOU") if "YOU" in self._names else 0
+            you_sim = self._cosine(emb, self._centroids[you_i])
+            if you_sim >= self.sim_threshold - 0.05:
+                print(
+                    f"[diarize] still sounds like YOU (sim={you_sim:.2f}) — other person should speak",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return "YOU"
+            self._add("OTHER", emb)
+            self._live_phase = "match"
+            print("[diarize] OTHER locked — matching speakers", flush=True)
+            return "OTHER"
+
+        emb = self._embed(audio_f32)
+        if emb is None:
+            return self._last_name
+
+        if not self._names:
+            # No gallery / no live enroll — soft bootstrap YOU from solid speech
+            if audio_f32.size < self._min_enroll_samples:
+                return self._last_name
+            return self._add("YOU", emb)
+
+        best_i, best_sim, second = self._best_two(emb)
+        confident = best_i >= 0 and best_sim >= self.sim_threshold and (
+            second < 0 or (best_sim - second) >= self.margin
+        )
+        if confident:
+            return self._update(best_i, emb)
+
+        # Soft stick to nearest if close enough (avoid flip on short turns)
+        if best_i >= 0 and best_sim >= self.sim_threshold - 0.08:
+            return self._update(best_i, emb)
+
+        if (
+            self.open_set
+            and len(self._centroids) < self.max_speakers
+            and audio_f32.size >= self._min_enroll_samples
+            and (best_i < 0 or best_sim < self.sim_threshold - 0.12)
+        ):
+            name = f"OTHER_{len(self._names)}" if "YOU" in self._names else f"SPEAKER_{len(self._names) + 1}"
+            if name == "OTHER_1" and "OTHER" not in self._names:
+                name = "OTHER"
+            return self._add(name, emb)
+
+        # Ambiguous — keep last speaker (turn continuity)
+        return self._last_name
 
 
 # --- Whisper workers ---------------------------------------------------------
@@ -824,8 +922,11 @@ def whisper_worker(
     openai_device: str,
     diarize: bool,
     max_speakers: int,
-    enroll_you: Optional[Path],
+    enrollments: dict[str, Path],
+    enroll_live: bool,
     sim_threshold: float,
+    speaker_margin: float,
+    open_set: bool,
 ) -> None:
     t_load = time.time()
     openai_model = None
@@ -861,7 +962,10 @@ def whisper_worker(
             speakers = SpeakerTracker(
                 max_speakers=max_speakers,
                 sim_threshold=sim_threshold,
-                enroll_you=enroll_you,
+                margin=speaker_margin,
+                enrollments=enrollments or None,
+                enroll_live=enroll_live,
+                open_set=open_set,
             )
         except Exception as e:
             print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
@@ -962,8 +1066,8 @@ def main() -> int:
     ap.add_argument(
         "--diarize",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Experimental speaker labels (YOU / OTHER_N). Off by default — unreliable on one mic",
+        default=True,
+        help="Speaker labels via SpeechBrain ECAPA (default on). Use --enroll-live for best accuracy",
     )
     ap.add_argument(
         "--partials",
@@ -975,16 +1079,63 @@ def main() -> int:
     ap.add_argument(
         "--enroll-you",
         type=Path,
-        help="WAV/MP3 of YOUR voice (5–20s) → label YOU; others become OTHER_1…",
+        help="WAV of YOUR voice (5–20s clean speech)",
+    )
+    ap.add_argument(
+        "--enroll-other",
+        type=Path,
+        help="WAV of the other person's voice (5–20s)",
+    )
+    ap.add_argument(
+        "--enroll",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Enroll named speaker, e.g. --enroll YOU=~/me.wav --enroll ALICE=~/alice.wav",
+    )
+    ap.add_argument(
+        "--enroll-live",
+        action="store_true",
+        help="Guided live enroll: you speak ~3s, then other person ~3s (best for one Sense mic)",
+    )
+    ap.add_argument(
+        "--open-set",
+        action="store_true",
+        help="Allow inventing OTHER_N beyond enrolled gallery (default: closed gallery)",
     )
     ap.add_argument(
         "--speaker-sim",
         type=float,
-        default=0.60,
-        help="Cosine similarity to reuse a speaker id (default 0.60; raise if two people merge)",
+        default=0.55,
+        help="Min cosine similarity to accept a speaker match (default 0.55)",
+    )
+    ap.add_argument(
+        "--speaker-margin",
+        type=float,
+        default=0.06,
+        help="Best match must beat 2nd-best by this margin (default 0.06)",
     )
     args = ap.parse_args()
     partial_ms = 1800 if args.partials else 0
+
+    enrollments: dict[str, Path] = {}
+    for item in args.enroll:
+        if "=" not in item:
+            raise SystemExit(f"--enroll expects NAME=PATH, got: {item}")
+        name, path = item.split("=", 1)
+        enrollments[name.strip().upper()] = Path(path.strip())
+    if args.enroll_you:
+        enrollments.setdefault("YOU", args.enroll_you)
+    if args.enroll_other:
+        enrollments.setdefault("OTHER", args.enroll_other)
+
+    # Live enroll is the recommended path when no WAVs given
+    enroll_live = bool(args.enroll_live) or (args.diarize and not enrollments)
+    if args.diarize and enroll_live and not enrollments:
+        print(
+            "[diarize] no enroll WAVs — using --enroll-live (speak ~3s as YOU, then other person)",
+            flush=True,
+        )
 
     backend = _pick_backend(args.backend)
     openai_device = _pick_openai_device(args.device) if backend == "openai" else "n/a"
@@ -1044,8 +1195,11 @@ def main() -> int:
             openai_device,
             args.diarize,
             args.max_speakers,
-            args.enroll_you,
+            enrollments,
+            enroll_live if args.diarize else False,
             args.speaker_sim,
+            args.speaker_margin,
+            args.open_set,
         ),
         name="whisper",
         daemon=True,
