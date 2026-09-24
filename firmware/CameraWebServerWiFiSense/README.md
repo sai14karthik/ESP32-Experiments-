@@ -37,7 +37,7 @@ SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40,http://10.128.93.41 \
   ./scripts/mediamtx_run.sh
 ```
 
-VLC (TCP, enable audio): `rtsp://10.128.93.23:8554/cam_sense`  
+VLC (TCP, enable audio): `rtsp://10.128.93.13:8554/cam_sense`
 (and `cam_sense2`, `cam_sense3`, …)
 
 See [`mediamtx/README.md`](../../mediamtx/README.md).

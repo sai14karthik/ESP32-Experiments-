@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONF_SRC="$ROOT/mediamtx/mediamtx.yml"
 CONF_RT="$ROOT/mediamtx/mediamtx.runtime.yml"
-HOST_LAN="${MEDIAMTX_LAN_IP:-10.128.93.23}"
+HOST_LAN="${MEDIAMTX_LAN_IP:-10.128.93.13}"
 
 normalize_sense_base() {
   # Accept http://IP, http://IP/, http://IP:81/stream → http://IP

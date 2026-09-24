@@ -7,8 +7,8 @@ N× CameraWebServerWiFi  http://<ip>:81/stream
 MediaMTX :8554/cam_xiao, cam_xiao2, … cam_xiaoN
         │
         ▼
-rtsp://10.128.93.23:8554/cam_xiao
-rtsp://10.128.93.23:8554/cam_xiao2
+rtsp://10.128.93.13:8554/cam_xiao
+rtsp://10.128.93.13:8554/cam_xiao2
 …
 
 N× Sense A/V (CameraWebServerWiFiSense):
@@ -27,7 +27,7 @@ ESP32-S3 has no HW H.264. Mini remuxes MJPEG (± PCM). Prefer **TCP** on LabPSK.
 
 | Role | Address |
 |------|---------|
-| Mini (Ethernet / LabPSK) | `10.128.93.23` |
+| Mini (Ethernet / LabPSK) | `10.128.93.13` |
 | XIAO (examples) | `10.128.93.25`, `10.128.93.34`, … |
 
 ## Prerequisites (Mini)
@@ -79,7 +79,7 @@ SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40 \
 ```
 
 Paths: `cam_sense`, `cam_sense2`, `cam_sense3`, …  
-VLC: `rtsp://10.128.93.23:8554/cam_sense` (TCP; enable **Audio track**).
+VLC: `rtsp://10.128.93.13:8554/cam_sense` (TCP; enable **Audio track**).
 
 ### Live captions (Whisper)
 
@@ -101,10 +101,10 @@ Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
 
 | Cam | RTSP (LabPSK) | HLS |
 |-----|---------------|-----|
-| video 1 | `rtsp://10.128.93.23:8554/cam_xiao` | `http://10.128.93.23:8888/cam_xiao/` |
-| video N | `rtsp://10.128.93.23:8554/cam_xiaoN` | `http://10.128.93.23:8888/cam_xiaoN/` |
-| Sense A/V 1 | `rtsp://10.128.93.23:8554/cam_sense` | `http://10.128.93.23:8888/cam_sense/` |
-| Sense A/V N | `rtsp://10.128.93.23:8554/cam_senseN` | `http://10.128.93.23:8888/cam_senseN/` |
+| video 1 | `rtsp://10.128.93.13:8554/cam_xiao` | `http://10.128.93.13:8888/cam_xiao/` |
+| video N | `rtsp://10.128.93.13:8554/cam_xiaoN` | `http://10.128.93.13:8888/cam_xiaoN/` |
+| Sense A/V 1 | `rtsp://10.128.93.13:8554/cam_sense` | `http://10.128.93.13:8888/cam_sense/` |
+| Sense A/V N | `rtsp://10.128.93.13:8554/cam_senseN` | `http://10.128.93.13:8888/cam_senseN/` |
 
 VLC: Open Network → URL → **TCP**; caching ~50–100 ms.
 
@@ -117,7 +117,7 @@ While MediaMTX is publishing, save a clip with both tracks (Sense A/V) or video-
 ./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_sense
 
 # timed + named file
-./scripts/record_rtsp.py rtsp://10.128.93.23:8554/cam_sense \
+./scripts/record_rtsp.py rtsp://10.128.93.13:8554/cam_sense \
   -o recordings/sense-demo.mp4 -t 120
 
 # video-only path
