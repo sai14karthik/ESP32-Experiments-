@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 # Sense A/V remux for MediaMTX — A/V locked & smooth (extra delay OK).
 #
-# Two HTTP sources (MJPEG + PCM) drift easily. Strategy:
-#   • CFR video timeline (setpts by frame index) so video never "runs away"
-#   • Delay audio slightly (video path is usually slower on ESP)
-#   • Gentle aresample async + fifos to absorb jitter without pitch warble
-#   • Larger mux preload so VLC starts with both tracks buffered
-#
 # Tees speech PCM to udp://127.0.0.1:19055(+n) for Whisper.
 # Env: RTSP_PORT, MTX_PATH; optional SENSE_PCM_UDP_PORT, SENSE_AV_FPS,
 #      SENSE_AV_AUDIO_DELAY_MS (default 300 — raise if lips behind speech)
@@ -22,8 +16,6 @@ FPS="${SENSE_AV_FPS:-8}"
 # Audio usually arrives ahead of MJPEG; delay PCM so mouths match words.
 AUDIO_DELAY_MS="${SENSE_AV_AUDIO_DELAY_MS:-300}"
 
-# PCM UDP port is tied to board IP (stable) — not MediaMTX path order.
-# Lab: wall .25 → 19055, collar .34 → 19056. Override with SENSE_PCM_UDP_PORT.
 if [[ -z "${SENSE_PCM_UDP_PORT:-}" ]]; then
   _host="${BASE#http://}"
   _host="${_host#https://}"
@@ -31,8 +23,8 @@ if [[ -z "${SENSE_PCM_UDP_PORT:-}" ]]; then
   _host="${_host%%:*}"
   _octet="${_host##*.}"
   case "${_octet}" in
-    25) PCM_UDP_PORT=19055 ;;  # wall
-    34) PCM_UDP_PORT=19056 ;;  # collar
+    25) PCM_UDP_PORT=19055 ;;
+    34) PCM_UDP_PORT=19056 ;;
     *)  PCM_UDP_PORT=$((19050 + (${_octet} % 10))) ;;
   esac
 else
@@ -43,8 +35,7 @@ PCM_UDP="udp://127.0.0.1:${PCM_UDP_PORT}?pkt_size=960"
 LOG="${SENSE_AV_LOG:-/tmp/ffmpeg_sense_av.${MTX_PATH}.log}"
 echo "$(date '+%F %T') start path=${MTX_PATH} base=${BASE} out=${OUT} pcm=${PCM_UDP} fps=${FPS} audio_delay_ms=${AUDIO_DELAY_MS}" >>"$LOG"
 
-# Shared start: both inputs get generated PTS; video is forced CFR; audio is
-# delayed then lightly stretched to stay on that timeline. Fifos absorb bursts.
+# adelay uses ms; mono = one value. CFR video PTS + light async keeps A/V together.
 exec ffmpeg -hide_banner -loglevel warning \
   -fflags +genpts+discardcorrupt \
   -reconnect 1 \
@@ -64,12 +55,12 @@ exec ffmpeg -hide_banner -loglevel warning \
   -f s16le -ar 16000 -ac 1 \
   -i "$AURL" \
   -filter_complex \
-  "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB),fifo[v];\
+  "[0:v]fps=${FPS},format=yuv420p,setpts=N/(${FPS}*TB)[v];\
    [1:a]asplit=2[a0][a1];\
-   [a0]adelay=${AUDIO_DELAY_MS}:all=1,highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=2,alimiter=limit=0.89,aresample=16000:async=1:first_pts=0,afifo[a];\
+   [a0]adelay=${AUDIO_DELAY_MS},highpass=f=80,lowpass=f=7500,acompressor=threshold=-28dB:ratio=3:attack=15:release=150:makeup=2,alimiter=limit=0.89,aresample=16000:async=1:first_pts=0[a];\
    [a1]highpass=f=100,lowpass=f=7000,equalizer=f=1200:t=q:w=1.2:g=2,acompressor=threshold=-30dB:ratio=3:attack=10:release=120:makeup=3,alimiter=limit=0.89[a_pcm]" \
   -map "[v]" -map "[a]" \
-  -fps_mode cfr \
+  -vsync cfr \
   -r "$FPS" \
   -c:v libx264 \
   -preset veryfast \
