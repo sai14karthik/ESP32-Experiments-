@@ -106,6 +106,9 @@ Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
 | Sense A/V 1 | `rtsp://10.128.93.13:8554/cam_sense` | `http://10.128.93.13:8888/cam_sense/` |
 | Sense A/V N | `rtsp://10.128.93.13:8554/cam_senseN` | `http://10.128.93.13:8888/cam_senseN/` |
 
+WebRTC (browser): `http://10.128.93.13:8889/cam_xiao/` or `…/cam_sense/`  
+(Also opens UDP **:8189** for ICE — allow that on the client network if WebRTC fails.)
+
 VLC: Open Network → URL → **TCP**; caching ~50–100 ms.
 
 ## Record (video + audio)

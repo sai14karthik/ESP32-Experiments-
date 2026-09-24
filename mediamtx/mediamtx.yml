@@ -23,7 +23,12 @@ hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
 hlsSegmentMaxSize: 10M
 
-webrtc: no
+webrtc: yes
+webrtcAddress: :8889
+# Help browsers on LabPSK find the Mini (set to current Mini LAN IP)
+webrtcAdditionalHosts: [10.128.93.13]
+webrtcLocalUDPAddress: :8189
+
 rtmp: no
 srt: no
 
