@@ -43,3 +43,6 @@
 [submodule "luma-esp32-ai-assistant"]
 	path = luma-esp32-ai-assistant
 	url = https://github.com/Arush-Reddy/luma-esp32-ai-assistant
+[submodule "whisper-diarization"]
+	path = whisper-diarization
+	url = https://github.com/MahmoudAshraf97/whisper-diarization

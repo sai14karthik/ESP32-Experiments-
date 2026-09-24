@@ -310,6 +310,9 @@ _HALLUCINATION_PHRASES = (
     "i'm going to go ahead",
     "i am going to go ahead",
     "going to go ahead and get",
+    "i'm going to go to the next one",
+    "i am going to go to the next one",
+    "going to go to the next one",
     "thanks for watching",
     "please subscribe",
     "see you in the next",
@@ -881,11 +884,11 @@ class SpeakerTracker:
 
 
 class PyannoteSpeakerTracker:
-    """Speaker labels via pyannote diarization (real diarization).
+    """Speaker labels via pyannote embeddings (stable across short live clips).
 
-    Maps first seen pyannote id → YOU, next → OTHER (no separate enroll).
-    Needs HF_TOKEN and accepted model terms on Hugging Face.
-    Default checkpoint: pyannote/speaker-diarization-community-1 (pyannote.audio 4.x).
+    pyannote resets SPEAKER_00 on every call — we keep a cosine gallery of
+    speaker_embeddings instead: first distinct voice → YOU, next → OTHER.
+    Needs HF_TOKEN + accepted model terms on Hugging Face.
     """
 
     def __init__(
@@ -893,6 +896,8 @@ class PyannoteSpeakerTracker:
         max_speakers: int = 2,
         hf_token: Optional[str] = None,
         model_id: str = "pyannote/speaker-diarization-community-1",
+        sim_threshold: float = 0.55,
+        margin: float = 0.05,
     ):
         import os
 
@@ -920,6 +925,8 @@ class PyannoteSpeakerTracker:
 
         self._torch = torch
         self.max_speakers = max(1, max_speakers)
+        self.sim_threshold = sim_threshold
+        self.margin = margin
         print(f"[diarize] loading {model_id} …", flush=True)
         try:
             self._pipeline = Pipeline.from_pretrained(model_id, token=token)
@@ -938,32 +945,16 @@ class PyannoteSpeakerTracker:
             print(f"[diarize] pipeline.to({device}) failed ({e}); staying on default", flush=True)
             device = torch.device("cpu")
 
-        self._raw_to_name: dict[str, str] = {}
+        self._names: list[str] = []
+        self._centroids: list[np.ndarray] = []
+        self._counts: list[int] = []
         self._last_name = "YOU"
-        self._min_samples = int(SAMPLE_RATE * 0.8)
+        self._min_samples = int(SAMPLE_RATE * 1.0)
         print(
             f"[diarize] on (pyannote @ {device}, max {self.max_speakers}; "
-            f"first voice→YOU, next→OTHER)",
+            f"embedding gallery, first voice→YOU, next→OTHER)",
             flush=True,
         )
-
-    def _map_name(self, raw: str) -> str:
-        if raw in self._raw_to_name:
-            return self._raw_to_name[raw]
-        used = set(self._raw_to_name.values())
-        if "YOU" not in used:
-            name = "YOU"
-        elif "OTHER" not in used and len(self._raw_to_name) < self.max_speakers:
-            name = "OTHER"
-        elif len(self._raw_to_name) < self.max_speakers:
-            name = f"OTHER_{len(self._raw_to_name)}"
-        else:
-            name = "OTHER" if "OTHER" in used else self._last_name
-            self._raw_to_name[raw] = name
-            return name
-        self._raw_to_name[raw] = name
-        print(f"[diarize] pyannote {raw} → {name}", file=sys.stderr, flush=True)
-        return name
 
     @staticmethod
     def _as_annotation(result):
@@ -977,15 +968,97 @@ class PyannoteSpeakerTracker:
             return result
         return None
 
+    @staticmethod
+    def _norm_emb(v: np.ndarray) -> Optional[np.ndarray]:
+        a = np.asarray(v, dtype=np.float64).reshape(-1)
+        if a.size == 0 or not np.isfinite(a).all():
+            return None
+        n = float(np.linalg.norm(a))
+        if n < 1e-9:
+            return None
+        return a / n
+
+    def _add(self, name: str, emb: np.ndarray) -> str:
+        self._names.append(name)
+        self._centroids.append(emb)
+        self._counts.append(1)
+        self._last_name = name
+        print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
+        return name
+
+    def _update(self, i: int, emb: np.ndarray) -> str:
+        n = self._counts[i]
+        self._centroids[i] = (self._centroids[i] * n + emb) / (n + 1)
+        nn = float(np.linalg.norm(self._centroids[i]))
+        if nn > 1e-9:
+            self._centroids[i] /= nn
+        self._counts[i] = n + 1
+        self._last_name = self._names[i]
+        return self._last_name
+
+    def _match(self, emb: np.ndarray) -> str:
+        if not self._names:
+            return self._add("YOU", emb)
+
+        best_i, best_sim, second = -1, -1.0, -1.0
+        for i, c in enumerate(self._centroids):
+            sim = float(np.dot(emb, c))
+            if sim > best_sim:
+                second = best_sim
+                best_sim = sim
+                best_i = i
+            elif sim > second:
+                second = sim
+
+        if best_i >= 0 and best_sim >= self.sim_threshold and (
+            second < 0 or (best_sim - second) >= self.margin
+        ):
+            return self._update(best_i, emb)
+
+        if best_i >= 0 and best_sim >= self.sim_threshold - 0.08:
+            return self._update(best_i, emb)
+
+        if len(self._names) < self.max_speakers and (
+            best_i < 0 or best_sim < self.sim_threshold - 0.1
+        ):
+            name = "OTHER" if "YOU" in self._names and "OTHER" not in self._names else (
+                f"OTHER_{len(self._names)}" if "YOU" in self._names else "YOU"
+            )
+            return self._add(name, emb)
+
+        return self._last_name
+
+    def _dominant_embedding(self, result) -> Optional[np.ndarray]:
+        annotation = self._as_annotation(result)
+        embeddings = getattr(result, "speaker_embeddings", None)
+        if annotation is None or embeddings is None:
+            return None
+        dur: dict[str, float] = {}
+        for turn, _, spk in annotation.itertracks(yield_label=True):
+            dur[str(spk)] = dur.get(str(spk), 0.0) + float(turn.end - turn.start)
+        if not dur:
+            return None
+        raw = max(dur, key=dur.get)
+        labels = [str(x) for x in annotation.labels()]
+        if raw not in labels:
+            return None
+        idx = labels.index(raw)
+        emb_arr = np.asarray(embeddings)
+        if emb_arr.ndim == 1:
+            return self._norm_emb(emb_arr)
+        if idx >= emb_arr.shape[0]:
+            return None
+        return self._norm_emb(emb_arr[idx])
+
     def label(self, audio_f32: np.ndarray) -> str:
         if audio_f32.size < self._min_samples:
             return self._last_name
         wav = np.ascontiguousarray(audio_f32, dtype=np.float32)
+        # pyannote needs a little length; pad short finals lightly
         if wav.size < SAMPLE_RATE * 2:
             wav = np.pad(wav, (0, SAMPLE_RATE * 2 - wav.size))
         waveform = self._torch.from_numpy(wav).unsqueeze(0)
         try:
-            # Allow 1 speaker on short live clips; only cap the max.
             kwargs: dict = {"min_speakers": 1, "max_speakers": self.max_speakers}
             if self.max_speakers == 1:
                 kwargs = {"num_speakers": 1}
@@ -998,24 +1071,10 @@ class PyannoteSpeakerTracker:
             print(f"[diarize] pyannote failed: {e}", file=sys.stderr, flush=True)
             return self._last_name
 
-        annotation = self._as_annotation(result)
-        if annotation is None:
-            print(
-                f"[diarize] unexpected pyannote output type: {type(result)!r}",
-                file=sys.stderr,
-                flush=True,
-            )
+        emb = self._dominant_embedding(result)
+        if emb is None:
             return self._last_name
-
-        dur: dict[str, float] = {}
-        for turn, _, spk in annotation.itertracks(yield_label=True):
-            dur[spk] = dur.get(spk, 0.0) + float(turn.end - turn.start)
-        if not dur:
-            return self._last_name
-        raw = max(dur, key=dur.get)
-        name = self._map_name(str(raw))
-        self._last_name = name
-        return name
+        return self._match(emb)
 
 
 def make_speaker_tracker(
@@ -1063,6 +1122,15 @@ def _transcribe_mlx(audio: np.ndarray, repo: str, language: str) -> str:
         logprob_threshold=-0.8,
         hallucination_silence_threshold=0.3,
     )
+    segs = result.get("segments") or []
+    if segs:
+        # Drop if every segment looks like non-speech (Whisper still invents words)
+        probs = [float(s.get("no_speech_prob") or 0.0) for s in segs]
+        logps = [float(s.get("avg_logprob") or 0.0) for s in segs]
+        if probs and min(probs) >= 0.6:
+            return ""
+        if logps and max(logps) < -1.0:
+            return ""
     return _clean_text(result.get("text") or "")
 
 
@@ -1139,6 +1207,8 @@ def whisper_worker(
             speakers = None
 
     last_partial = ""
+    last_final = ""
+    last_final_t = 0.0
     while not stop.is_set():
         try:
             item = seg_q.get(timeout=0.2)
@@ -1172,6 +1242,10 @@ def whisper_worker(
                 continue
             if not is_final and text == last_partial:
                 continue
+            # Same caption again within 15s → almost always Whisper/YT loop, not new speech
+            now = time.time()
+            if is_final and text == last_final and (now - last_final_t) < 15.0:
+                continue
 
             who = ""
             if is_final and speakers is not None:
@@ -1182,6 +1256,8 @@ def whisper_worker(
             src_tag = f"[{source}] " if source else ""
             if is_final:
                 last_partial = ""
+                last_final = text
+                last_final_t = now
                 who_tag = f"[{who}] " if who else ""
                 print(f"[{ts}] {src_tag}{who_tag}{text}  ({ms:.0f} ms)", flush=True)
             else:
@@ -1313,7 +1389,8 @@ def main() -> int:
             )
     elif args.diarize and args.diarize_backend == "pyannote":
         print(
-            "[diarize] pyannote: first distinct voice→YOU, next→OTHER (set HF_TOKEN; no live enroll)",
+            "[diarize] pyannote: embedding gallery — first distinct voice→YOU, next→OTHER "
+            "(set HF_TOKEN; speak then play YT so voices differ)",
             flush=True,
         )
 
