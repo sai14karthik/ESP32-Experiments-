@@ -8,6 +8,12 @@
 #   ./scripts/sense_whisper_live.sh --ip 10.128.93.25,10.128.93.34
 #   ./scripts/sense_whisper_live.sh --ip all
 #
+# Speakers (YOU vs OTHER) — use ECAPA live enroll (best on Mini Metal):
+#   ./scripts/sense_whisper_live.sh --ip 10.128.93.15 --diarize-backend ecapa
+#   → speak ~3s to lock YOU, then other person / YT ~3s to lock OTHER
+#
+# Offline NeMo/whisper-diarization (recorded WAV, CUDA): ./scripts/sense_diarize_offline.sh
+#
 # Default (no args) = 10.128.93.34
 # PCM ports follow IP (.25→19055, .34→19056) — restart mediamtx after pull.
 #

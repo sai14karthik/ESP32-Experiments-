@@ -11,7 +11,18 @@ Backend (Apple Silicon):
   MLX is the fast/accurate path on Mac Mini; openai MPS often falls back to CPU.
 
 Capture → WebRTC VAD → mlx-whisper (Metal) → text (finals by default).
-Optional speaker labels via SpeechBrain ECAPA (--diarize / --enroll-live).
+
+Speaker labels (live, Mini Metal) — pick one:
+  ecapa (default)  SpeechBrain ECAPA gallery + live enroll YOU then OTHER.
+                   Best for short live utterances (YOU vs person / YT).
+  pyannote         HF community-1 embeddings gallery across clips (needs HF_TOKEN).
+                   Still utterance-level; not full-file NeMo/WhisperX quality.
+
+Do NOT wire MahmoudAshraf97/whisper-diarization into this live loop:
+  that stack is offline (Demucs → faster-whisper → CTC align → NeMo MSDD/Sortformer),
+  CUDA-first, seconds–minutes per file. Use scripts/sense_diarize_offline.sh on a
+  recorded WAV / GPU box instead.
+
 If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
 
@@ -1316,7 +1327,9 @@ def main() -> int:
         "--diarize-backend",
         choices=("ecapa", "pyannote"),
         default="ecapa",
-        help="ecapa=SpeechBrain enroll/match (default); pyannote=HF diarization-3.1 (needs HF_TOKEN)",
+        help="Live labels: ecapa=ECAPA enroll/match (default, best on Mini); "
+        "pyannote=HF embedding gallery (needs HF_TOKEN). "
+        "For offline NeMo/whisper-diarization quality use scripts/sense_diarize_offline.sh",
     )
     ap.add_argument(
         "--partials",
