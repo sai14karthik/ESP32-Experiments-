@@ -42,4 +42,5 @@ whisper = [
     "webrtcvad>=2.0.10",
     "setuptools>=84.0.0",
     "speechbrain>=1.0.0",
+    "pyannote.audio>=3.1.0",
 ]

@@ -880,6 +880,153 @@ class SpeakerTracker:
         return self._last_name
 
 
+class PyannoteSpeakerTracker:
+    """Speaker labels via pyannote/speaker-diarization-3.1 (real diarization).
+
+    Maps first seen pyannote id → YOU, next → OTHER (no separate enroll).
+    Needs HF_TOKEN and accepted model terms on Hugging Face.
+    """
+
+    def __init__(self, max_speakers: int = 2, hf_token: Optional[str] = None):
+        import os
+
+        import torch
+        from pyannote.audio import Pipeline
+
+        token = (
+            hf_token
+            or os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            or os.environ.get("HF_HUB_TOKEN")
+        )
+        if not token:
+            try:
+                from huggingface_hub import get_token
+
+                token = get_token()
+            except Exception:
+                token = None
+        if not token:
+            raise RuntimeError(
+                "pyannote needs HF_TOKEN (and accept "
+                "https://huggingface.co/pyannote/speaker-diarization-3.1 )"
+            )
+
+        self._torch = torch
+        self.max_speakers = max(1, max_speakers)
+        print("[diarize] loading pyannote/speaker-diarization-3.1 …", flush=True)
+        try:
+            self._pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=token,
+            )
+        except TypeError:
+            self._pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=token,
+            )
+
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        try:
+            self._pipeline.to(device)
+        except Exception as e:
+            print(f"[diarize] pipeline.to({device}) failed ({e}); staying on default", flush=True)
+            device = torch.device("cpu")
+
+        self._raw_to_name: dict[str, str] = {}
+        self._last_name = "YOU"
+        self._min_samples = int(SAMPLE_RATE * 0.8)
+        print(
+            f"[diarize] on (pyannote 3.1 @ {device}, max {self.max_speakers}; "
+            f"first voice→YOU, next→OTHER)",
+            flush=True,
+        )
+
+    def _map_name(self, raw: str) -> str:
+        if raw in self._raw_to_name:
+            return self._raw_to_name[raw]
+        used = set(self._raw_to_name.values())
+        if "YOU" not in used:
+            name = "YOU"
+        elif "OTHER" not in used and len(self._raw_to_name) < self.max_speakers:
+            name = "OTHER"
+        elif len(self._raw_to_name) < self.max_speakers:
+            name = f"OTHER_{len(self._raw_to_name)}"
+        else:
+            name = "OTHER" if "OTHER" in used else self._last_name
+            self._raw_to_name[raw] = name
+            return name
+        self._raw_to_name[raw] = name
+        print(f"[diarize] pyannote {raw} → {name}", file=sys.stderr, flush=True)
+        return name
+
+    def label(self, audio_f32: np.ndarray) -> str:
+        if audio_f32.size < self._min_samples:
+            return self._last_name
+        wav = np.ascontiguousarray(audio_f32, dtype=np.float32)
+        if wav.size < SAMPLE_RATE * 2:
+            wav = np.pad(wav, (0, SAMPLE_RATE * 2 - wav.size))
+        waveform = self._torch.from_numpy(wav).unsqueeze(0)
+        try:
+            kwargs: dict = {}
+            if self.max_speakers == 1:
+                kwargs["num_speakers"] = 1
+            elif self.max_speakers == 2:
+                kwargs["num_speakers"] = 2
+            else:
+                kwargs["min_speakers"] = 1
+                kwargs["max_speakers"] = self.max_speakers
+            with self._torch.inference_mode():
+                annotation = self._pipeline(
+                    {"waveform": waveform, "sample_rate": SAMPLE_RATE},
+                    **kwargs,
+                )
+        except Exception as e:
+            print(f"[diarize] pyannote failed: {e}", file=sys.stderr, flush=True)
+            return self._last_name
+
+        dur: dict[str, float] = {}
+        for turn, _, spk in annotation.itertracks(yield_label=True):
+            dur[spk] = dur.get(spk, 0.0) + float(turn.end - turn.start)
+        if not dur:
+            return self._last_name
+        raw = max(dur, key=dur.get)
+        name = self._map_name(str(raw))
+        self._last_name = name
+        return name
+
+
+def make_speaker_tracker(
+    backend: str,
+    *,
+    max_speakers: int,
+    enrollments: Optional[dict[str, Path]],
+    enroll_live: bool,
+    sim_threshold: float,
+    speaker_margin: float,
+    open_set: bool,
+    hf_token: Optional[str] = None,
+):
+    b = (backend or "ecapa").lower()
+    if b == "pyannote":
+        return PyannoteSpeakerTracker(max_speakers=max_speakers, hf_token=hf_token)
+    if b in ("ecapa", "speechbrain", "resemblyzer"):
+        return SpeakerTracker(
+            max_speakers=max_speakers,
+            sim_threshold=sim_threshold,
+            margin=speaker_margin,
+            enrollments=enrollments or None,
+            enroll_live=enroll_live,
+            open_set=open_set,
+        )
+    raise ValueError(f"unknown --diarize-backend {backend!r} (use ecapa|pyannote)")
+
+
 # --- Whisper workers ---------------------------------------------------------
 
 
@@ -922,6 +1069,7 @@ def whisper_worker(
     backend: str,
     openai_device: str,
     diarize: bool,
+    diarize_backend: str,
     max_speakers: int,
     enrollments: dict[str, Path],
     enroll_live: bool,
@@ -932,7 +1080,7 @@ def whisper_worker(
     t_load = time.time()
     openai_model = None
     mlx_repo = ""
-    speakers: Optional[SpeakerTracker] = None
+    speakers = None
 
     if backend == "mlx":
         mlx_repo = _mlx_repo(model_name)
@@ -960,12 +1108,13 @@ def whisper_worker(
 
     if diarize:
         try:
-            speakers = SpeakerTracker(
+            speakers = make_speaker_tracker(
+                diarize_backend,
                 max_speakers=max_speakers,
-                sim_threshold=sim_threshold,
-                margin=speaker_margin,
                 enrollments=enrollments or None,
                 enroll_live=enroll_live,
+                sim_threshold=sim_threshold,
+                speaker_margin=speaker_margin,
                 open_set=open_set,
             )
         except Exception as e:
@@ -1068,7 +1217,13 @@ def main() -> int:
         "--diarize",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Speaker labels via SpeechBrain ECAPA (default on). Use --enroll-live for best accuracy",
+        help="Speaker labels (default on). Backend: --diarize-backend",
+    )
+    ap.add_argument(
+        "--diarize-backend",
+        choices=("ecapa", "pyannote"),
+        default="ecapa",
+        help="ecapa=SpeechBrain enroll/match (default); pyannote=HF diarization-3.1 (needs HF_TOKEN)",
     )
     ap.add_argument(
         "--partials",
@@ -1080,41 +1235,41 @@ def main() -> int:
     ap.add_argument(
         "--enroll-you",
         type=Path,
-        help="WAV of YOUR voice (5–20s clean speech)",
+        help="WAV of YOUR voice (5–20s clean speech) — ECAPA only",
     )
     ap.add_argument(
         "--enroll-other",
         type=Path,
-        help="WAV of the other person's voice (5–20s)",
+        help="WAV of the other person's voice (5–20s) — ECAPA only",
     )
     ap.add_argument(
         "--enroll",
         action="append",
         default=[],
         metavar="NAME=PATH",
-        help="Enroll named speaker, e.g. --enroll YOU=~/me.wav --enroll ALICE=~/alice.wav",
+        help="Enroll named speaker (ECAPA), e.g. --enroll YOU=~/me.wav",
     )
     ap.add_argument(
         "--enroll-live",
         action="store_true",
-        help="Guided live enroll: you speak ~3s, then other person ~3s (best for one Sense mic)",
+        help="ECAPA guided live enroll (ignored for pyannote)",
     )
     ap.add_argument(
         "--open-set",
         action="store_true",
-        help="Allow inventing OTHER_N beyond enrolled gallery (default: closed gallery)",
+        help="ECAPA: allow inventing OTHER_N beyond enrolled gallery",
     )
     ap.add_argument(
         "--speaker-sim",
         type=float,
         default=0.55,
-        help="Min cosine similarity to accept a speaker match (default 0.55)",
+        help="ECAPA min cosine similarity (default 0.55)",
     )
     ap.add_argument(
         "--speaker-margin",
         type=float,
         default=0.06,
-        help="Best match must beat 2nd-best by this margin (default 0.06)",
+        help="ECAPA best-vs-2nd margin (default 0.06)",
     )
     args = ap.parse_args()
     partial_ms = 1800 if args.partials else 0
@@ -1130,11 +1285,18 @@ def main() -> int:
     if args.enroll_other:
         enrollments.setdefault("OTHER", args.enroll_other)
 
-    # Live enroll is the recommended path when no WAVs given
-    enroll_live = bool(args.enroll_live) or (args.diarize and not enrollments)
-    if args.diarize and enroll_live and not enrollments:
+    # Live enroll only for ECAPA when no WAVs
+    enroll_live = False
+    if args.diarize and args.diarize_backend == "ecapa":
+        enroll_live = bool(args.enroll_live) or not enrollments
+        if enroll_live and not enrollments:
+            print(
+                "[diarize] no enroll WAVs — using --enroll-live (speak ~3s as YOU, then other person)",
+                flush=True,
+            )
+    elif args.diarize and args.diarize_backend == "pyannote":
         print(
-            "[diarize] no enroll WAVs — using --enroll-live (speak ~3s as YOU, then other person)",
+            "[diarize] pyannote: first distinct voice→YOU, next→OTHER (set HF_TOKEN; no live enroll)",
             flush=True,
         )
 
@@ -1195,6 +1357,7 @@ def main() -> int:
             backend,
             openai_device,
             args.diarize,
+            args.diarize_backend,
             args.max_speakers,
             enrollments,
             enroll_live if args.diarize else False,

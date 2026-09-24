@@ -93,22 +93,34 @@ Healthy log:
 [16:12:04] [10.128.93.34] [YOU] hello this is a test  (310 ms)
 ```
 
-Speaker labels (`--diarize`, on by default) use **SpeechBrain ECAPA** (Whisper itself has no speakers).
+Speaker labels (`--diarize`, on by default):
 
-**Best on one Sense mic — live enroll (recommended):**
+**A) ECAPA (default)** — enroll then match:
 
 ```bash
-uv sync --group whisper   # pulls speechbrain + torchaudio
-./scripts/sense_whisper_live.sh --ip 10.128.93.34
-# 1) You speak a clear sentence ~3s → locks YOU
-# 2) Friend speaks ~3s → locks OTHER
-# Then conversation is labeled [YOU] / [OTHER]
+uv sync --group whisper
+./scripts/sense_whisper_live.sh --ip 10.128.93.15
+# 1) You speak ~3s → YOU   2) Friend ~3s → OTHER
 ```
 
-Or enroll from WAV files:
+**B) pyannote 3.1** — real diarization (needs Hugging Face token):
+
+1. Create token at https://huggingface.co/settings/tokens  
+2. Accept https://huggingface.co/pyannote/speaker-diarization-3.1 and `pyannote/segmentation-3.0`  
+3. On Mini:
 
 ```bash
-./scripts/sense_whisper_live.sh --ip 10.128.93.34 \
+uv sync --group whisper
+export HF_TOKEN=hf_...   # your token
+./scripts/sense_whisper_live.sh --ip 10.128.93.15 --diarize-backend pyannote
+```
+
+First voice → **YOU**, next distinct → **OTHER**. Slower than ECAPA on CPU/MPS.
+
+WAV enroll (ECAPA only):
+
+```bash
+./scripts/sense_whisper_live.sh --ip 10.128.93.15 \
   --enroll-you ~/Desktop/me.wav --enroll-other ~/Desktop/friend.wav
 ```
 
