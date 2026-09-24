@@ -64,7 +64,7 @@ listener_cmd() {
 tcp_peers() {
   local out=""
   if command -v lsof >/dev/null 2>&1; then
-    # … TCP 10.128.93.23:9055->10.128.93.29:61289 (ESTABLISHED)
+    # … TCP 10.128.93.13:9055->10.128.93.29:61289 (ESTABLISHED)
     out="$(
       lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null \
         | awk -v p=":$PORT" '

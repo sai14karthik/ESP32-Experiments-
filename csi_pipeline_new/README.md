@@ -91,7 +91,7 @@ On the Mac Mini:
 
 ```bash
 ifconfig | grep -A4 'en0\|en1'
-# Example (room 207 Ethernet): inet 10.128.93.23
+# Example (room 207 Ethernet): inet 10.128.93.13
 ```
 
 #### Step 2 — Start ingest on the Mini
@@ -144,17 +144,17 @@ From a machine with ESP-IDF (laptop or Mini), plug in the C5:
 ```bash
 cd ~/Desktop/camera_module   # repo with scripts/ + esp-csi/
 
-CSI_TCP_HOST=10.128.93.23 CSI_TCP_PORT=9055 \
+CSI_TCP_HOST=10.128.93.13 CSI_TCP_PORT=9055 \
   ./scripts/set_csi_wifi.sh "LabHealthSecurePSK" 'YOUR_LABPSK_PASSWORD' /dev/cu.usbmodem2101
 ```
 
 Or if Wi‑Fi is already configured:
 
 ```bash
-./scripts/set_csi_tcp_host.sh 10.128.93.23 9055 /dev/cu.usbmodem2101
+./scripts/set_csi_tcp_host.sh 10.128.93.13 9055 /dev/cu.usbmodem2101
 ```
 
-Replace `10.128.93.23` with the Mini IP from Step 1. Check port with `ls /dev/cu.usbmodem*`.
+Replace `10.128.93.13` with the Mini IP from Step 1. Check port with `ls /dev/cu.usbmodem*`.
 
 #### Step 4 — Collect (USB unplugged OK)
 
@@ -187,11 +187,11 @@ pkill -f 'ingest_serial.py --listen-tcp'
 From another LabPSK laptop:
 
 ```bash
-ssh dtilakenonalab@10.128.93.23
+ssh dtilakenonalab@10.128.93.13
 # then same start/stop commands on the Mini
 
 # or one-shot stop:
-ssh dtilakenonalab@10.128.93.23 "pkill -f 'ingest_serial.py --listen-tcp'"
+ssh dtilakenonalab@10.128.93.13 "pkill -f 'ingest_serial.py --listen-tcp'"
 ```
 
 Mini must stay **powered on and awake**. Enable **Remote Login** on the Mini for SSH.

@@ -30,7 +30,7 @@ cd presence_detection
 ./run_presence.sh calibrate-live          # threshold from live TCP (not old CSV)
 ./run_presence.sh live                    # continuous P(presence)
 # or: ./run_presence.sh gui               # PyQt on Mini
-# or: ./run_presence.sh web               # phone on LabPSK → http://10.128.93.23:8765
+# or: ./run_presence.sh web               # phone on LabPSK → http://10.128.93.13:8765
 ./run_presence.sh eval
 ```
 
@@ -45,7 +45,7 @@ Mini serves a mobile page while it runs live CSI detect:
 
 | | |
 |--|--|
-| **URL** | http://10.128.93.23:8765 |
+| **URL** | http://10.128.93.13:8765 |
 | **Phone Wi‑Fi** | **LabPSK** (same LAN as Mini — devices can reach each other) |
 | **Shows** | EMPTY / PRESENCE, score line, live ESP list |
 | **Room** | Default **Room 207** (`--room "Room 207"`) |
@@ -113,7 +113,7 @@ No hardcoded max N — whatever distinct `source_id`s appear at train time.
 ./run_presence.sh live --rx-min 2
 ./run_presence.sh calibrate-live --seconds 120 --fpr 0.02
 ./run_presence.sh live --quiet
-./run_presence.sh web                   # LabPSK phone → http://10.128.93.23:8765
+./run_presence.sh web                   # LabPSK phone → http://10.128.93.13:8765
 ./run_presence.sh web --http-port 8765
 ./run_presence.sh test-web              # no-hardware web tests
 ./run_presence.sh test-e2e              # full A–Z pipeline proof

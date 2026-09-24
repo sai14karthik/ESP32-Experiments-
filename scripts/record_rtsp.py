@@ -4,7 +4,7 @@
 Lab examples (stream must already be publishing via mediamtx_run):
 
   ./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_sense
-  ./scripts/record_rtsp.py rtsp://10.128.93.23:8554/cam_sense -o clips/sense-01.mp4 -t 120
+  ./scripts/record_rtsp.py rtsp://10.128.93.13:8554/cam_sense -o clips/sense-01.mp4 -t 120
   ./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_xiao --no-audio   # video-only path
 
 Thin wrapper around ffmpeg (stdlib only). Default: stream-copy video and audio

@@ -51,7 +51,7 @@ static const uint32_t PING_TIMEOUT_MS         = 1000; // must be >> RTT or every
 static const uint32_t STIM_INTERVAL_MS        = 10;   // UDP poke → AP ACKs → CSI
 // Prefer Mini (known reachable on LabPSK). Override in secrets.h if needed.
 #ifndef CSI_PING_HOST
-#define CSI_PING_HOST "10.128.93.23"
+#define CSI_PING_HOST "10.128.93.13"
 #endif
 static const uint8_t  CSI_VAL_SCALE           = 2;    // I/Q fixed-point scale, range 0..3 on this chip. Raise if values clip at ±127.
 static const bool     USE_EXTERNAL_ANTENNA    = false; // false = onboard ceramic, true = U.FL connector

@@ -65,7 +65,7 @@ start_web_tmux() {
   tmux new -d -s presence
   tmux send-keys -t presence "$cmd" Enter
   sleep 1
-  echo "UI:   http://10.128.93.23:8765" >&2
+  echo "UI:   http://10.128.93.13:8765" >&2
   echo "Logs: $ROOT/logs/web.log   (or: tmux attach -t presence)" >&2
   echo "Stop: ./run_presence.sh web-stop" >&2
 }
@@ -108,7 +108,7 @@ Presence detection front door (multi-RX CSI).
   ./run_presence.sh train                 # export empty+occupied → fuse train → models/
   ./run_presence.sh calibrate             # empty-room cal from training CSV
   ./run_presence.sh calibrate-live        # EMPTY room over TCP :9055 (fix live)
-  ./run_presence.sh web                   # start UI in tmux (http://10.128.93.23:8765)
+  ./run_presence.sh web                   # start UI in tmux (http://10.128.93.13:8765)
   ./run_presence.sh web-stop              # stop web
   ./run_presence.sh live                  # continuous scores (background)
   ./run_presence.sh live-stop             # stop live

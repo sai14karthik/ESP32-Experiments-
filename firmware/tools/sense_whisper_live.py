@@ -46,6 +46,7 @@ DEFAULT_PCM_UDP_PORTS = tuple(range(19050, 19060))
 IP_TO_PORT: dict[str, int] = {
     "10.128.93.25": 19055,
     "10.128.93.34": 19056,
+    "10.128.93.15": 19056,  # collar — DHCP moved off .34
 }
 PORT_TO_LABEL: dict[int, str] = {v: k for k, v in IP_TO_PORT.items()}
 

@@ -16,7 +16,7 @@ static const int kQueueLen = 24;
 static const uint32_t kMinPrintGapMs = 20;  // ~50 CSI lines/s max (needs 921600 baud)
 
 // Lab Mini often answers ICMP when the AP gateway does not (client isolation).
-static const char *kPingFallbackHost = "10.128.93.23";
+static const char *kPingFallbackHost = "10.128.93.13";
 
 struct CsiRecord {
   uint8_t mac[6];
