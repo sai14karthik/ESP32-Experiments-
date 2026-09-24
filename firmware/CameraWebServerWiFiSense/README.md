@@ -103,15 +103,18 @@ uv sync --group whisper
 # 1) You speak ~3s → YOU   2) Friend ~3s → OTHER
 ```
 
-**B) pyannote 3.1** — real diarization (needs Hugging Face token):
+**B) pyannote** — real diarization (needs Hugging Face token):
 
-1. Create token at https://huggingface.co/settings/tokens  
-2. Accept https://huggingface.co/pyannote/speaker-diarization-3.1 and `pyannote/segmentation-3.0`  
+1. Token: https://huggingface.co/settings/tokens (Read)  
+2. Accept **all** of:
+   - https://huggingface.co/pyannote/speaker-diarization-community-1  
+   - https://huggingface.co/pyannote/segmentation-3.0  
+   - https://huggingface.co/pyannote/speaker-diarization-3.1 (if prompted)
 3. On Mini:
 
 ```bash
 uv sync --group whisper
-export HF_TOKEN=hf_...   # your token
+export HF_TOKEN=hf_...
 ./scripts/sense_whisper_live.sh --ip 10.128.93.15 --diarize-backend pyannote
 ```
 

@@ -881,13 +881,19 @@ class SpeakerTracker:
 
 
 class PyannoteSpeakerTracker:
-    """Speaker labels via pyannote/speaker-diarization-3.1 (real diarization).
+    """Speaker labels via pyannote diarization (real diarization).
 
     Maps first seen pyannote id → YOU, next → OTHER (no separate enroll).
     Needs HF_TOKEN and accepted model terms on Hugging Face.
+    Default checkpoint: pyannote/speaker-diarization-community-1 (pyannote.audio 4.x).
     """
 
-    def __init__(self, max_speakers: int = 2, hf_token: Optional[str] = None):
+    def __init__(
+        self,
+        max_speakers: int = 2,
+        hf_token: Optional[str] = None,
+        model_id: str = "pyannote/speaker-diarization-community-1",
+    ):
         import os
 
         import torch
@@ -908,23 +914,17 @@ class PyannoteSpeakerTracker:
                 token = None
         if not token:
             raise RuntimeError(
-                "pyannote needs HF_TOKEN (and accept "
-                "https://huggingface.co/pyannote/speaker-diarization-3.1 )"
+                "pyannote needs HF_TOKEN — create at https://huggingface.co/settings/tokens "
+                "and accept https://huggingface.co/pyannote/speaker-diarization-community-1"
             )
 
         self._torch = torch
         self.max_speakers = max(1, max_speakers)
-        print("[diarize] loading pyannote/speaker-diarization-3.1 …", flush=True)
+        print(f"[diarize] loading {model_id} …", flush=True)
         try:
-            self._pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=token,
-            )
+            self._pipeline = Pipeline.from_pretrained(model_id, token=token)
         except TypeError:
-            self._pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=token,
-            )
+            self._pipeline = Pipeline.from_pretrained(model_id, use_auth_token=token)
 
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -942,7 +942,7 @@ class PyannoteSpeakerTracker:
         self._last_name = "YOU"
         self._min_samples = int(SAMPLE_RATE * 0.8)
         print(
-            f"[diarize] on (pyannote 3.1 @ {device}, max {self.max_speakers}; "
+            f"[diarize] on (pyannote @ {device}, max {self.max_speakers}; "
             f"first voice→YOU, next→OTHER)",
             flush=True,
         )
