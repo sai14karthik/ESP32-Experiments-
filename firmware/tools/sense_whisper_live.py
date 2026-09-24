@@ -965,6 +965,18 @@ class PyannoteSpeakerTracker:
         print(f"[diarize] pyannote {raw} → {name}", file=sys.stderr, flush=True)
         return name
 
+    @staticmethod
+    def _as_annotation(result):
+        """pyannote.audio 4.x returns DiarizeOutput; older returns Annotation."""
+        if result is None:
+            return None
+        ann = getattr(result, "speaker_diarization", None)
+        if ann is not None and hasattr(ann, "itertracks"):
+            return ann
+        if hasattr(result, "itertracks"):
+            return result
+        return None
+
     def label(self, audio_f32: np.ndarray) -> str:
         if audio_f32.size < self._min_samples:
             return self._last_name
@@ -973,21 +985,26 @@ class PyannoteSpeakerTracker:
             wav = np.pad(wav, (0, SAMPLE_RATE * 2 - wav.size))
         waveform = self._torch.from_numpy(wav).unsqueeze(0)
         try:
-            kwargs: dict = {}
+            # Allow 1 speaker on short live clips; only cap the max.
+            kwargs: dict = {"min_speakers": 1, "max_speakers": self.max_speakers}
             if self.max_speakers == 1:
-                kwargs["num_speakers"] = 1
-            elif self.max_speakers == 2:
-                kwargs["num_speakers"] = 2
-            else:
-                kwargs["min_speakers"] = 1
-                kwargs["max_speakers"] = self.max_speakers
+                kwargs = {"num_speakers": 1}
             with self._torch.inference_mode():
-                annotation = self._pipeline(
+                result = self._pipeline(
                     {"waveform": waveform, "sample_rate": SAMPLE_RATE},
                     **kwargs,
                 )
         except Exception as e:
             print(f"[diarize] pyannote failed: {e}", file=sys.stderr, flush=True)
+            return self._last_name
+
+        annotation = self._as_annotation(result)
+        if annotation is None:
+            print(
+                f"[diarize] unexpected pyannote output type: {type(result)!r}",
+                file=sys.stderr,
+                flush=True,
+            )
             return self._last_name
 
         dur: dict[str, float] = {}
