@@ -8,9 +8,12 @@
 #   ./scripts/sense_whisper_live.sh --ip 10.128.93.25,10.128.93.34
 #   ./scripts/sense_whisper_live.sh --ip all
 #
-# Speakers (YOU vs OTHER) — use ECAPA live enroll (best on Mini Metal):
-#   ./scripts/sense_whisper_live.sh --ip 10.128.93.15 --diarize-backend ecapa
-#   → speak ~3s to lock YOU, then other person / YT ~3s to lock OTHER
+# Speakers (YOU vs OTHER) — ECAPA (best on Mini Metal):
+#   Best accuracy — clean WAVs from the same Sense mic:
+#     ./scripts/sense_whisper_live.sh --ip 10.128.93.15 \
+#       --enroll-you ~/enroll_you.wav --enroll-other ~/enroll_other.wav
+#   Live enroll — averages ~8s speech (several phrases), not a single 3s clip:
+#     ./scripts/sense_whisper_live.sh --ip 10.128.93.15 --diarize-backend ecapa
 #
 # Offline NeMo/whisper-diarization (recorded WAV, CUDA): ./scripts/sense_diarize_offline.sh
 #

@@ -697,19 +697,20 @@ def _load_mono_16k(path: Path) -> np.ndarray:
 class SpeakerTracker:
     """Speaker IDs via SpeechBrain ECAPA embeddings (far stronger than Resemblyzer).
 
-    Best accuracy: enroll each person once (WAV or --enroll-live), then match.
-    Closed gallery = only enrolled names (YOU / OTHER / custom). Open set can
-    invent OTHER_N when a new voice is clearly different.
+    Best accuracy: enroll each person once from a clean WAV (5–20s on the same mic).
+    Live enroll averages several utterances (~8s speech) before locking YOU/OTHER —
+    a single ~3s clip is too noisy on a collar/Sense mic.
     """
 
     def __init__(
         self,
         max_speakers: int = 2,
-        sim_threshold: float = 0.55,
-        margin: float = 0.06,
+        sim_threshold: float = 0.50,
+        margin: float = 0.05,
         enrollments: Optional[dict[str, Path]] = None,
         enroll_live: bool = False,
         open_set: bool = False,
+        enroll_seconds: float = 8.0,
     ):
         import torch
         from speechbrain.inference.speaker import EncoderClassifier
@@ -732,14 +733,22 @@ class SpeakerTracker:
         self._centroids: list[np.ndarray] = []
         self._counts: list[int] = []
         self._last_name = "YOU"
-        self._min_enroll_samples = int(SAMPLE_RATE * 2.5)  # ≥2.5s clear speech
-        self._min_match_samples = int(SAMPLE_RATE * 0.6)
+        # Per-chunk floor vs total speech needed before locking a live identity
+        self._min_enroll_chunk = int(SAMPLE_RATE * 1.2)
+        self._enroll_need_samples = int(SAMPLE_RATE * max(4.0, float(enroll_seconds)))
+        self._min_match_samples = int(SAMPLE_RATE * 0.8)
         self._enroll_live = enroll_live
+        self._enroll_embs: list[np.ndarray] = []
+        self._enroll_samples = 0
+        self._pending_name = ""
+        self._pending_hits = 0
         self._live_phase = "match"
         if enroll_live and not (enrollments or {}):
             self._live_phase = "enroll_you"
+            need_s = self._enroll_need_samples / SAMPLE_RATE
             print(
-                "[diarize] LIVE ENROLL — speak clearly ~3s near the mic to lock YOU",
+                f"[diarize] LIVE ENROLL — speak clearly near the mic for ~{need_s:.0f}s "
+                f"total (several phrases) to lock YOU",
                 flush=True,
             )
 
@@ -753,8 +762,10 @@ class SpeakerTracker:
 
         if self._names and enroll_live and "YOU" in self._names and len(self._names) < self.max_speakers:
             self._live_phase = "enroll_other"
+            self._reset_enroll_buf()
+            need_s = self._enroll_need_samples / SAMPLE_RATE
             print(
-                "[diarize] LIVE ENROLL — have the other person speak ~3s to lock OTHER",
+                f"[diarize] LIVE ENROLL — OTHER person speak ~{need_s:.0f}s total to lock OTHER",
                 flush=True,
             )
         elif self._names:
@@ -768,12 +779,37 @@ class SpeakerTracker:
             flush=True,
         )
 
+    def _reset_enroll_buf(self) -> None:
+        self._enroll_embs = []
+        self._enroll_samples = 0
+
+    @staticmethod
+    def _rms_db_f32(audio_f32: np.ndarray) -> float:
+        if audio_f32.size == 0:
+            return -80.0
+        rms = float(np.sqrt(np.mean(np.square(audio_f32), dtype=np.float64)))
+        return 20.0 * float(np.log10(max(rms, 1e-12)))
+
+    @staticmethod
+    def _normalize_level(audio_f32: np.ndarray, target_rms: float = 0.1) -> np.ndarray:
+        """Match collar (loud) and desk/far (quiet) before ECAPA — identity, not distance."""
+        x = np.ascontiguousarray(audio_f32, dtype=np.float32)
+        rms = float(np.sqrt(np.mean(np.square(x), dtype=np.float64)))
+        if rms < 1e-6:
+            return x
+        y = x * (target_rms / rms)
+        peak = float(np.max(np.abs(y)))
+        if peak > 0.95:
+            y *= np.float32(0.95 / peak)
+        return y
+
     def _embed(self, audio_f32: np.ndarray, min_samples: Optional[int] = None) -> Optional[np.ndarray]:
         need = min_samples if min_samples is not None else self._min_match_samples
         if audio_f32.size < need:
             return None
         try:
-            wav = self._torch.from_numpy(np.ascontiguousarray(audio_f32)).float().unsqueeze(0)
+            normed = self._normalize_level(audio_f32)
+            wav = self._torch.from_numpy(normed).float().unsqueeze(0)
             with self._torch.no_grad():
                 emb = self._encoder.encode_batch(wav)
             v = emb.squeeze().detach().cpu().numpy().astype(np.float64)
@@ -789,11 +825,22 @@ class SpeakerTracker:
     def _cosine(a: np.ndarray, b: np.ndarray) -> float:
         return float(np.dot(a, b))  # both L2-normalized
 
+    def _mean_emb(self, embs: list[np.ndarray]) -> Optional[np.ndarray]:
+        if not embs:
+            return None
+        m = np.mean(np.stack(embs, axis=0), axis=0)
+        n = float(np.linalg.norm(m))
+        if n < 1e-9:
+            return None
+        return m / n
+
     def _add(self, name: str, emb: np.ndarray, announce: bool = True) -> str:
         self._names.append(name)
         self._centroids.append(emb)
         self._counts.append(1)
         self._last_name = name
+        self._pending_name = ""
+        self._pending_hits = 0
         if announce:
             print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
         return name
@@ -807,6 +854,8 @@ class SpeakerTracker:
             self._centroids[i] /= nn
         self._counts[i] = n + 1
         self._last_name = self._names[i]
+        self._pending_name = ""
+        self._pending_hits = 0
         return self._last_name
 
     def _best_two(self, emb: np.ndarray) -> tuple[int, float, float]:
@@ -821,17 +870,53 @@ class SpeakerTracker:
                 second = sim
         return best_i, best_sim, second
 
+    def _confirm_or_stick(self, name: str, emb: np.ndarray, idx: int) -> str:
+        """Need two consecutive votes to flip speaker — cuts collar/YT flip-flops."""
+        if name == self._last_name:
+            return self._update(idx, emb)
+        if self._pending_name == name:
+            self._pending_hits += 1
+        else:
+            self._pending_name = name
+            self._pending_hits = 1
+        if self._pending_hits >= 2:
+            return self._update(idx, emb)
+        return self._last_name
+
+    def _accumulate_enroll(self, audio_f32: np.ndarray, label: str) -> Optional[np.ndarray]:
+        """Average several clear phrases until ~enroll_seconds of speech."""
+        if self._rms_db_f32(audio_f32) < -45.0:
+            print(f"[diarize] enroll {label}: too quiet — speak louder / nearer mic", file=sys.stderr, flush=True)
+            return None
+        emb = self._embed(audio_f32, min_samples=self._min_enroll_chunk)
+        if emb is None:
+            return None
+        self._enroll_embs.append(emb)
+        self._enroll_samples += int(audio_f32.size)
+        have = self._enroll_samples / SAMPLE_RATE
+        need = self._enroll_need_samples / SAMPLE_RATE
+        print(
+            f"[diarize] enroll {label}: {have:.1f}/{need:.0f}s ({len(self._enroll_embs)} clips)",
+            file=sys.stderr,
+            flush=True,
+        )
+        if self._enroll_samples < self._enroll_need_samples or len(self._enroll_embs) < 2:
+            return None
+        return self._mean_emb(self._enroll_embs)
+
     def label(self, audio_f32: np.ndarray) -> str:
-        # Live enrollment: need long clear speech before locking an identity
         if self._live_phase == "enroll_you":
-            emb = self._embed(audio_f32, min_samples=self._min_enroll_samples)
+            emb = self._accumulate_enroll(audio_f32, "YOU")
             if emb is None:
                 return ""
             self._add("YOU", emb)
+            self._reset_enroll_buf()
             if self.max_speakers >= 2:
                 self._live_phase = "enroll_other"
+                need_s = self._enroll_need_samples / SAMPLE_RATE
                 print(
-                    "[diarize] YOU locked — now have the OTHER person speak ~3s",
+                    f"[diarize] YOU locked — OTHER person speak ~{need_s:.0f}s total "
+                    f"(pause briefly first so VAD separates)",
                     flush=True,
                 )
             else:
@@ -840,22 +925,28 @@ class SpeakerTracker:
             return "YOU"
 
         if self._live_phase == "enroll_other":
-            emb = self._embed(audio_f32, min_samples=self._min_enroll_samples)
+            emb = self._accumulate_enroll(audio_f32, "OTHER")
             if emb is None:
                 return self._last_name
-            # Must be clearly different from YOU
             you_i = self._names.index("YOU") if "YOU" in self._names else 0
             you_sim = self._cosine(emb, self._centroids[you_i])
-            if you_sim >= self.sim_threshold - 0.05:
+            # Stricter than match threshold — OTHER must clearly differ
+            if you_sim >= self.sim_threshold - 0.08:
                 print(
-                    f"[diarize] still sounds like YOU (sim={you_sim:.2f}) — other person should speak",
+                    f"[diarize] still sounds like YOU (sim={you_sim:.2f}) — "
+                    f"clear buffer, other person should speak alone",
                     file=sys.stderr,
                     flush=True,
                 )
+                self._reset_enroll_buf()
                 return "YOU"
             self._add("OTHER", emb)
+            self._reset_enroll_buf()
             self._live_phase = "match"
-            print("[diarize] OTHER locked — matching speakers", flush=True)
+            print(
+                f"[diarize] OTHER locked (vs YOU sim={you_sim:.2f}) — matching speakers",
+                flush=True,
+            )
             return "OTHER"
 
         emb = self._embed(audio_f32)
@@ -863,8 +954,7 @@ class SpeakerTracker:
             return self._last_name
 
         if not self._names:
-            # No gallery / no live enroll — soft bootstrap YOU from solid speech
-            if audio_f32.size < self._min_enroll_samples:
+            if audio_f32.size < self._enroll_need_samples:
                 return self._last_name
             return self._add("YOU", emb)
 
@@ -873,16 +963,16 @@ class SpeakerTracker:
             second < 0 or (best_sim - second) >= self.margin
         )
         if confident:
-            return self._update(best_i, emb)
+            return self._confirm_or_stick(self._names[best_i], emb, best_i)
 
-        # Soft stick to nearest if close enough (avoid flip on short turns)
-        if best_i >= 0 and best_sim >= self.sim_threshold - 0.08:
-            return self._update(best_i, emb)
+        # Soft stick — a bit looser so same voice at different distance still matches
+        if best_i >= 0 and best_sim >= self.sim_threshold - 0.12:
+            return self._confirm_or_stick(self._names[best_i], emb, best_i)
 
         if (
             self.open_set
             and len(self._centroids) < self.max_speakers
-            and audio_f32.size >= self._min_enroll_samples
+            and audio_f32.size >= self._enroll_need_samples
             and (best_i < 0 or best_sim < self.sim_threshold - 0.12)
         ):
             name = f"OTHER_{len(self._names)}" if "YOU" in self._names else f"SPEAKER_{len(self._names) + 1}"
@@ -1097,6 +1187,7 @@ def make_speaker_tracker(
     sim_threshold: float,
     speaker_margin: float,
     open_set: bool,
+    enroll_seconds: float = 8.0,
     hf_token: Optional[str] = None,
 ):
     b = (backend or "ecapa").lower()
@@ -1110,6 +1201,7 @@ def make_speaker_tracker(
             enrollments=enrollments or None,
             enroll_live=enroll_live,
             open_set=open_set,
+            enroll_seconds=enroll_seconds,
         )
     raise ValueError(f"unknown --diarize-backend {backend!r} (use ecapa|pyannote)")
 
@@ -1172,6 +1264,7 @@ def whisper_worker(
     sim_threshold: float,
     speaker_margin: float,
     open_set: bool,
+    enroll_seconds: float = 8.0,
 ) -> None:
     t_load = time.time()
     openai_model = None
@@ -1212,6 +1305,7 @@ def whisper_worker(
                 sim_threshold=sim_threshold,
                 speaker_margin=speaker_margin,
                 open_set=open_set,
+                enroll_seconds=enroll_seconds,
             )
         except Exception as e:
             print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
@@ -1361,6 +1455,12 @@ def main() -> int:
         help="ECAPA guided live enroll (ignored for pyannote)",
     )
     ap.add_argument(
+        "--enroll-seconds",
+        type=float,
+        default=8.0,
+        help="Live enroll: total clear speech seconds to lock each voice (default 8)",
+    )
+    ap.add_argument(
         "--open-set",
         action="store_true",
         help="ECAPA: allow inventing OTHER_N beyond enrolled gallery",
@@ -1368,14 +1468,14 @@ def main() -> int:
     ap.add_argument(
         "--speaker-sim",
         type=float,
-        default=0.55,
-        help="ECAPA min cosine similarity (default 0.55)",
+        default=0.50,
+        help="ECAPA min cosine similarity (default 0.50; lower = more distance-tolerant)",
     )
     ap.add_argument(
         "--speaker-margin",
         type=float,
-        default=0.06,
-        help="ECAPA best-vs-2nd margin (default 0.06)",
+        default=0.05,
+        help="ECAPA best-vs-2nd margin (default 0.05)",
     )
     args = ap.parse_args()
     partial_ms = 1800 if args.partials else 0
@@ -1397,7 +1497,9 @@ def main() -> int:
         enroll_live = bool(args.enroll_live) or not enrollments
         if enroll_live and not enrollments:
             print(
-                "[diarize] no enroll WAVs — using --enroll-live (speak ~3s as YOU, then other person)",
+                "[diarize] no enroll WAVs — live enroll averages ~"
+                f"{args.enroll_seconds:.0f}s speech per person "
+                "(best accuracy: --enroll-you / --enroll-other WAVs)",
                 flush=True,
             )
     elif args.diarize and args.diarize_backend == "pyannote":
@@ -1471,6 +1573,7 @@ def main() -> int:
             args.speaker_sim,
             args.speaker_margin,
             args.open_set,
+            args.enroll_seconds,
         ),
         name="whisper",
         daemon=True,
