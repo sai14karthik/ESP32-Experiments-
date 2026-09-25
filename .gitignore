@@ -88,6 +88,7 @@ mediamtx/run_xiao_publish.sh
 /Micro-RTSP/
 /whisper/
 /whisper-diarization/
+/WhisperLiveKitDiarization/
 /luma-esp32-ai-assistant/
 
 # Whisper model cache / weights (never commit)
