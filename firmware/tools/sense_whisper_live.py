@@ -124,7 +124,8 @@ class PcmRing:
         with self._lock:
             raw = bytes(self._buf[-need:]) if self._buf else b""
             t_end = self._end_t
-        if len(raw) < SAMPLE_RATE * BYTES_PER_SAMPLE:
+        # Return whatever we have once ≥ ~100ms (callers decide min length)
+        if len(raw) < int(0.1 * SAMPLE_RATE * BYTES_PER_SAMPLE):
             return np.zeros(0, dtype=np.float32), t_end
         return _pcm_to_float32(raw), t_end
 
@@ -606,7 +607,7 @@ def capture_loop(
             frame = bytes(pending[:FRAME_BYTES])
             del pending[:FRAME_BYTES]
             for pcm, is_final in vad.push(frame):
-                _enqueue_seg(seg_q, (pcm, is_final, source))
+                _enqueue_seg(seg_q, (pcm, is_final, source, time.time()))
         if bytes_in >= SAMPLE_RATE * BYTES_PER_SAMPLE * 5:
             elapsed = max(0.001, time.time() - t0)
             rate = bytes_in / BYTES_PER_SAMPLE / elapsed
@@ -692,7 +693,7 @@ def capture_loop_udp_ports(
                             continue
                         if _SOURCE_GATE is not None and not _SOURCE_GATE.allow(label, seg_db):
                             continue
-                        _enqueue_seg(seg_q, (pcm, is_final, label))
+                        _enqueue_seg(seg_q, (pcm, is_final, label, time.time()))
                 if stats[0] >= SAMPLE_RATE * BYTES_PER_SAMPLE * 5:
                     elapsed = max(0.001, time.time() - stats[1])
                     rate = stats[0] / BYTES_PER_SAMPLE / elapsed
@@ -1221,11 +1222,11 @@ class PyannoteSpeakerTracker:
 
 
 class AccurateLiveTracker:
-    """Live + accurate: mlx captions + sliding-window pyannote on continuous PCM.
+    """Universal live diarization: live talk, YT, one or two speakers — one path.
 
-    Capture fills a shared PcmRing. A background thread runs pyannote every few
-    seconds on the last ~12–15s (WhisperX-style context, without offline batching).
-    Each Whisper final is labeled from the latest speaker timeline — no 3s enroll.
+    Pyannote finds turn boundaries on a sliding PCM ring; ECAPA locks YOU/OTHER
+    identity (optional WAV enroll seeds). Cluster count adapts: starts open,
+    probes for a second voice (YT/far-field), locks to 2 once confirmed.
     """
 
     def __init__(
@@ -1234,9 +1235,11 @@ class AccurateLiveTracker:
         max_speakers: int = 2,
         hf_token: Optional[str] = None,
         model_id: str = "pyannote/speaker-diarization-community-1",
-        window_s: float = 14.0,
+        window_s: float = 12.0,
         refresh_s: float = 2.0,
         sim_threshold: float = 0.50,
+        expect_speakers: Optional[int] = None,
+        enrollments: Optional[dict[str, Path]] = None,
     ):
         import os
 
@@ -1268,13 +1271,26 @@ class AccurateLiveTracker:
         self.window_s = window_s
         self.refresh_s = refresh_s
         self.sim_threshold = sim_threshold
+        self.margin = 0.06
+        # None / ≤0 → universal auto. N≥2 → always force N.
+        if expect_speakers is not None and expect_speakers <= 0:
+            self.expect_speakers: Optional[int] = None
+        else:
+            self.expect_speakers = expect_speakers
         self._names: list[str] = []
         self._centroids: list[np.ndarray] = []
+        self._counts: list[int] = []
         self._last_name = "YOU"
-        # Absolute wall-clock turns from last successful diarize
+        self._pending_name = ""
+        self._pending_hits = 0
         self._turns: list[tuple[float, float, str]] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._encoder = None
+        # Adaptive dual-speaker detection (live + YT without flags)
+        self._tick = 0
+        self._two_spk_hits = 0
+        self._force_two = bool(self.expect_speakers and self.expect_speakers >= 2)
 
         print(f"[diarize] loading {model_id} (accurate live window) …", flush=True)
         try:
@@ -1294,12 +1310,48 @@ class AccurateLiveTracker:
             print(f"[diarize] pipeline.to({device}) failed ({e}); default device", flush=True)
             device = torch.device("cpu")
 
+        try:
+            from speechbrain.inference.speaker import EncoderClassifier
+
+            self._encoder = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir=str(Path.home() / ".cache" / "speechbrain" / "spkrec-ecapa-voxceleb"),
+                run_opts={"device": "cpu"},
+            )
+            id_tag = "ECAPA identity"
+        except Exception as e:
+            print(f"[diarize] ECAPA unavailable ({e}); using pyannote embeddings", flush=True)
+            id_tag = "pyannote embeddings"
+
+        # Optional WAV seeds — same flags as ECAPA mode, works on default path
+        for name, path in (enrollments or {}).items():
+            if self._encoder is None:
+                break
+            try:
+                emb = self._ecapa_embed(_load_mono_16k(path))
+            except Exception as e:
+                print(f"[diarize] enroll skip {name} ({e})", file=sys.stderr, flush=True)
+                continue
+            if emb is None:
+                print(f"[diarize] enroll skip {name}: could not embed {path}", file=sys.stderr, flush=True)
+                continue
+            self._add_gallery(str(name).upper(), emb)
+            self._last_name = str(name).upper()
+            print(f"[diarize] seeded {name.upper()} from {path}", flush=True)
+        if len(self._names) >= 2:
+            self._force_two = True
+
         self._thread = threading.Thread(target=self._loop, name="accurate-diarize", daemon=True)
         self._thread.start()
+        mode = (
+            f"force={self.expect_speakers}"
+            if self.expect_speakers and self.expect_speakers > 0
+            else "auto live/YT"
+        )
         print(
-            f"[diarize] on (accurate live @ {device}, window={window_s:.0f}s, "
-            f"refresh={refresh_s:.1f}s, max {self.max_speakers}; "
-            f"first voice→YOU, next→OTHER — no enroll)",
+            f"[diarize] on (accurate @ {device}, {id_tag}, window={window_s:.0f}s, "
+            f"refresh={refresh_s:.1f}s, max {self.max_speakers}, {mode}; "
+            f"gallery={self._names or 'empty→first voice YOU'})",
             flush=True,
         )
 
@@ -1316,45 +1368,238 @@ class AccurateLiveTracker:
             return None
         return a / n
 
-    def _map_raw(self, raw: str, emb: Optional[np.ndarray]) -> str:
-        # Prefer embedding match to stable YOU/OTHER across windows
-        if emb is not None and self._centroids:
-            best_i, best_sim = -1, -1.0
-            for i, c in enumerate(self._centroids):
-                sim = float(np.dot(emb, c))
-                if sim > best_sim:
-                    best_sim = sim
-                    best_i = i
-            if best_i >= 0 and best_sim >= self.sim_threshold - 0.05:
-                # slow update
-                n = 1.0
-                self._centroids[best_i] = self._centroids[best_i] * 0.85 + emb * 0.15
-                nn = float(np.linalg.norm(self._centroids[best_i]))
-                if nn > 1e-9:
-                    self._centroids[best_i] /= nn
-                return self._names[best_i]
+    @staticmethod
+    def _normalize_level(audio_f32: np.ndarray, target_rms: float = 0.1) -> np.ndarray:
+        x = np.ascontiguousarray(audio_f32, dtype=np.float32)
+        rms = float(np.sqrt(np.mean(np.square(x), dtype=np.float64)))
+        if rms < 1e-6:
+            return x
+        y = x * (target_rms / rms)
+        peak = float(np.max(np.abs(y)))
+        if peak > 0.95:
+            y *= np.float32(0.95 / peak)
+        return y
 
-        if emb is not None and len(self._names) < self.max_speakers:
-            name = "YOU" if "YOU" not in self._names else (
-                "OTHER" if "OTHER" not in self._names else f"OTHER_{len(self._names)}"
-            )
-            self._names.append(name)
+    def _ecapa_embed(self, audio_f32: np.ndarray) -> Optional[np.ndarray]:
+        if self._encoder is None or audio_f32.size < int(SAMPLE_RATE * 0.6):
+            return None
+        try:
+            normed = self._normalize_level(audio_f32)
+            wav = self._torch.from_numpy(normed).float().unsqueeze(0)
+            with self._torch.no_grad():
+                emb = self._encoder.encode_batch(wav)
+            return self._norm_emb(emb.squeeze().detach().cpu().numpy())
+        except Exception:
+            return None
+
+    def _crop_speaker(self, audio: np.ndarray, ann, raw: str, max_s: float = 6.0) -> np.ndarray:
+        pieces: list[np.ndarray] = []
+        got = 0.0
+        for turn, _, spk in ann.itertracks(yield_label=True):
+            if str(spk) != raw:
+                continue
+            a = max(0, int(float(turn.start) * SAMPLE_RATE))
+            b = min(audio.size, int(float(turn.end) * SAMPLE_RATE))
+            if b - a < int(0.25 * SAMPLE_RATE):
+                continue
+            pieces.append(audio[a:b])
+            got += (b - a) / SAMPLE_RATE
+            if got >= max_s:
+                break
+        if not pieces:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(pieces)
+
+    def _add_gallery(self, name: str, emb: Optional[np.ndarray]) -> str:
+        self._names.append(name)
+        if emb is not None:
             self._centroids.append(emb)
-            print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
-            return name
+            self._counts.append(1)
+        else:
+            self._centroids.append(np.zeros(1, dtype=np.float64))
+            self._counts.append(0)
+        print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
+        return name
 
-        if self._names:
-            return self._last_name
-        return "YOU"
+    def _update_centroid(self, i: int, emb: np.ndarray) -> None:
+        n = max(1, self._counts[i])
+        self._centroids[i] = (self._centroids[i] * n + emb) / (n + 1)
+        nn = float(np.linalg.norm(self._centroids[i]))
+        if nn > 1e-9:
+            self._centroids[i] /= nn
+        self._counts[i] = n + 1
+
+    def _best_match(self, emb: np.ndarray) -> tuple[int, float, float]:
+        best_i, best_sim, second = -1, -1.0, -1.0
+        for i, c in enumerate(self._centroids):
+            if c.size < 2:
+                continue
+            sim = float(np.dot(emb, c))
+            if sim > best_sim:
+                second = best_sim
+                best_sim = sim
+                best_i = i
+            elif sim > second:
+                second = sim
+        return best_i, best_sim, second
+
+    def _next_name(self) -> str:
+        if "YOU" not in self._names:
+            return "YOU"
+        if "OTHER" not in self._names:
+            return "OTHER"
+        return f"OTHER_{len(self._names)}"
+
+    def _cluster_kwargs(self) -> dict:
+        """Universal: open range, periodic 2-speaker probe, lock once dual confirmed."""
+        if self.expect_speakers and self.expect_speakers >= 2:
+            return {"num_speakers": min(self.expect_speakers, self.max_speakers)}
+        if self.max_speakers < 2:
+            return {"num_speakers": 1}
+        if self._force_two or len(self._names) >= 2:
+            return {"num_speakers": min(2, self.max_speakers)}
+        # Every 3rd window probe for a hidden second speaker (YT / late arriver)
+        if self._tick % 3 == 0:
+            return {"num_speakers": min(2, self.max_speakers)}
+        return {"min_speakers": 1, "max_speakers": self.max_speakers}
+
+    def _note_dual_evidence(
+        self,
+        labels: list[str],
+        emb_by_raw: dict[str, Optional[np.ndarray]],
+        dur_by_raw: dict[str, float],
+    ) -> None:
+        if len(labels) < 2 or self.max_speakers < 2:
+            self._two_spk_hits = max(0, self._two_spk_hits - 1)
+            return
+        ordered = sorted(labels, key=lambda r: dur_by_raw.get(r, 0.0), reverse=True)
+        a, b = ordered[0], ordered[1]
+        if dur_by_raw.get(b, 0.0) < 0.6:
+            return
+        ea, eb = emb_by_raw.get(a), emb_by_raw.get(b)
+        if ea is not None and eb is not None and float(np.dot(ea, eb)) >= 0.82:
+            return  # same voice split — ignore
+        self._two_spk_hits += 1
+        if self._two_spk_hits >= 2 and not self._force_two:
+            self._force_two = True
+            print(
+                "[diarize] dual speakers confirmed — locking 2-cluster mode (live/YT)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _map_window(
+        self,
+        labels: list[str],
+        emb_by_raw: dict[str, Optional[np.ndarray]],
+        dur_by_raw: dict[str, float],
+    ) -> dict[str, str]:
+        """Exclusive SPEAKER_xx → YOU/OTHER (no two raws share a name)."""
+        if not labels:
+            return {}
+        ordered = sorted(labels, key=lambda r: dur_by_raw.get(r, 0.0), reverse=True)
+        mapping: dict[str, str] = {}
+        used: set[str] = set()
+
+        for raw in ordered:
+            emb = emb_by_raw.get(raw)
+            chosen: Optional[str] = None
+            if emb is not None and self._centroids:
+                best_i, best_sim, second = self._best_match(emb)
+                margin_ok = second < 0 or (best_sim - second) >= self.margin
+                if (
+                    best_i >= 0
+                    and best_sim >= self.sim_threshold
+                    and margin_ok
+                    and self._names[best_i] not in used
+                ):
+                    chosen = self._names[best_i]
+                    self._update_centroid(best_i, emb)
+                elif (
+                    best_i >= 0
+                    and best_sim >= self.sim_threshold - 0.08
+                    and self._names[best_i] not in used
+                    and (second < 0 or (best_sim - second) >= self.margin * 0.5)
+                ):
+                    chosen = self._names[best_i]
+                    self._update_centroid(best_i, emb)
+
+            if chosen is None:
+                if emb is not None and self._centroids:
+                    ranked = sorted(
+                        (
+                            (float(np.dot(emb, c)), i)
+                            for i, c in enumerate(self._centroids)
+                            if c.size >= 2 and self._names[i] not in used
+                        ),
+                        reverse=True,
+                    )
+                    if ranked and ranked[0][0] >= self.sim_threshold - 0.15:
+                        i = ranked[0][1]
+                        chosen = self._names[i]
+                        self._update_centroid(i, emb)
+
+            if chosen is None and len(self._names) < self.max_speakers:
+                ok_new = True
+                if emb is not None and self._centroids:
+                    _, best_sim, _ = self._best_match(emb)
+                    if best_sim >= self.sim_threshold + 0.05:
+                        ok_new = False
+                if ok_new or not self._names:
+                    chosen = self._add_gallery(self._next_name(), emb)
+
+            if chosen is None:
+                free = [n for n in self._names if n not in used]
+                if free:
+                    chosen = free[0]
+                    if emb is not None:
+                        try:
+                            self._update_centroid(self._names.index(chosen), emb)
+                        except ValueError:
+                            pass
+                else:
+                    chosen = self._last_name
+
+            mapping[raw] = chosen
+            used.add(chosen)
+
+        if len(ordered) >= 2:
+            a, b = ordered[0], ordered[1]
+            if mapping.get(a) == mapping.get(b):
+                if "OTHER" not in self._names and len(self._names) < self.max_speakers:
+                    mapping[b] = self._add_gallery("OTHER", emb_by_raw.get(b))
+                elif "OTHER" in self._names and mapping[a] != "OTHER":
+                    mapping[b] = "OTHER"
+                print(
+                    f"[diarize] split collapsed speakers → {mapping[a]}/{mapping[b]}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return mapping
+
+    def _merge_turns(
+        self,
+        window_turns: list[tuple[float, float, str]],
+        t_start: float,
+        t_end: float,
+    ) -> None:
+        kept: list[tuple[float, float, str]] = []
+        for a, b, name in self._turns:
+            if b <= t_start + 0.2 or a >= t_end - 0.2:
+                kept.append((a, b, name))
+        merged = kept + window_turns
+        merged.sort(key=lambda x: x[0])
+        cutoff = t_end - 45.0
+        self._turns = [tr for tr in merged if tr[1] >= cutoff]
 
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
+                self._tick += 1
                 audio, t_end = self.ring.snapshot(self.window_s)
                 if audio.size < SAMPLE_RATE * 4:
                     self._stop.wait(0.4)
                     continue
-                # Quiet / near-empty ring → pyannote hits empty-slice NaNs; skip
                 rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float64)))
                 if rms < 1e-3:
                     self._stop.wait(self.refresh_s)
@@ -1362,8 +1607,8 @@ class AccurateLiveTracker:
                 waveform = self._torch.from_numpy(
                     np.ascontiguousarray(audio, dtype=np.float32)
                 ).unsqueeze(0)
-                kwargs = {"min_speakers": 1, "max_speakers": self.max_speakers}
-                # pyannote internal mean() on empty frames → RuntimeWarning spam
+                kwargs = self._cluster_kwargs()
+
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore",
@@ -1389,29 +1634,48 @@ class AccurateLiveTracker:
                     continue
 
                 labels = [str(x) for x in ann.labels()]
-                emb_by_raw: dict[str, Optional[np.ndarray]] = {}
-                if embeddings is not None:
-                    emb_arr = np.asarray(embeddings)
-                    for i, lab in enumerate(labels):
-                        if emb_arr.ndim == 1 and i == 0:
-                            emb_by_raw[lab] = self._norm_emb(emb_arr)
-                        elif emb_arr.ndim >= 2 and i < emb_arr.shape[0]:
-                            emb_by_raw[lab] = self._norm_emb(emb_arr[i])
+                dur_by_raw: dict[str, float] = {lab: 0.0 for lab in labels}
+                for turn, _, spk in ann.itertracks(yield_label=True):
+                    raw = str(spk)
+                    dur_by_raw[raw] = dur_by_raw.get(raw, 0.0) + float(turn.end - turn.start)
 
-                dur = float(audio.size) / SAMPLE_RATE
-                t_start = t_end - dur
-                turns: list[tuple[float, float, str]] = []
+                emb_by_raw: dict[str, Optional[np.ndarray]] = {}
+                for lab in labels:
+                    crop = self._crop_speaker(audio, ann, lab)
+                    emb_by_raw[lab] = self._ecapa_embed(crop)
+
+                if embeddings is not None:
+                    if isinstance(embeddings, dict):
+                        for lab in labels:
+                            if emb_by_raw.get(lab) is None and lab in embeddings:
+                                emb_by_raw[lab] = self._norm_emb(np.asarray(embeddings[lab]))
+                    else:
+                        emb_arr = np.asarray(embeddings)
+                        for i, lab in enumerate(labels):
+                            if emb_by_raw.get(lab) is not None:
+                                continue
+                            if emb_arr.ndim == 1 and i == 0:
+                                emb_by_raw[lab] = self._norm_emb(emb_arr)
+                            elif emb_arr.ndim >= 2 and i < emb_arr.shape[0]:
+                                emb_by_raw[lab] = self._norm_emb(emb_arr[i])
+
+                self._note_dual_evidence(labels, emb_by_raw, dur_by_raw)
+
                 with self._lock:
+                    raw_map = self._map_window(labels, emb_by_raw, dur_by_raw)
+                    if len(self._names) >= 2:
+                        self._force_two = True
+                    dur = float(audio.size) / SAMPLE_RATE
+                    t_start = t_end - dur
+                    window_turns: list[tuple[float, float, str]] = []
                     for turn, _, spk in ann.itertracks(yield_label=True):
                         raw = str(spk)
-                        name = self._map_raw(raw, emb_by_raw.get(raw))
-                        turns.append(
+                        name = raw_map.get(raw, self._last_name)
+                        window_turns.append(
                             (t_start + float(turn.start), t_start + float(turn.end), name)
                         )
-                    turns.sort(key=lambda x: x[0])
-                    self._turns = turns
-                    if turns:
-                        self._last_name = turns[-1][2]
+                    window_turns.sort(key=lambda x: x[0])
+                    self._merge_turns(window_turns, t_start, t_end)
             except Exception as e:
                 print(f"[diarize] accurate refresh failed: {e}", file=sys.stderr, flush=True)
             self._stop.wait(self.refresh_s)
@@ -1427,7 +1691,8 @@ class AccurateLiveTracker:
             last = self._last_name
         if not turns:
             return last
-        # Speaker with most overlap against [t0, t1]
+
+        seg_dur = max(0.15, t1 - t0)
         best_name, best_ov = last, 0.0
         for a, b, name in turns:
             ov = max(0.0, min(t1, b) - max(t0, a))
@@ -1435,11 +1700,30 @@ class AccurateLiveTracker:
                 best_ov = ov
                 best_name = name
         if best_ov <= 0:
-            # nearest turn by midpoint
             mid = 0.5 * (t0 + t1)
             best_name = min(turns, key=lambda tr: abs(0.5 * (tr[0] + tr[1]) - mid))[2]
-        self._last_name = best_name
-        return best_name
+            best_ov = 0.0
+
+        if best_ov < 0.15 * seg_dur and best_name != last:
+            return last
+
+        if best_name == last:
+            self._pending_name = ""
+            self._pending_hits = 0
+            self._last_name = best_name
+            return best_name
+        if self._pending_name == best_name:
+            self._pending_hits += 1
+        else:
+            self._pending_name = best_name
+            self._pending_hits = 1
+        if self._pending_hits >= 2:
+            self._last_name = best_name
+            self._pending_name = ""
+            self._pending_hits = 0
+            return best_name
+        return last
+
 
 
 def make_speaker_tracker(
@@ -1454,16 +1738,20 @@ def make_speaker_tracker(
     enroll_seconds: float = 8.0,
     hf_token: Optional[str] = None,
     ring: Optional[PcmRing] = None,
+    expect_speakers: Optional[int] = None,
 ):
     b = (backend or "accurate").lower()
     if b in ("accurate", "live-accurate", "sliding"):
         if ring is None:
             raise ValueError("accurate backend needs a PcmRing")
+        # ECAPA identity works well around 0.50; don't floor as hard as before
         return AccurateLiveTracker(
             ring=ring,
             max_speakers=max_speakers,
             hf_token=hf_token,
-            sim_threshold=sim_threshold,
+            sim_threshold=max(sim_threshold, 0.48),
+            expect_speakers=expect_speakers,
+            enrollments=enrollments,
         )
     if b == "pyannote":
         return PyannoteSpeakerTracker(max_speakers=max_speakers, hf_token=hf_token)
@@ -1541,6 +1829,7 @@ def whisper_worker(
     enroll_seconds: float = 8.0,
     pcm_ring: Optional[PcmRing] = None,
     ready: Optional[threading.Event] = None,
+    expect_speakers: Optional[int] = None,
 ) -> None:
     t_load = time.time()
     openai_model = None
@@ -1560,6 +1849,7 @@ def whisper_worker(
                 open_set=open_set,
                 enroll_seconds=enroll_seconds,
                 ring=pcm_ring,
+                expect_speakers=expect_speakers,
             )
         except Exception as e:
             print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
@@ -1602,11 +1892,15 @@ def whisper_worker(
             continue
         if item is None:
             break
-        if len(item) == 3:
+        if len(item) == 4:
+            seg, is_final, source, seg_t_end = item
+        elif len(item) == 3:
             seg, is_final, source = item
+            seg_t_end = time.time()
         else:
             seg, is_final = item
             source = ""
+            seg_t_end = time.time()
 
         t0 = time.time()
         try:
@@ -1636,7 +1930,8 @@ def whisper_worker(
             who = ""
             if is_final and speakers is not None:
                 seg_dur = len(seg) / float(SAMPLE_RATE * BYTES_PER_SAMPLE)
-                t_end = now
+                # Use VAD finalize time (not now) — Whisper lag was skewing labels on YT
+                t_end = float(seg_t_end)
                 t_start = t_end - max(0.3, seg_dur)
                 if hasattr(speakers, "label_span"):
                     who = speakers.label_span(t_start, t_end)
@@ -1711,8 +2006,8 @@ def main() -> int:
         "--diarize-backend",
         choices=("accurate", "ecapa", "pyannote"),
         default="accurate",
-        help="accurate=sliding pyannote on PCM ring (default, live+accurate, needs HF_TOKEN); "
-        "ecapa=enroll/match; pyannote=per-utterance gallery. "
+        help="accurate=default universal path (live talk + YT + optional WAV seeds, needs HF_TOKEN); "
+        "ecapa=enroll-only matcher; pyannote=per-utterance gallery. "
         "Full-file WhisperX: scripts/sense_whisperx.sh",
     )
     ap.add_argument(
@@ -1723,14 +2018,22 @@ def main() -> int:
     )
     ap.add_argument("--max-speakers", type=int, default=2, help="Max distinct voices (default 2: YOU+OTHER)")
     ap.add_argument(
+        "--expect-speakers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional override of cluster count. Default auto adapts for live/YT. "
+        "Only needed to hard-force N (usually leave unset).",
+    )
+    ap.add_argument(
         "--enroll-you",
         type=Path,
-        help="WAV of YOUR voice (5–20s clean speech) — ECAPA only",
+        help="WAV of YOUR voice (5–20s) — seeds gallery on accurate (default) or ECAPA",
     )
     ap.add_argument(
         "--enroll-other",
         type=Path,
-        help="WAV of the other person's voice (5–20s) — ECAPA only",
+        help="WAV of the other person's voice (5–20s) — seeds gallery on accurate or ECAPA",
     )
     ap.add_argument(
         "--enroll",
@@ -1793,9 +2096,10 @@ def main() -> int:
                 flush=True,
             )
     elif args.diarize and args.diarize_backend == "accurate":
+        seed = f", seeded={sorted(enrollments)}" if enrollments else ""
         print(
-            "[diarize] accurate live — sliding pyannote on continuous PCM "
-            "(set HF_TOKEN; no enroll; first voice→YOU, next→OTHER)",
+            "[diarize] universal accurate — live talk / YT / 1–2 speakers auto "
+            f"(HF_TOKEN; optional --enroll-you/--enroll-other{seed})",
             flush=True,
         )
     elif args.diarize and args.diarize_backend == "pyannote":
@@ -1879,6 +2183,7 @@ def main() -> int:
             args.enroll_seconds,
             _PCM_RING,
             ready,
+            args.expect_speakers,
         ),
         name="whisper",
         daemon=True,
