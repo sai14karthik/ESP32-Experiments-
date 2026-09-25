@@ -34,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import wave
 from collections import deque
 from datetime import datetime
@@ -1350,18 +1351,35 @@ class AccurateLiveTracker:
         while not self._stop.is_set():
             try:
                 audio, t_end = self.ring.snapshot(self.window_s)
-                if audio.size < SAMPLE_RATE * 3:
+                if audio.size < SAMPLE_RATE * 4:
                     self._stop.wait(0.4)
+                    continue
+                # Quiet / near-empty ring → pyannote hits empty-slice NaNs; skip
+                rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float64)))
+                if rms < 1e-3:
+                    self._stop.wait(self.refresh_s)
                     continue
                 waveform = self._torch.from_numpy(
                     np.ascontiguousarray(audio, dtype=np.float32)
                 ).unsqueeze(0)
                 kwargs = {"min_speakers": 1, "max_speakers": self.max_speakers}
-                with self._torch.inference_mode():
-                    result = self._pipeline(
-                        {"waveform": waveform, "sample_rate": SAMPLE_RATE},
-                        **kwargs,
+                # pyannote internal mean() on empty frames → RuntimeWarning spam
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Mean of empty slice",
+                        category=RuntimeWarning,
                     )
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="invalid value encountered in divide",
+                        category=RuntimeWarning,
+                    )
+                    with self._torch.inference_mode():
+                        result = self._pipeline(
+                            {"waveform": waveform, "sample_rate": SAMPLE_RATE},
+                            **kwargs,
+                        )
                 ann = getattr(result, "speaker_diarization", None)
                 if ann is None and hasattr(result, "itertracks"):
                     ann = result
