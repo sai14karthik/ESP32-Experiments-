@@ -12,16 +12,14 @@ Backend (Apple Silicon):
 
 Capture → WebRTC VAD → mlx-whisper (Metal) → text (finals by default).
 
-Speaker labels (live, Mini Metal) — pick one:
-  ecapa (default)  SpeechBrain ECAPA gallery + live enroll YOU then OTHER.
-                   Best for short live utterances (YOU vs person / YT).
-  pyannote         HF community-1 embeddings gallery across clips (needs HF_TOKEN).
-                   Still utterance-level; not full-file NeMo/WhisperX quality.
+Speaker labels (live) — pick one:
+  accurate (default)  Sliding-window pyannote on a continuous PCM ring (needs HF_TOKEN).
+                      Live captions via mlx + accurate speaker turns (no 3s enroll).
+  ecapa               SpeechBrain ECAPA gallery + live enroll YOU then OTHER.
+  pyannote            Per-utterance pyannote embedding gallery (lighter than accurate).
 
-Do NOT wire MahmoudAshraf97/whisper-diarization into this live loop:
-  that stack is offline (Demucs → faster-whisper → CTC align → NeMo MSDD/Sortformer),
-  CUDA-first, seconds–minutes per file. Use scripts/sense_diarize_offline.sh on a
-  recorded WAV / GPU box instead.
+For full-file WhisperX quality after a session: sense_record_pcm.sh + sense_whisperx.sh.
+Later CUDA live: Sortformer / WhisperLiveKit on GPU cluster.
 
 If the worker falls behind, oldest segments are dropped (prefer live speech).
 """
@@ -96,6 +94,47 @@ def write_wav(path: Path, pcm: bytes) -> None:
         w.setsampwidth(BYTES_PER_SAMPLE)
         w.setframerate(SAMPLE_RATE)
         w.writeframes(pcm)
+
+
+class PcmRing:
+    """Continuous s16le ring for accurate live diarization (all recent audio)."""
+
+    def __init__(self, seconds: float = 24.0):
+        self._max_bytes = int(seconds * SAMPLE_RATE * BYTES_PER_SAMPLE)
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._end_t = time.time()
+
+    def write(self, pcm: bytes) -> None:
+        if not pcm:
+            return
+        n = (len(pcm) // BYTES_PER_SAMPLE) * BYTES_PER_SAMPLE
+        if n <= 0:
+            return
+        with self._lock:
+            self._buf.extend(pcm[:n])
+            overflow = len(self._buf) - self._max_bytes
+            if overflow > 0:
+                del self._buf[:overflow]
+            self._end_t = time.time()
+
+    def snapshot(self, seconds: float) -> tuple[np.ndarray, float]:
+        need = int(seconds * SAMPLE_RATE * BYTES_PER_SAMPLE)
+        with self._lock:
+            raw = bytes(self._buf[-need:]) if self._buf else b""
+            t_end = self._end_t
+        if len(raw) < SAMPLE_RATE * BYTES_PER_SAMPLE:
+            return np.zeros(0, dtype=np.float32), t_end
+        return _pcm_to_float32(raw), t_end
+
+
+# Shared ring — capture writes; AccurateLiveTracker reads
+_PCM_RING: Optional[PcmRing] = None
+
+
+def _ring_write(pcm: bytes) -> None:
+    if _PCM_RING is not None and pcm:
+        _PCM_RING.write(pcm)
 
 
 def _mlx_available() -> bool:
@@ -561,6 +600,7 @@ def capture_loop(
             continue
         pending.extend(chunk)
         bytes_in += len(chunk)
+        _ring_write(chunk)
         while len(pending) >= FRAME_BYTES:
             frame = bytes(pending[:FRAME_BYTES])
             del pending[:FRAME_BYTES]
@@ -635,6 +675,7 @@ def capture_loop_udp_ports(
                             break
                         pending.extend(data)
                         stats[0] += len(data)
+                        _ring_write(data)
                 except BlockingIOError:
                     pass
                 except OSError as e:
@@ -1178,6 +1219,211 @@ class PyannoteSpeakerTracker:
         return self._match(emb)
 
 
+class AccurateLiveTracker:
+    """Live + accurate: mlx captions + sliding-window pyannote on continuous PCM.
+
+    Capture fills a shared PcmRing. A background thread runs pyannote every few
+    seconds on the last ~12–15s (WhisperX-style context, without offline batching).
+    Each Whisper final is labeled from the latest speaker timeline — no 3s enroll.
+    """
+
+    def __init__(
+        self,
+        ring: PcmRing,
+        max_speakers: int = 2,
+        hf_token: Optional[str] = None,
+        model_id: str = "pyannote/speaker-diarization-community-1",
+        window_s: float = 14.0,
+        refresh_s: float = 2.0,
+        sim_threshold: float = 0.50,
+    ):
+        import os
+
+        import torch
+        from pyannote.audio import Pipeline
+
+        token = (
+            hf_token
+            or os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            or os.environ.get("HF_HUB_TOKEN")
+        )
+        if not token:
+            try:
+                from huggingface_hub import get_token
+
+                token = get_token()
+            except Exception:
+                token = None
+        if not token:
+            raise RuntimeError(
+                "accurate live needs HF_TOKEN — accept "
+                "https://huggingface.co/pyannote/speaker-diarization-community-1"
+            )
+
+        self._torch = torch
+        self.ring = ring
+        self.max_speakers = max(1, max_speakers)
+        self.window_s = window_s
+        self.refresh_s = refresh_s
+        self.sim_threshold = sim_threshold
+        self._names: list[str] = []
+        self._centroids: list[np.ndarray] = []
+        self._last_name = "YOU"
+        # Absolute wall-clock turns from last successful diarize
+        self._turns: list[tuple[float, float, str]] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+
+        print(f"[diarize] loading {model_id} (accurate live window) …", flush=True)
+        try:
+            self._pipeline = Pipeline.from_pretrained(model_id, token=token)
+        except TypeError:
+            self._pipeline = Pipeline.from_pretrained(model_id, use_auth_token=token)
+
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        try:
+            self._pipeline.to(device)
+        except Exception as e:
+            print(f"[diarize] pipeline.to({device}) failed ({e}); default device", flush=True)
+            device = torch.device("cpu")
+
+        self._thread = threading.Thread(target=self._loop, name="accurate-diarize", daemon=True)
+        self._thread.start()
+        print(
+            f"[diarize] on (accurate live @ {device}, window={window_s:.0f}s, "
+            f"refresh={refresh_s:.1f}s, max {self.max_speakers}; "
+            f"first voice→YOU, next→OTHER — no enroll)",
+            flush=True,
+        )
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    @staticmethod
+    def _norm_emb(v: np.ndarray) -> Optional[np.ndarray]:
+        a = np.asarray(v, dtype=np.float64).reshape(-1)
+        if a.size == 0 or not np.isfinite(a).all():
+            return None
+        n = float(np.linalg.norm(a))
+        if n < 1e-9:
+            return None
+        return a / n
+
+    def _map_raw(self, raw: str, emb: Optional[np.ndarray]) -> str:
+        # Prefer embedding match to stable YOU/OTHER across windows
+        if emb is not None and self._centroids:
+            best_i, best_sim = -1, -1.0
+            for i, c in enumerate(self._centroids):
+                sim = float(np.dot(emb, c))
+                if sim > best_sim:
+                    best_sim = sim
+                    best_i = i
+            if best_i >= 0 and best_sim >= self.sim_threshold - 0.05:
+                # slow update
+                n = 1.0
+                self._centroids[best_i] = self._centroids[best_i] * 0.85 + emb * 0.15
+                nn = float(np.linalg.norm(self._centroids[best_i]))
+                if nn > 1e-9:
+                    self._centroids[best_i] /= nn
+                return self._names[best_i]
+
+        if emb is not None and len(self._names) < self.max_speakers:
+            name = "YOU" if "YOU" not in self._names else (
+                "OTHER" if "OTHER" not in self._names else f"OTHER_{len(self._names)}"
+            )
+            self._names.append(name)
+            self._centroids.append(emb)
+            print(f"[diarize] new voice → {name}", file=sys.stderr, flush=True)
+            return name
+
+        if self._names:
+            return self._last_name
+        return "YOU"
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                audio, t_end = self.ring.snapshot(self.window_s)
+                if audio.size < SAMPLE_RATE * 3:
+                    self._stop.wait(0.4)
+                    continue
+                waveform = self._torch.from_numpy(
+                    np.ascontiguousarray(audio, dtype=np.float32)
+                ).unsqueeze(0)
+                kwargs = {"min_speakers": 1, "max_speakers": self.max_speakers}
+                with self._torch.inference_mode():
+                    result = self._pipeline(
+                        {"waveform": waveform, "sample_rate": SAMPLE_RATE},
+                        **kwargs,
+                    )
+                ann = getattr(result, "speaker_diarization", None)
+                if ann is None and hasattr(result, "itertracks"):
+                    ann = result
+                embeddings = getattr(result, "speaker_embeddings", None)
+                if ann is None:
+                    self._stop.wait(self.refresh_s)
+                    continue
+
+                labels = [str(x) for x in ann.labels()]
+                emb_by_raw: dict[str, Optional[np.ndarray]] = {}
+                if embeddings is not None:
+                    emb_arr = np.asarray(embeddings)
+                    for i, lab in enumerate(labels):
+                        if emb_arr.ndim == 1 and i == 0:
+                            emb_by_raw[lab] = self._norm_emb(emb_arr)
+                        elif emb_arr.ndim >= 2 and i < emb_arr.shape[0]:
+                            emb_by_raw[lab] = self._norm_emb(emb_arr[i])
+
+                dur = float(audio.size) / SAMPLE_RATE
+                t_start = t_end - dur
+                turns: list[tuple[float, float, str]] = []
+                with self._lock:
+                    for turn, _, spk in ann.itertracks(yield_label=True):
+                        raw = str(spk)
+                        name = self._map_raw(raw, emb_by_raw.get(raw))
+                        turns.append(
+                            (t_start + float(turn.start), t_start + float(turn.end), name)
+                        )
+                    turns.sort(key=lambda x: x[0])
+                    self._turns = turns
+                    if turns:
+                        self._last_name = turns[-1][2]
+            except Exception as e:
+                print(f"[diarize] accurate refresh failed: {e}", file=sys.stderr, flush=True)
+            self._stop.wait(self.refresh_s)
+
+    def label(self, audio_f32: np.ndarray) -> str:
+        dur = float(audio_f32.size) / SAMPLE_RATE if audio_f32.size else 0.5
+        t_end = time.time()
+        return self.label_span(t_end - max(0.3, dur), t_end)
+
+    def label_span(self, t0: float, t1: float) -> str:
+        with self._lock:
+            turns = list(self._turns)
+            last = self._last_name
+        if not turns:
+            return last
+        # Speaker with most overlap against [t0, t1]
+        best_name, best_ov = last, 0.0
+        for a, b, name in turns:
+            ov = max(0.0, min(t1, b) - max(t0, a))
+            if ov > best_ov:
+                best_ov = ov
+                best_name = name
+        if best_ov <= 0:
+            # nearest turn by midpoint
+            mid = 0.5 * (t0 + t1)
+            best_name = min(turns, key=lambda tr: abs(0.5 * (tr[0] + tr[1]) - mid))[2]
+        self._last_name = best_name
+        return best_name
+
+
 def make_speaker_tracker(
     backend: str,
     *,
@@ -1189,8 +1435,18 @@ def make_speaker_tracker(
     open_set: bool,
     enroll_seconds: float = 8.0,
     hf_token: Optional[str] = None,
+    ring: Optional[PcmRing] = None,
 ):
-    b = (backend or "ecapa").lower()
+    b = (backend or "accurate").lower()
+    if b in ("accurate", "live-accurate", "sliding"):
+        if ring is None:
+            raise ValueError("accurate backend needs a PcmRing")
+        return AccurateLiveTracker(
+            ring=ring,
+            max_speakers=max_speakers,
+            hf_token=hf_token,
+            sim_threshold=sim_threshold,
+        )
     if b == "pyannote":
         return PyannoteSpeakerTracker(max_speakers=max_speakers, hf_token=hf_token)
     if b in ("ecapa", "speechbrain", "resemblyzer"):
@@ -1203,7 +1459,7 @@ def make_speaker_tracker(
             open_set=open_set,
             enroll_seconds=enroll_seconds,
         )
-    raise ValueError(f"unknown --diarize-backend {backend!r} (use ecapa|pyannote)")
+    raise ValueError(f"unknown --diarize-backend {backend!r} (use accurate|ecapa|pyannote)")
 
 
 # --- Whisper workers ---------------------------------------------------------
@@ -1265,6 +1521,7 @@ def whisper_worker(
     speaker_margin: float,
     open_set: bool,
     enroll_seconds: float = 8.0,
+    pcm_ring: Optional[PcmRing] = None,
 ) -> None:
     t_load = time.time()
     openai_model = None
@@ -1306,6 +1563,7 @@ def whisper_worker(
                 speaker_margin=speaker_margin,
                 open_set=open_set,
                 enroll_seconds=enroll_seconds,
+                ring=pcm_ring,
             )
         except Exception as e:
             print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
@@ -1354,7 +1612,13 @@ def whisper_worker(
 
             who = ""
             if is_final and speakers is not None:
-                who = speakers.label(_pcm_to_float32(seg))
+                seg_dur = len(seg) / float(SAMPLE_RATE * BYTES_PER_SAMPLE)
+                t_end = now
+                t_start = t_end - max(0.3, seg_dur)
+                if hasattr(speakers, "label_span"):
+                    who = speakers.label_span(t_start, t_end)
+                else:
+                    who = speakers.label(_pcm_to_float32(seg))
 
             ts = datetime.now().strftime("%H:%M:%S")
             ms = (time.time() - t0) * 1000
@@ -1370,6 +1634,9 @@ def whisper_worker(
                 print(f"[{ts}] {src_tag}… {text}  ({ms:.0f} ms partial)", flush=True)
         except Exception as e:
             print(f"[whisper] {e}", file=sys.stderr, flush=True)
+
+    if speakers is not None and hasattr(speakers, "stop"):
+        speakers.stop()
 
 
 def main() -> int:
@@ -1419,11 +1686,11 @@ def main() -> int:
     )
     ap.add_argument(
         "--diarize-backend",
-        choices=("ecapa", "pyannote"),
-        default="ecapa",
-        help="Live labels: ecapa=ECAPA enroll/match (default, best on Mini); "
-        "pyannote=HF embedding gallery (needs HF_TOKEN). "
-        "For offline NeMo/whisper-diarization quality use scripts/sense_diarize_offline.sh",
+        choices=("accurate", "ecapa", "pyannote"),
+        default="accurate",
+        help="accurate=sliding pyannote on PCM ring (default, live+accurate, needs HF_TOKEN); "
+        "ecapa=enroll/match; pyannote=per-utterance gallery. "
+        "Full-file WhisperX: scripts/sense_whisperx.sh",
     )
     ap.add_argument(
         "--partials",
@@ -1502,6 +1769,12 @@ def main() -> int:
                 "(best accuracy: --enroll-you / --enroll-other WAVs)",
                 flush=True,
             )
+    elif args.diarize and args.diarize_backend == "accurate":
+        print(
+            "[diarize] accurate live — sliding pyannote on continuous PCM "
+            "(set HF_TOKEN; no enroll; first voice→YOU, next→OTHER)",
+            flush=True,
+        )
     elif args.diarize and args.diarize_backend == "pyannote":
         print(
             "[diarize] pyannote: embedding gallery — first distinct voice→YOU, next→OTHER "
@@ -1512,7 +1785,13 @@ def main() -> int:
     backend = _pick_backend(args.backend)
     openai_device = _pick_openai_device(args.device) if backend == "openai" else "n/a"
     stop = threading.Event()
-    seg_q: queue.Queue = queue.Queue(maxsize=max(1, args.queue))
+    qsize = max(1, args.queue)
+    if args.diarize and args.diarize_backend == "accurate":
+        qsize = max(qsize, 4)
+    seg_q: queue.Queue = queue.Queue(maxsize=qsize)
+
+    global _PCM_RING
+    _PCM_RING = PcmRing(seconds=24.0) if (args.diarize and args.diarize_backend == "accurate") else None
 
     if args.url:
         pcm_iter = iter_http_pcm(args.url, stop)
@@ -1574,6 +1853,7 @@ def main() -> int:
             args.speaker_margin,
             args.open_set,
             args.enroll_seconds,
+            _PCM_RING,
         ),
         name="whisper",
         daemon=True,
