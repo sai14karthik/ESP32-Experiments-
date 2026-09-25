@@ -1522,11 +1522,30 @@ def whisper_worker(
     open_set: bool,
     enroll_seconds: float = 8.0,
     pcm_ring: Optional[PcmRing] = None,
+    ready: Optional[threading.Event] = None,
 ) -> None:
     t_load = time.time()
     openai_model = None
     mlx_repo = ""
     speakers = None
+
+    # Load diarize BEFORE Whisper so the segment queue isn't drained/dropped during pyannote download
+    if diarize:
+        try:
+            speakers = make_speaker_tracker(
+                diarize_backend,
+                max_speakers=max_speakers,
+                enrollments=enrollments or None,
+                enroll_live=enroll_live,
+                sim_threshold=sim_threshold,
+                speaker_margin=speaker_margin,
+                open_set=open_set,
+                enroll_seconds=enroll_seconds,
+                ring=pcm_ring,
+            )
+        except Exception as e:
+            print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
+            speakers = None
 
     if backend == "mlx":
         mlx_repo = _mlx_repo(model_name)
@@ -1552,22 +1571,8 @@ def whisper_worker(
             flush=True,
         )
 
-    if diarize:
-        try:
-            speakers = make_speaker_tracker(
-                diarize_backend,
-                max_speakers=max_speakers,
-                enrollments=enrollments or None,
-                enroll_live=enroll_live,
-                sim_threshold=sim_threshold,
-                speaker_margin=speaker_margin,
-                open_set=open_set,
-                enroll_seconds=enroll_seconds,
-                ring=pcm_ring,
-            )
-        except Exception as e:
-            print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
-            speakers = None
+    if ready is not None:
+        ready.set()
 
     last_partial = ""
     last_final = ""
@@ -1787,7 +1792,7 @@ def main() -> int:
     stop = threading.Event()
     qsize = max(1, args.queue)
     if args.diarize and args.diarize_backend == "accurate":
-        qsize = max(qsize, 4)
+        qsize = max(qsize, 8)
     seg_q: queue.Queue = queue.Queue(maxsize=qsize)
 
     global _PCM_RING
@@ -1835,6 +1840,7 @@ def main() -> int:
 
     print(f"[backend] {backend}" + (f" / {openai_device}" if backend == "openai" else " / Metal"), flush=True)
 
+    ready = threading.Event()
     worker = threading.Thread(
         target=whisper_worker,
         args=(
@@ -1854,11 +1860,15 @@ def main() -> int:
             args.open_set,
             args.enroll_seconds,
             _PCM_RING,
+            ready,
         ),
         name="whisper",
         daemon=True,
     )
+    # Load diarize+Whisper first; then open capture so we don't drop segments during model load
     worker.start()
+    if not ready.wait(timeout=300):
+        print("[whisper] model load timed out — starting capture anyway", file=sys.stderr, flush=True)
     capture.start()
 
     try:
