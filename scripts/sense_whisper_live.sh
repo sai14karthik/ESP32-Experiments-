@@ -15,6 +15,10 @@
 #   Live enroll — averages ~8s speech (several phrases), not a single 3s clip:
 #     ./scripts/sense_whisper_live.sh --ip 10.128.93.15 --diarize-backend ecapa
 #
+# Accurate / capture ALL audio (WhisperX batch — prefer CUDA GPU):
+#   ./scripts/sense_record_pcm.sh --ip 10.128.93.15 -o session.wav
+#   ./scripts/sense_whisperx.sh session.wav
+#
 # Offline NeMo/whisper-diarization (recorded WAV, CUDA): ./scripts/sense_diarize_offline.sh
 #
 # Default (no args) = 10.128.93.34
