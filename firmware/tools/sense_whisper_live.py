@@ -1851,8 +1851,11 @@ def whisper_worker(
                 expect_speakers=expect_speakers,
             )
         except Exception as e:
-            _diag(f"[diarize] disabled ({e})")
+            # Always visible — quiet mode was hiding "diarize disabled" → no [YOU]/[OTHER]
+            print(f"[diarize] off ({e})", file=sys.stderr, flush=True)
             speakers = None
+        else:
+            print("[diarize] on", flush=True)
 
     if backend == "mlx":
         mlx_repo = _mlx_repo(model_name)
@@ -1927,10 +1930,17 @@ def whisper_worker(
                 # Use VAD finalize time (not now) — Whisper lag was skewing labels on YT
                 t_end = float(seg_t_end)
                 t_start = t_end - max(0.3, seg_dur)
-                if hasattr(speakers, "label_span"):
-                    who = speakers.label_span(t_start, t_end)
-                else:
-                    who = speakers.label(_pcm_to_float32(seg))
+                try:
+                    if hasattr(speakers, "label_span"):
+                        who = speakers.label_span(t_start, t_end) or ""
+                    else:
+                        who = speakers.label(_pcm_to_float32(seg)) or ""
+                except Exception as e:
+                    _diag(f"[diarize] label failed: {e}")
+                    who = getattr(speakers, "_last_name", "") or "YOU"
+                # Never drop the tag while diarize is on (empty string hid [YOU])
+                if not who:
+                    who = getattr(speakers, "_last_name", None) or "YOU"
 
             ts = datetime.now().strftime("%H:%M:%S")
             # Clean caption line only — no ms / progress spam
