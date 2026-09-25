@@ -3,11 +3,9 @@
 #
 #   export HF_TOKEN=…   # accept pyannote/speaker-diarization-community-1
 #   ./scripts/sense_whisper_live.sh --ip 10.128.93.15
-#
-# Same script covers: live talk, YouTube, one or two speakers.
-# Optional WAV seeds (better lock): --enroll-you me.wav --enroll-other them.wav
-# Optional hard force: --expect-speakers 2   (usually unnecessary)
-#
+# Quiet captions only by default. Diagnostics: --verbose
+# Optional WAV seeds: --enroll-you me.wav --enroll-other them.wav
+
 # Boards:
 #   ./scripts/sense_whisper_live.sh --ip 10.128.93.34
 #   ./scripts/sense_whisper_live.sh --ip 10.128.93.25,10.128.93.34

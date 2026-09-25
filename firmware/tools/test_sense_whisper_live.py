@@ -159,24 +159,20 @@ def test_ip_ports() -> None:
 def test_cluster_kwargs_universal() -> None:
     print("\n[_cluster_kwargs universal]")
     t = skeleton_tracker()
-    # tick 1,2 → open; tick 3 → probe force 2
     t._tick = 1
     kw = t._cluster_kwargs()
-    check("tick1 open", "min_speakers" in kw and kw["max_speakers"] == 2, str(kw))
+    check("tick1 open 1..2", kw.get("min_speakers") == 1 and kw.get("max_speakers") == 2, str(kw))
     t._tick = 3
-    kw = t._cluster_kwargs()
-    check("tick3 probe num=2", kw.get("num_speakers") == 2, str(kw))
     t._force_two = True
-    t._tick = 1
     kw = t._cluster_kwargs()
-    check("force_two locks", kw.get("num_speakers") == 2, str(kw))
+    check("never force-2 without CLI", kw.get("num_speakers") is None, str(kw))
+    check("still open range", kw.get("min_speakers") == 1, str(kw))
 
     t2 = skeleton_tracker(expect_speakers=2)
     check("CLI force", t2._cluster_kwargs().get("num_speakers") == 2)
 
     t3 = skeleton_tracker(expect_speakers=0)
     check("expect 0 → auto", t3.expect_speakers is None)
-    t3._tick = 1
     check("expect 0 open", "min_speakers" in t3._cluster_kwargs())
 
 
@@ -184,18 +180,17 @@ def test_dual_evidence() -> None:
     print("\n[_note_dual_evidence]")
     t = skeleton_tracker()
     a, b = unit(), unit()
-    # make them clearly different
     while float(np.dot(a, b)) > 0.3:
         b = unit()
     labels = ["SPEAKER_00", "SPEAKER_01"]
     emb = {"SPEAKER_00": a, "SPEAKER_01": b}
     dur = {"SPEAKER_00": 4.0, "SPEAKER_01": 3.0}
     t._note_dual_evidence(labels, emb, dur)
-    check("hit1 no lock yet", t._force_two is False and t._two_spk_hits == 1)
     t._note_dual_evidence(labels, emb, dur)
-    check("hit2 locks dual", t._force_two is True, f"hits={t._two_spk_hits}")
+    check("2 hits no lock yet", t._force_two is False and t._two_spk_hits == 2)
+    t._note_dual_evidence(labels, emb, dur)
+    check("3 hits locks dual", t._force_two is True, f"hits={t._two_spk_hits}")
 
-    # same-voice split should not count
     t4 = skeleton_tracker()
     same = unit()
     t4._note_dual_evidence(
@@ -235,7 +230,7 @@ def test_map_window_exclusive() -> None:
     check("SPEAKER_01→YOU", m["SPEAKER_01"] == "YOU", str(m))
     check("SPEAKER_00→OTHER", m["SPEAKER_00"] == "OTHER", str(m))
 
-    # Collapse case: both look like YOU → split forces OTHER
+    # Collapse case: both look like YOU → stay YOU (do NOT invent OTHER)
     t2 = skeleton_tracker(sim_threshold=0.45)
     t2._add_gallery("YOU", you)
     emb2 = {
@@ -243,8 +238,8 @@ def test_map_window_exclusive() -> None:
         "SPEAKER_01": near(you, 0.03),
     }
     m2 = t2._map_window(["SPEAKER_00", "SPEAKER_01"], emb2, {"SPEAKER_00": 3.0, "SPEAKER_01": 2.5})
-    check("collapse split distinct", m2["SPEAKER_00"] != m2["SPEAKER_01"], str(m2))
-    check("OTHER created", "OTHER" in t2._names)
+    check("solo collapse stays YOU", m2["SPEAKER_00"] == "YOU" and m2["SPEAKER_01"] == "YOU", str(m2))
+    check("OTHER not invented", "OTHER" not in t2._names, str(t2._names))
 
 
 def test_map_window_first_voices() -> None:
@@ -454,40 +449,39 @@ def test_stress_map_random() -> None:
     print("\n[stress map 50 windows]")
     rng = np.random.default_rng(7)
     t = skeleton_tracker(sim_threshold=0.48)
-    collapses = 0
+    false_other = 0
     for i in range(50):
-        if len(t._names) < 2:
-            a, b = unit(32), unit(32)
-            while float(np.dot(a, b)) > 0.25:
-                b = unit(32)
-            emb = {"SPEAKER_00": a, "SPEAKER_01": b}
-        else:
-            # mix of correct + noisy
-            yi = t._names.index("YOU") if "YOU" in t._names else 0
-            oi = t._names.index("OTHER") if "OTHER" in t._names else min(1, len(t._centroids) - 1)
-            emb = {
-                "SPEAKER_00": near(t._centroids[oi], 0.08),
-                "SPEAKER_01": near(t._centroids[yi], 0.08),
-            }
-            if rng.random() < 0.15:
-                # adversarial near-collapse
-                emb["SPEAKER_00"] = near(t._centroids[yi], 0.05)
-                emb["SPEAKER_01"] = near(t._centroids[yi], 0.06)
+        if len(t._names) < 1:
+            a = unit(32)
+            emb = {"SPEAKER_00": a}
+            m = t._map_window(["SPEAKER_00"], emb, {"SPEAKER_00": 3.0})
+            check("cold YOU", m["SPEAKER_00"] == "YOU", str(m))
+            continue
+        yi = 0
+        you_c = t._centroids[yi]
+        # Solo talk: pyannote sometimes returns 2 labels of SAME voice
+        emb = {
+            "SPEAKER_00": near(you_c, 0.05),
+            "SPEAKER_01": near(you_c, 0.06),
+        }
         m = t._map_window(
             ["SPEAKER_00", "SPEAKER_01"],
             emb,
             {"SPEAKER_00": 2.0 + rng.random(), "SPEAKER_01": 2.0 + rng.random()},
         )
-        if m.get("SPEAKER_00") == m.get("SPEAKER_01"):
-            collapses += 1
-        t._note_dual_evidence(
-            ["SPEAKER_00", "SPEAKER_01"],
-            emb,
-            {"SPEAKER_00": 2.0, "SPEAKER_01": 2.0},
-        )
-    check("no persistent collapse", collapses == 0, f"collapses={collapses}")
-    check("gallery ≤ max", len(t._names) <= t.max_speakers, str(t._names))
-    check("force_two after stress", t._force_two is True)
+        if "OTHER" in t._names and all(
+            float(np.dot(near(you_c, 0.05), c)) > 0.7
+            for c in t._centroids
+            if c.size >= 2
+        ):
+            # OTHER exists but everything still looks like YOU → bad
+            false_other += 1
+        if m.get("SPEAKER_00") != "YOU" or m.get("SPEAKER_01") != "YOU":
+            # with only YOU in gallery and same-voice embs, both must be YOU
+            if len(t._names) == 1:
+                false_other += 1
+    check("solo never invents OTHER", "OTHER" not in t._names, str(t._names))
+    check("solo labels stay YOU", false_other == 0, f"false={false_other}")
 
 
 def main() -> int:
