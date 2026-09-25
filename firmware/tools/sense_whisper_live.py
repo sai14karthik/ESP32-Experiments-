@@ -239,7 +239,7 @@ def iter_udp_pcm(port: int, stop: threading.Event, host: str = "127.0.0.1") -> I
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
     sock.settimeout(0.5)
-    print(f"[capture] listening udp://{host}:{port}", file=sys.stderr, flush=True)
+    _diag(f"[capture] listening udp://{host}:{port}")
     try:
         while not stop.is_set():
             try:
@@ -631,7 +631,7 @@ def capture_loop(
     partial_ms: int = 0,
 ) -> None:
     vad = LiveVad(threshold_db=threshold_db, partial_ms=partial_ms)
-    print(f"[vad] {_vad_banner(vad)}", file=sys.stderr, flush=True)
+    _diag(f"[vad] {_vad_banner(vad)}")
     pending = bytearray()
     bytes_in = 0
     t0 = time.time()
@@ -693,18 +693,14 @@ def capture_loop_udp_ports(
         vad = LiveVad(threshold_db=threshold_db, partial_ms=partial_ms)
         socks.append(sock)
         sock_meta[sock.fileno()] = (port, label, vad, bytearray(), [0, time.time()])
-        print(f"[capture] listening udp://{host}:{port} ({label})", file=sys.stderr, flush=True)
+        _diag(f"[capture] listening udp://{host}:{port} ({label})")
 
     if not socks:
         print("[capture] no UDP ports bound", file=sys.stderr, flush=True)
         return
 
     sample_vad = next(iter(sock_meta.values()))[2]
-    print(
-        f"[vad] {_vad_banner(sample_vad)} ×{len(socks)} sources",
-        file=sys.stderr,
-        flush=True,
-    )
+    _diag(f"[vad] {_vad_banner(sample_vad)} ×{len(socks)} sources")
 
     try:
         while not stop.is_set():
@@ -1316,7 +1312,7 @@ class AccurateLiveTracker:
         self.refresh_s = refresh_s
         self.sim_threshold = sim_threshold
         self.margin = 0.06
-        # None / ≤0 → universal auto. N≥2 → always force N.
+        # None / ≤0 → auto 1..max. N≥1 → force N.
         if expect_speakers is not None and expect_speakers <= 0:
             self.expect_speakers: Optional[int] = None
         else:
@@ -1336,7 +1332,7 @@ class AccurateLiveTracker:
         self._two_spk_hits = 0
         self._force_two = bool(self.expect_speakers and self.expect_speakers >= 2)
 
-        print(f"[diarize] loading {model_id} (accurate live window) …", flush=True)
+        _diag(f"[diarize] loading {model_id} …")
         try:
             self._pipeline = Pipeline.from_pretrained(model_id, token=token)
         except TypeError:
@@ -1351,7 +1347,7 @@ class AccurateLiveTracker:
         try:
             self._pipeline.to(device)
         except Exception as e:
-            print(f"[diarize] pipeline.to({device}) failed ({e}); default device", flush=True)
+            _diag(f"[diarize] pipeline.to({device}) failed ({e}); default device")
             device = torch.device("cpu")
 
         try:
@@ -1364,7 +1360,7 @@ class AccurateLiveTracker:
             )
             id_tag = "ECAPA identity"
         except Exception as e:
-            print(f"[diarize] ECAPA unavailable ({e}); using pyannote embeddings", flush=True)
+            _diag(f"[diarize] ECAPA unavailable ({e}); using pyannote embeddings")
             id_tag = "pyannote embeddings"
 
         # Optional WAV seeds — same flags as ECAPA mode, works on default path
@@ -1374,29 +1370,22 @@ class AccurateLiveTracker:
             try:
                 emb = self._ecapa_embed(_load_mono_16k(path))
             except Exception as e:
-                print(f"[diarize] enroll skip {name} ({e})", file=sys.stderr, flush=True)
+                _diag(f"[diarize] enroll skip {name} ({e})")
                 continue
             if emb is None:
-                print(f"[diarize] enroll skip {name}: could not embed {path}", file=sys.stderr, flush=True)
+                _diag(f"[diarize] enroll skip {name}: could not embed {path}")
                 continue
             self._add_gallery(str(name).upper(), emb)
             self._last_name = str(name).upper()
-            print(f"[diarize] seeded {name.upper()} from {path}", flush=True)
+            _diag(f"[diarize] seeded {name.upper()} from {path}")
         if len(self._names) >= 2:
             self._force_two = True
 
         self._thread = threading.Thread(target=self._loop, name="accurate-diarize", daemon=True)
         self._thread.start()
-        mode = (
-            f"force={self.expect_speakers}"
-            if self.expect_speakers and self.expect_speakers > 0
-            else "auto live/YT"
-        )
-        print(
-            f"[diarize] on (accurate @ {device}, {id_tag}, window={window_s:.0f}s, "
-            f"refresh={refresh_s:.1f}s, max {self.max_speakers}, {mode}; "
-            f"gallery={self._names or 'empty→first voice YOU'})",
-            flush=True,
+        _diag(
+            f"[diarize] on @ {device}, {id_tag}, window={window_s:.0f}s, "
+            f"max {self.max_speakers}, gallery={self._names or 'empty'}"
         )
 
     def stop(self) -> None:
@@ -1687,7 +1676,7 @@ class AccurateLiveTracker:
                     window_turns.sort(key=lambda x: x[0])
                     self._merge_turns(window_turns, t_start, t_end)
             except Exception as e:
-                print(f"[diarize] accurate refresh failed: {e}", file=sys.stderr, flush=True)
+                _diag(f"[diarize] accurate refresh failed: {e}")
             self._stop.wait(self.refresh_s)
 
     def label(self, audio_f32: np.ndarray) -> str:
@@ -1862,19 +1851,16 @@ def whisper_worker(
                 expect_speakers=expect_speakers,
             )
         except Exception as e:
-            print(f"[diarize] disabled ({e})", file=sys.stderr, flush=True)
+            _diag(f"[diarize] disabled ({e})")
             speakers = None
 
     if backend == "mlx":
         mlx_repo = _mlx_repo(model_name)
-        print(f"[whisper] loading MLX Metal model {mlx_repo} …", flush=True)
+        _diag(f"[whisper] loading MLX {mlx_repo} …")
         _transcribe_mlx(np.zeros(SAMPLE_RATE, dtype=np.float32), mlx_repo, language)
-        print(
-            f"[whisper] ready on Apple Metal (MLX) in {time.time() - t_load:.1f}s — speak near Sense mic",
-            flush=True,
-        )
+        _diag(f"[whisper] ready in {time.time() - t_load:.1f}s")
     else:
-        print(f"[whisper] loading openai-whisper {model_name} on {openai_device}…", flush=True)
+        _diag(f"[whisper] loading openai-whisper {model_name} on {openai_device}…")
         if openai_device == "cpu":
             print(
                 "[whisper] WARNING: running on CPU (slow). Prefer: uv sync --group whisper (mlx-whisper)",
@@ -1884,13 +1870,11 @@ def whisper_worker(
         import whisper
 
         openai_model = whisper.load_model(model_name, device=openai_device)
-        print(
-            f"[whisper] ready on {openai_device} in {time.time() - t_load:.1f}s — speak near Sense mic",
-            flush=True,
-        )
+        _diag(f"[whisper] ready in {time.time() - t_load:.1f}s")
 
     if ready is not None:
         ready.set()
+    print("[ready]", flush=True)
 
     last_partial = ""
     last_final = ""
@@ -2018,9 +2002,8 @@ def main() -> int:
         "--diarize-backend",
         choices=("accurate", "ecapa", "pyannote"),
         default="accurate",
-        help="accurate=default universal path (live talk + YT + optional WAV seeds, needs HF_TOKEN); "
-        "ecapa=enroll-only matcher; pyannote=per-utterance gallery. "
-        "Full-file WhisperX: scripts/sense_whisperx.sh",
+        help="accurate=default (needs HF_TOKEN); ecapa=enroll matcher; pyannote=per-clip gallery. "
+        "Batch: scripts/sense_whisperx.sh",
     )
     ap.add_argument(
         "--partials",
@@ -2112,25 +2095,15 @@ def main() -> int:
     if args.diarize and args.diarize_backend == "ecapa":
         enroll_live = bool(args.enroll_live) or not enrollments
         if enroll_live and not enrollments:
-            print(
+            _diag(
                 "[diarize] no enroll WAVs — live enroll averages ~"
-                f"{args.enroll_seconds:.0f}s speech per person "
-                "(best accuracy: --enroll-you / --enroll-other WAVs)",
-                flush=True,
+                f"{args.enroll_seconds:.0f}s speech per person"
             )
     elif args.diarize and args.diarize_backend == "accurate":
         seed = f", seeded={sorted(enrollments)}" if enrollments else ""
-        print(
-            "[diarize] universal accurate — live talk / YT / 1–2 speakers auto "
-            f"(HF_TOKEN; optional --enroll-you/--enroll-other{seed})",
-            flush=True,
-        )
+        _diag(f"[diarize] accurate{seed}")
     elif args.diarize and args.diarize_backend == "pyannote":
-        print(
-            "[diarize] pyannote: embedding gallery — first distinct voice→YOU, next→OTHER "
-            "(set HF_TOKEN; speak then play YT so voices differ)",
-            flush=True,
-        )
+        _diag("[diarize] pyannote gallery")
 
     backend = _pick_backend(args.backend)
     openai_device = _pick_openai_device(args.device) if backend == "openai" else "n/a"
@@ -2145,7 +2118,7 @@ def main() -> int:
 
     if args.url:
         pcm_iter = iter_http_pcm(args.url, stop)
-        print(f"[source] HTTP {args.url}", flush=True)
+        _diag(f"[source] HTTP {args.url}")
         capture = threading.Thread(
             target=capture_loop,
             args=(pcm_iter, seg_q, stop, args.vad_db, "", partial_ms),
@@ -2154,7 +2127,7 @@ def main() -> int:
         )
     elif args.rtsp:
         pcm_iter = iter_rtsp_pcm(args.rtsp, stop)
-        print(f"[source] RTSP {args.rtsp}", flush=True)
+        _diag(f"[source] RTSP {args.rtsp}")
         capture = threading.Thread(
             target=capture_loop,
             args=(pcm_iter, seg_q, stop, args.vad_db, "", partial_ms),
@@ -2164,7 +2137,7 @@ def main() -> int:
     elif args.pcm_udp is not None:
         label = _port_label(args.pcm_udp)
         pcm_iter = iter_udp_pcm(args.pcm_udp, stop)
-        print(f"[source] UDP pcm :{args.pcm_udp} ({label})", flush=True)
+        _diag(f"[source] UDP pcm :{args.pcm_udp} ({label})")
         capture = threading.Thread(
             target=capture_loop,
             args=(pcm_iter, seg_q, stop, args.vad_db, label, partial_ms),
@@ -2175,7 +2148,7 @@ def main() -> int:
         # Default: wearable Sense 10.128.93.34 — override with --ip
         ip_spec = args.ip or "10.128.93.34"
         ports, desc = _resolve_ips(ip_spec)
-        print(f"[source] --ip {ip_spec} → UDP {ports} ({desc})", flush=True)
+        _diag(f"[source] --ip {ip_spec} → UDP {ports} ({desc})")
         capture = threading.Thread(
             target=capture_loop_udp_ports,
             args=(ports, seg_q, stop, args.vad_db, "127.0.0.1", partial_ms),
@@ -2183,7 +2156,7 @@ def main() -> int:
             daemon=True,
         )
 
-    print(f"[backend] {backend}" + (f" / {openai_device}" if backend == "openai" else " / Metal"), flush=True)
+    _diag(f"[backend] {backend}" + (f" / {openai_device}" if backend == "openai" else " / Metal"))
 
     ready = threading.Event()
     worker = threading.Thread(
