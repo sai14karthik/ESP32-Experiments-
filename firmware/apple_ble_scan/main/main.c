@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "host/ble_hs.h"
 #include "host/ble_store.h"
+#include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -15,7 +16,12 @@
 
 static const char *TAG = "apple_scan";
 
-#define MAX_SEEN 24
+/* nRF Connect advertiser: A1B2C3D4-E5F6-7890-ABCD-EF1234567890 */
+static const ble_uuid128_t PHONE_UUID = BLE_UUID128_INIT(
+    0x90, 0x78, 0x56, 0x34, 0x12, 0xef, 0xcd, 0xab,
+    0x90, 0x78, 0xf6, 0xe5, 0xd4, 0xc3, 0xb2, 0xa1);
+
+#define MAX_SEEN 64
 #define PRINT_GAP_US (2LL * 1000 * 1000)
 #define FRESH_US (10LL * 1000 * 1000)
 
@@ -62,9 +68,21 @@ static const char *kind_name(uint8_t kind)
         return "Nearby";
     case 0x12:
         return "FindMy";
+    case 0xA1:
+        return "Phone";
     default:
         return "Apple";
     }
+}
+
+static bool uuid_list_has_phone(const ble_uuid128_t *list, uint8_t count)
+{
+    for (uint8_t i = 0; i < count; i++) {
+        if (ble_uuid_cmp(&list[i].u, &PHONE_UUID.u) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static uint8_t pick_kind(const uint8_t *msg, uint8_t len)
@@ -89,11 +107,18 @@ static uint8_t pick_kind(const uint8_t *msg, uint8_t len)
     return first;
 }
 
+static bool slot_is_phone(const seen_t *slot)
+{
+    return slot->kind == 0x10 || slot->kind == 0xA1;
+}
+
 static seen_t *find_slot(const uint8_t addr[6])
 {
     seen_t *free_slot = NULL;
-    int64_t oldest = INT64_MAX;
-    seen_t *oldest_slot = &s_seen[0];
+    int64_t oldest_other = INT64_MAX;
+    seen_t *oldest_other_slot = NULL;
+    int64_t oldest_phone = INT64_MAX;
+    seen_t *oldest_phone_slot = &s_seen[0];
 
     for (int i = 0; i < MAX_SEEN; i++) {
         if (s_seen[i].used && memcmp(s_seen[i].addr, addr, 6) == 0) {
@@ -102,15 +127,25 @@ static seen_t *find_slot(const uint8_t addr[6])
         if (!s_seen[i].used && free_slot == NULL) {
             free_slot = &s_seen[i];
         }
-        if (s_seen[i].used && s_seen[i].last_seen < oldest) {
-            oldest = s_seen[i].last_seen;
-            oldest_slot = &s_seen[i];
+        if (!s_seen[i].used) {
+            continue;
+        }
+        if (!slot_is_phone(&s_seen[i]) && s_seen[i].last_seen < oldest_other) {
+            oldest_other = s_seen[i].last_seen;
+            oldest_other_slot = &s_seen[i];
+        }
+        if (s_seen[i].last_seen < oldest_phone) {
+            oldest_phone = s_seen[i].last_seen;
+            oldest_phone_slot = &s_seen[i];
         }
     }
     if (free_slot != NULL) {
         return free_slot;
     }
-    return oldest_slot;
+    if (oldest_other_slot != NULL) {
+        return oldest_other_slot;
+    }
+    return oldest_phone_slot;
 }
 
 static void note_apple(const uint8_t addr[6], int8_t rssi, uint8_t kind)
@@ -136,7 +171,8 @@ static void note_apple(const uint8_t addr[6], int8_t rssi, uint8_t kind)
     taskEXIT_CRITICAL(&s_mux);
 
     if (print) {
-        ESP_LOGI(TAG, "APPLE rssi=%d addr=%02x:%02x:%02x:%02x:%02x:%02x kind=%s",
+        ESP_LOGI(TAG, "%s rssi=%d addr=%02x:%02x:%02x:%02x:%02x:%02x kind=%s",
+                 (kind == 0xA1 || kind == 0x10) ? "PHONE" : "APPLE",
                  rssi,
                  addr[5], addr[4], addr[3], addr[2], addr[1], addr[0],
                  kind_name(kind));
@@ -152,6 +188,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         return 0;
     }
     if (ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data) != 0) {
+        return 0;
+    }
+    if (uuid_list_has_phone(fields.uuids128, fields.num_uuids128) ||
+        uuid_list_has_phone(fields.sol_uuids128, fields.sol_num_uuids128)) {
+        note_apple(event->disc.addr.val, event->disc.rssi, 0xA1);
         return 0;
     }
     if (fields.mfg_data == NULL || fields.mfg_data_len < 2) {
@@ -186,7 +227,7 @@ static void start_scan(void)
         ESP_LOGE(TAG, "scan failed rc=%d", rc);
         return;
     }
-    ESP_LOGI(TAG, "listening for Apple BLE (company 0x004C). Keep the iPhone Bluetooth on.");
+    ESP_LOGI(TAG, "listening for all Apple types; Nearby is every phone");
 }
 
 static void on_reset(int reason)
@@ -212,9 +253,9 @@ static void host_task(void *param)
 
 static void heartbeat(void *arg)
 {
-    int apple = 0;
-    int nearby = 0;
-    int8_t best = -127;
+    int phones = 0;
+    int specific = 0;
+    int8_t best_specific = -127;
     int64_t now = esp_timer_get_time();
 
     (void)arg;
@@ -223,20 +264,22 @@ static void heartbeat(void *arg)
         if (!s_seen[i].used || now - s_seen[i].last_seen > FRESH_US) {
             continue;
         }
-        apple++;
         if (s_seen[i].kind == 0x10) {
-            nearby++;
-        }
-        if (s_seen[i].rssi > best) {
-            best = s_seen[i].rssi;
+            phones++;
+        } else if (s_seen[i].kind == 0xA1) {
+            specific++;
+            if (s_seen[i].rssi > best_specific) {
+                best_specific = s_seen[i].rssi;
+            }
         }
     }
     taskEXIT_CRITICAL(&s_mux);
 
-    if (apple == 0) {
-        ESP_LOGI(TAG, "SCAN apple=0");
+    ESP_LOGI(TAG, "SCAN nearby=%d", phones);
+    if (specific == 0) {
+        ESP_LOGI(TAG, "SCAN phone=0");
     } else {
-        ESP_LOGI(TAG, "SCAN apple=%d nearby=%d best_rssi=%d", apple, nearby, best);
+        ESP_LOGI(TAG, "SCAN phone=%d rssi=%d", specific, best_specific);
     }
 }
 
