@@ -126,6 +126,55 @@ def to_display(frame: np.ndarray, scale: float) -> np.ndarray:
     )
 
 
+def fit_center(
+    frame: np.ndarray,
+    canvas_w: int,
+    canvas_h: int,
+    *,
+    bg: tuple[int, int, int] = (18, 18, 18),
+) -> np.ndarray:
+    """
+    Scale video to fit inside canvas (letterbox/pillarbox) and center it.
+    Fixes OpenCV fullscreen leaving the picture stuck in the top-left.
+    """
+    canvas_w = max(160, int(canvas_w))
+    canvas_h = max(120, int(canvas_h))
+    fh, fw = frame.shape[:2]
+    if fh < 1 or fw < 1:
+        return np.full((canvas_h, canvas_w, 3), bg, dtype=np.uint8)
+
+    scale = min(canvas_w / fw, canvas_h / fh)
+    nw = max(1, int(round(fw * scale)))
+    nh = max(1, int(round(fh * scale)))
+    interp = cv2.INTER_LINEAR if scale >= 1.0 else cv2.INTER_AREA
+    resized = cv2.resize(frame, (nw, nh), interpolation=interp)
+
+    canvas = np.full((canvas_h, canvas_w, 3), bg, dtype=np.uint8)
+    x0 = (canvas_w - nw) // 2
+    y0 = (canvas_h - nh) // 2
+    canvas[y0 : y0 + nh, x0 : x0 + nw] = resized
+    return canvas
+
+
+def window_canvas_size(
+    win: str,
+    fallback_w: int,
+    fallback_h: int,
+    img_w: int,
+    img_h: int,
+) -> tuple[int, int]:
+    """Use live window size when resized/fullscreen; else fallback canvas."""
+    try:
+        # (x, y, w, h) — available on most OpenCV builds
+        _x, _y, ww, wh = cv2.getWindowImageRect(win)
+        if ww >= 200 and wh >= 150:
+            return int(ww), int(wh)
+    except Exception:
+        pass
+    # Prefer at least the image size so we don't shrink needlessly
+    return max(fallback_w, img_w), max(fallback_h, img_h)
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Patient room: count people + pose + activity"
@@ -182,7 +231,26 @@ def parse_args() -> argparse.Namespace:
         default=float(os.environ.get("POSE_VIEW_SCALE", "0")),
         help="display scale factor (0=auto; e.g. 2.0 doubles Sense)",
     )
+    ap.add_argument(
+        "--canvas",
+        default=os.environ.get("POSE_CANVAS", "1280x720"),
+        help="display canvas WxH; video is centered (fullscreen-friendly). 0x0=off",
+    )
     return ap.parse_args()
+
+
+def parse_canvas(spec: str) -> tuple[int, int]:
+    """'1280x720' → (1280, 720); '0x0' or empty → (0, 0) disables letterbox."""
+    raw = (spec or "").strip().lower()
+    if not raw or raw in ("0", "0x0", "off", "none"):
+        return 0, 0
+    if "x" not in raw:
+        return 1280, 720
+    a, b = raw.split("x", 1)
+    try:
+        return max(0, int(a)), max(0, int(b))
+    except ValueError:
+        return 1280, 720
 
 
 def resolve_source(raw: str):
@@ -337,6 +405,10 @@ def main() -> None:
                 results_iter, use_ids = _start_stream(predict_kw, False)
 
     win = "Patient pose + activity (q quit)"
+    canvas_w, canvas_h = parse_canvas(args.canvas)
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    if canvas_w > 0 and canvas_h > 0:
+        cv2.resizeWindow(win, canvas_w, canvas_h)
     t0 = time.time()
     n = 0
 
@@ -469,6 +541,11 @@ def main() -> None:
                 cv2.LINE_AA,
             )
         view = to_display(frame, lay["scale"])
+        if canvas_w > 0 and canvas_h > 0:
+            cw, ch = window_canvas_size(
+                win, canvas_w, canvas_h, view.shape[1], view.shape[0]
+            )
+            view = fit_center(view, cw, ch)
         cv2.imshow(win, view)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             return False

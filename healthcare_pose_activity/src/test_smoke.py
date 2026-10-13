@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from activity import ALL_ACTIVITIES, ActivityTracker, classify_frame  # noqa: E402
 from filters import draw_person, filter_person_indices  # noqa: E402
-from live_infer import ACTIVITY_COLOR, to_display, view_layout  # noqa: E402
+from live_infer import ACTIVITY_COLOR, fit_center, to_display, view_layout  # noqa: E402
 from mjpeg import is_mjpeg_url, is_rtsp_url  # noqa: E402
 from patients import PersonView, infer_role, summarize  # noqa: E402
 from test_activity import (  # noqa: E402
@@ -80,6 +80,22 @@ def test_to_display() -> None:
     same = to_display(img, 1.0)
     assert same.shape == img.shape
     print("to_display OK")
+
+
+def test_fit_center() -> None:
+    img = np.full((320, 480, 3), 80, dtype=np.uint8)
+    canvas = fit_center(img, 1280, 720)
+    assert canvas.shape == (720, 1280, 3)
+    # video should be centered — middle of canvas not background-only
+    mid = canvas[360, 640]
+    assert int(mid.sum()) > 0
+    # corners stay near background
+    assert int(canvas[0, 0].sum()) < 80
+    # widescreen canvas with tall content → pillarbox left/right
+    tall = np.full((640, 360, 3), 90, dtype=np.uint8)
+    c2 = fit_center(tall, 1280, 720)
+    assert c2.shape == (720, 1280, 3)
+    print("fit_center OK: 480x320 → centered in 1280x720")
 
 
 def test_filters_and_draw() -> None:
@@ -244,6 +260,7 @@ def main() -> None:
     test_url_detect()
     test_view_layout_matrix()
     test_to_display()
+    test_fit_center()
     test_filters_and_draw()
     test_overlay_pipeline_all_sizes()
     test_activity_tracker_burst()
