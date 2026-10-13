@@ -6,3 +6,4 @@ __pycache__/
 runs/
 *.pyc
 .DS_Store
+tmp_smoke*.png

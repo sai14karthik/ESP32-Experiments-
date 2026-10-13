@@ -14,12 +14,13 @@ from patients import PersonView, infer_role, summarize
 
 def _blank() -> np.ndarray:
     k = np.zeros((17, 3), dtype=float)
-    k[:, 2] = 0.9
+    # conf=0 until a joint is set (avoids draw lines to origin)
     return k
 
 
 def standing_kpts(dx: float = 0.0) -> np.ndarray:
     k = _blank()
+    k[0] = [240 + dx, 80, 0.9]
     k[5], k[6] = [200 + dx, 120, 0.9], [280 + dx, 120, 0.9]
     k[11], k[12] = [210 + dx, 260, 0.9], [270 + dx, 260, 0.9]
     k[13], k[14] = [215 + dx, 360, 0.9], [265 + dx, 360, 0.9]
@@ -29,6 +30,7 @@ def standing_kpts(dx: float = 0.0) -> np.ndarray:
 
 def sitting_kpts() -> np.ndarray:
     k = _blank()
+    k[0] = [240, 100, 0.9]
     k[5], k[6] = [200, 140, 0.9], [280, 140, 0.9]
     k[11], k[12] = [210, 280, 0.9], [270, 280, 0.9]
     k[13], k[14] = [180, 340, 0.9], [300, 340, 0.9]
@@ -38,6 +40,7 @@ def sitting_kpts() -> np.ndarray:
 
 def lying_kpts() -> np.ndarray:
     k = _blank()
+    k[0] = [80, 230, 0.9]
     k[5], k[6] = [120, 200, 0.9], [120, 260, 0.9]
     k[11], k[12] = [320, 205, 0.9], [320, 255, 0.9]
     k[13], k[14] = [400, 210, 0.9], [400, 250, 0.9]
@@ -49,8 +52,6 @@ def upper_only_kpts() -> np.ndarray:
     k = _blank()
     k[0] = [240, 80, 0.9]
     k[5], k[6] = [200, 140, 0.9], [280, 140, 0.9]
-    for i in (11, 12, 13, 14, 15, 16):
-        k[i] = [0, 0, 0.0]
     return k
 
 

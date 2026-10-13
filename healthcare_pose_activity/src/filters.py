@@ -126,10 +126,12 @@ def draw_person(
     for j in range(17):
         c = float(kpts[j, 2]) if kpts.shape[1] >= 3 else 1.0
         confs.append(c)
-        if c < thr:
+        x, y = float(kpts[j, 0]), float(kpts[j, 1])
+        # Skip low-conf or unset (0,0) joints — avoids lines to image origin
+        if c < thr or (x < 1.0 and y < 1.0):
             pts.append(None)
         else:
-            pts.append((int(kpts[j, 0]), int(kpts[j, 1])))
+            pts.append((int(x), int(y)))
 
     for a, b in SKELETON:
         if pts[a] is not None and pts[b] is not None:

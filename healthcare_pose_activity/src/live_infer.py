@@ -37,7 +37,6 @@ ACTIVITY_COLOR = {
     "unknown": (120, 120, 120),
 }
 assert set(ALL_ACTIVITIES) <= set(ACTIVITY_COLOR), "missing activity colors"
-HUD_H = 110
 
 # Ultralytics YOLO26-pose quality presets (COCO Keypoints mAP50-95 e2e)
 QUALITY = {
@@ -71,8 +70,60 @@ QUALITY = {
 DEFAULT_QUALITY = "accurate"
 
 
-def hud_safe_top() -> int:
-    return HUD_H + 4
+def view_layout(
+    fw: int,
+    fh: int,
+    *,
+    view_width: int = 0,
+    view_scale: float = 0.0,
+) -> dict:
+    """
+    Dynamic HUD + display scale for any source size
+    (Sense 480×320, webcam 720p/1080p, RTSP, etc.).
+    """
+    # Status strip ~5% of frame height (never dominate the picture)
+    hud_h = int(np.clip(round(fh * 0.055), 20, 52))
+    font = float(np.clip(fh / 720.0, 0.32, 0.75))
+    tag_font = float(np.clip(fh / 800.0, 0.35, 0.65))
+    thick = 2 if fh >= 720 else 1
+    status_y = max(14, int(hud_h * 0.72))
+    max_chars = max(40, fw // 7)
+
+    if view_scale and view_scale > 0:
+        scale = float(view_scale)
+    elif view_width and view_width > 0:
+        scale = float(view_width) / max(1, fw)
+    else:
+        # Auto: bump tiny ESP/MJPEG; leave HD alone; gently shrink ultra-wide
+        if fw < 640:
+            scale = 960.0 / fw
+        elif fw < 900:
+            scale = 1100.0 / fw
+        elif fw > 1920:
+            scale = 1600.0 / fw
+        else:
+            scale = 1.0
+
+    return {
+        "hud_h": hud_h,
+        "font": font,
+        "tag_font": tag_font,
+        "thick": thick,
+        "status_y": status_y,
+        "max_chars": max_chars,
+        "scale": scale,
+    }
+
+
+def to_display(frame: np.ndarray, scale: float) -> np.ndarray:
+    if abs(scale - 1.0) < 0.02:
+        return frame
+    fh, fw = frame.shape[:2]
+    return cv2.resize(
+        frame,
+        (max(1, int(fw * scale)), max(1, int(fh * scale))),
+        interpolation=cv2.INTER_LINEAR if scale > 1 else cv2.INTER_AREA,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,6 +170,18 @@ def parse_args() -> argparse.Namespace:
         "--no-half",
         action="store_true",
         help="disable FP16 (slower, sometimes more stable on MPS)",
+    )
+    ap.add_argument(
+        "--view-width",
+        type=int,
+        default=int(os.environ.get("POSE_VIEW_WIDTH", "0")),
+        help="display width in px (0=auto from source size)",
+    )
+    ap.add_argument(
+        "--view-scale",
+        type=float,
+        default=float(os.environ.get("POSE_VIEW_SCALE", "0")),
+        help="display scale factor (0=auto; e.g. 2.0 doubles Sense)",
     )
     return ap.parse_args()
 
@@ -285,6 +348,12 @@ def main() -> None:
         frame = r.orig_img.copy()
         people: list[PersonView] = []
         fh, fw = frame.shape[:2]
+        lay = view_layout(
+            fw,
+            fh,
+            view_width=args.view_width,
+            view_scale=args.view_scale,
+        )
         counts = {lab: 0 for lab in ALL_ACTIVITIES}
 
         if (
@@ -331,25 +400,28 @@ def main() -> None:
                         if role == "patient"
                         else ("other" if role == "visitor_or_staff" else "unk")
                     )
-                    tag = f"ID{tid} {role_short} | {st.label} {st.confidence:.2f}"
+                    tag = f"ID{tid} {role_short}|{st.label}"
+                    font_sc = lay["tag_font"]
+                    thick = lay["thick"]
                     (tw, th), _ = cv2.getTextSize(
-                        tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+                        tag, cv2.FONT_HERSHEY_SIMPLEX, font_sc, thick
                     )
-                    pad = 4
-                    ty1 = max(hud_safe_top(), y1 - th - 2 * pad)
-                    if ty1 < hud_safe_top():
-                        ty1 = min(y2 + 2, fh - th - 2 * pad)
+                    pad = max(2, fh // 160)
+                    hud_h = lay["hud_h"]
+                    ty1 = max(hud_h + 2, min(y1 + 2, max(0, y2 - th - 2 * pad)))
                     ty2 = ty1 + th + 2 * pad
                     tx2 = min(fw - 1, x1 + tw + 2 * pad)
-                    cv2.rectangle(frame, (x1, ty1), (tx2, ty2), color, -1)
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (x1, ty1), (tx2, ty2), color, -1)
+                    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
                     cv2.putText(
                         frame,
                         tag,
-                        (x1 + pad, ty2 - pad - 2),
+                        (x1 + pad, ty2 - pad - 1),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
+                        font_sc,
                         (255, 255, 255),
-                        2,
+                        thick,
                         cv2.LINE_AA,
                     )
                 if len(trackers) > 32:
@@ -361,63 +433,53 @@ def main() -> None:
         for p in scene.people:
             counts[p.activity.label] = counts.get(p.activity.label, 0) + 1
 
-        cv2.rectangle(
-            frame, (0, 0), (min(frame.shape[1], 720), HUD_H), (20, 20, 20), -1
-        )
-        line1 = (
-            f"People: {scene.people_count}   Patients: {scene.patients}   "
-            f"Other: {scene.others}"
-        )
-        line2 = (
+        fps = n / max(1e-3, time.time() - t0)
+        hud_h = lay["hud_h"]
+        hud = frame.copy()
+        cv2.rectangle(hud, (0, 0), (fw, hud_h), (15, 15, 15), -1)
+        cv2.addWeighted(hud, 0.55, frame, 0.45, 0, frame)
+        status = (
+            f"P:{scene.people_count} pat:{scene.patients}  "
             f"stand:{counts['standing']} sit:{counts['sitting']} "
             f"walk:{counts['walking']} lie:{counts['lying']} "
-            f"fall:{counts['fall_suspected']}"
+            f"fall:{counts['fall_suspected']}  {fps:.0f}fps"
         )
         if scene.people:
-            line3 = ", ".join(
-                f"ID{p.track_id}:{p.activity.label}" for p in scene.people[:5]
+            status += "  |  " + ",".join(
+                f"{p.track_id}:{p.activity.label}" for p in scene.people[:4]
             )
-        else:
-            line3 = f"{model_name} | standing|sitting|walking|lying|fall  (q quit)"
         cv2.putText(
-            frame, line1, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
-        )
-        cv2.putText(
-            frame, line2, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 2, cv2.LINE_AA
-        )
-        cv2.putText(
-            frame, line3[:95], (12, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1, cv2.LINE_AA
+            frame,
+            status[: lay["max_chars"]],
+            (8, lay["status_y"]),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            lay["font"],
+            (240, 240, 240),
+            lay["thick"],
+            cv2.LINE_AA,
         )
         if scene.fall_alerts:
             cv2.putText(
                 frame,
-                "FALL SUSPECTED — check patient",
-                (12, HUD_H + 28),
+                "FALL SUSPECTED",
+                (8, hud_h + max(18, fh // 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
+                max(lay["font"], 0.55),
                 (0, 0, 255),
-                2,
+                max(lay["thick"], 2),
                 cv2.LINE_AA,
             )
-        fps = n / max(1e-3, time.time() - t0)
-        cv2.putText(
-            frame,
-            f"{fps:.1f} FPS",
-            (frame.shape[1] - 110, 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.imshow(win, frame)
+        view = to_display(frame, lay["scale"])
+        cv2.imshow(win, view)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             return False
         if n % 30 == 0:
             acts = {lab: counts[lab] for lab in ALL_ACTIVITIES if counts[lab]}
             print(
                 f"people={scene.people_count} patients={scene.patients} "
-                f"acts={acts} falls={scene.fall_alerts} fps={fps:.1f}",
+                f"acts={acts} falls={scene.fall_alerts} fps={fps:.1f} "
+                f"src={fw}x{fh} view={view.shape[1]}x{view.shape[0]} "
+                f"scale={lay['scale']:.2f}",
                 flush=True,
             )
         return True
