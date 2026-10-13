@@ -1,4 +1,4 @@
-"""Synthetic checks for literature-aligned activity rules."""
+"""Synthetic checks for all healthcare activities including walking."""
 from __future__ import annotations
 
 import sys
@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from activity import ActivityTracker, classify_frame
+from activity import ALL_ACTIVITIES, ActivityTracker, classify_frame
 from patients import PersonView, infer_role, summarize
 
 
@@ -18,12 +18,12 @@ def _blank() -> np.ndarray:
     return k
 
 
-def standing_kpts() -> np.ndarray:
+def standing_kpts(dx: float = 0.0) -> np.ndarray:
     k = _blank()
-    k[5], k[6] = [200, 120, 0.9], [280, 120, 0.9]
-    k[11], k[12] = [210, 260, 0.9], [270, 260, 0.9]
-    k[13], k[14] = [215, 360, 0.9], [265, 360, 0.9]
-    k[15], k[16] = [220, 460, 0.9], [260, 460, 0.9]
+    k[5], k[6] = [200 + dx, 120, 0.9], [280 + dx, 120, 0.9]
+    k[11], k[12] = [210 + dx, 260, 0.9], [270 + dx, 260, 0.9]
+    k[13], k[14] = [215 + dx, 360, 0.9], [265 + dx, 360, 0.9]
+    k[15], k[16] = [220 + dx, 460, 0.9], [260 + dx, 460, 0.9]
     return k
 
 
@@ -59,7 +59,6 @@ def test_classify() -> None:
     assert s.label == "standing", s
     sit = classify_frame(sitting_kpts(), box=(160, 100, 320, 380), frame_hw=(720, 1280))
     assert sit.label == "sitting", sit
-    # wide bbox → lying
     ly_box = classify_frame(
         standing_kpts(), box=(50, 300, 500, 420), frame_hw=(720, 1280)
     )
@@ -71,6 +70,32 @@ def test_classify() -> None:
     )
     assert up.label == "standing", up
     print("classify_frame OK:", s.label, sit.label, ly_box.label, ly.label, up.label)
+
+
+def test_walking() -> None:
+    """Sideways walk + toward-camera walk must both register as walking."""
+    t = ActivityTracker(window=20, walk_speed=0.022, walk_confirm=2)
+    st = None
+    for i in range(14):
+        dx = i * 28.0  # ~person-height fraction per few frames
+        box = (180 + dx, 80, 300 + dx, 500)
+        st = t.update(standing_kpts(dx=dx), box=box, frame_hw=(720, 1280))
+    assert st is not None and st.label == "walking", st
+    print("walking sideways OK:", st.detail)
+
+    t2 = ActivityTracker(window=20, walk_speed=0.022, walk_confirm=2)
+    st2 = None
+    for i in range(14):
+        # toward camera: box grows + hip moves down slightly (not sideways)
+        scale = 1.0 + i * 0.04
+        cx, cy = 240, 290
+        half_w, half_h = 60 * scale, 210 * scale
+        box = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+        k = standing_kpts(dx=0)
+        k[:, 1] += i * 6  # slight vertical centroid shift
+        st2 = t2.update(k, box=box, frame_hw=(720, 1280))
+    assert st2 is not None and st2.label == "walking", st2
+    print("walking toward-camera OK:", st2.detail)
 
 
 def test_fall() -> None:
@@ -86,17 +111,35 @@ def test_fall() -> None:
     print("fall_suspected OK:", st.detail)
 
 
+def test_all_labels_covered() -> None:
+    assert "walking" in ALL_ACTIVITIES
+    assert set(ALL_ACTIVITIES) == {
+        "standing",
+        "sitting",
+        "walking",
+        "lying",
+        "fall_suspected",
+        "unknown",
+    }
+    print("ALL_ACTIVITIES OK:", ALL_ACTIVITIES)
+
+
 def test_scene() -> None:
+    from activity import ActivityState
+
     t1, t2 = ActivityTracker(), ActivityTracker()
     a1 = t1.update(lying_kpts(), box=(50, 300, 500, 420), frame_hw=(720, 1280))
     a2 = t2.update(standing_kpts(), box=(180, 80, 300, 500), frame_hw=(720, 1280))
+    a3 = ActivityState("walking", 0.8, "forced")
     people = [
         PersonView(1, a1, infer_role(a1, primary=True), (0, 0, 100, 80), 8000),
         PersonView(2, a2, infer_role(a2, primary=False), (0, 0, 50, 120), 6000),
+        PersonView(3, a3, infer_role(a3, primary=False), (0, 0, 60, 140), 7000),
     ]
     sc = summarize(people)
-    assert sc.people_count == 2
+    assert sc.people_count == 3
     assert sc.patients >= 1
+    assert any(p.activity.label == "walking" for p in sc.people)
     print(
         "scene OK:",
         f"people={sc.people_count} patients={sc.patients}",
@@ -105,7 +148,9 @@ def test_scene() -> None:
 
 
 if __name__ == "__main__":
+    test_all_labels_covered()
     test_classify()
+    test_walking()
     test_fall()
     test_scene()
     print("ALL_UNIT_OK")

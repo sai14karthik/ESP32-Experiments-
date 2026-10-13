@@ -20,7 +20,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from activity import ActivityTracker  # noqa: E402
+from activity import ALL_ACTIVITIES, ActivityTracker  # noqa: E402
 from filters import draw_person, filter_person_indices  # noqa: E402
 from patients import PersonView, infer_role, summarize  # noqa: E402
 
@@ -32,7 +32,8 @@ ACTIVITY_COLOR = {
     "fall_suspected": (0, 0, 255),
     "unknown": (120, 120, 120),
 }
-HUD_H = 88
+assert set(ALL_ACTIVITIES) <= set(ACTIVITY_COLOR), "missing activity colors"
+HUD_H = 110
 
 
 def hud_safe_top() -> int:
@@ -225,20 +226,32 @@ def main() -> None:
                                 del trackers[dead]
 
             scene = summarize(people)
-            # HUD
-            cv2.rectangle(frame, (0, 0), (min(frame.shape[1], 640), HUD_H), (20, 20, 20), -1)
+            # HUD — all activities: standing / sitting / walking / lying / fall
+            cv2.rectangle(frame, (0, 0), (min(frame.shape[1], 720), HUD_H), (20, 20, 20), -1)
             line1 = f"People: {scene.people_count}   Patients: {scene.patients}   Other: {scene.others}"
-            line2 = f"Fall alerts: {scene.fall_alerts}"
+            counts = {lab: 0 for lab in ALL_ACTIVITIES}
+            for p in scene.people:
+                counts[p.activity.label] = counts.get(p.activity.label, 0) + 1
+            line2 = (
+                f"stand:{counts['standing']} sit:{counts['sitting']} "
+                f"walk:{counts['walking']} lie:{counts['lying']} "
+                f"fall:{counts['fall_suspected']}"
+            )
             if scene.people:
                 acts = ", ".join(
-                    f"ID{p.track_id}:{p.activity.label}" for p in scene.people[:6]
+                    f"ID{p.track_id}:{p.activity.label}" for p in scene.people[:5]
                 )
-                line2 += f"   |  {acts}"
+                line3 = acts
+            else:
+                line3 = "labels: standing | sitting | walking | lying | fall_suspected"
             cv2.putText(
-                frame, line1, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2, cv2.LINE_AA
+                frame, line1, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
             )
             cv2.putText(
-                frame, line2[:90], (12, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 220, 255), 2, cv2.LINE_AA
+                frame, line2, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 2, cv2.LINE_AA
+            )
+            cv2.putText(
+                frame, line3[:95], (12, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1, cv2.LINE_AA
             )
 
             if scene.fall_alerts:
@@ -270,9 +283,10 @@ def main() -> None:
                 break
 
             if n % 30 == 0:
+                acts = {lab: counts[lab] for lab in ALL_ACTIVITIES if counts[lab]}
                 print(
                     f"people={scene.people_count} patients={scene.patients} "
-                    f"falls={scene.fall_alerts} fps={fps:.1f}",
+                    f"acts={acts} falls={scene.fall_alerts} fps={fps:.1f}",
                     flush=True,
                 )
     finally:

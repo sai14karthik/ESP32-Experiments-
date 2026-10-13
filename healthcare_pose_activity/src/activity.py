@@ -21,6 +21,16 @@ import numpy as np
 NOSE, L_SHO, R_SHO, L_HIP, R_HIP = 0, 5, 6, 11, 12
 L_KNEE, R_KNEE, L_ANK, R_ANK = 13, 14, 15, 16
 
+# Full healthcare label set (live HUD + roles must cover all of these)
+ALL_ACTIVITIES = (
+    "standing",
+    "sitting",
+    "walking",
+    "lying",
+    "fall_suspected",
+    "unknown",
+)
+
 
 @dataclass
 class ActivityState:
@@ -185,14 +195,14 @@ def classify_frame(
 
 
 class ActivityTracker:
-    """Temporal smoothing + walking / fall_suspected."""
+    """Temporal smoothing + walking / fall_suspected for all ALL_ACTIVITIES labels."""
 
     def __init__(
         self,
         window: int = 20,
         fall_frames: int = 8,
-        walk_speed: float = 0.035,  # fraction of bbox height per frame
-        walk_confirm: int = 3,
+        walk_speed: float = 0.022,  # fraction of bbox height per frame
+        walk_confirm: int = 2,
     ):
         self.window = window
         self.fall_frames = fall_frames
@@ -203,6 +213,7 @@ class ActivityTracker:
         self.tilts: Deque[float] = deque(maxlen=window)
         self.centers: Deque[np.ndarray] = deque(maxlen=12)
         self.box_hs: Deque[float] = deque(maxlen=12)
+        self.ankles: Deque[np.ndarray] = deque(maxlen=12)
         self.walk_hits = 0
         self._ema: dict[str, float] = {}
         self._last = ActivityState()
@@ -214,8 +225,9 @@ class ActivityTracker:
         frame_hw: Optional[tuple[int, int]] = None,
     ) -> ActivityState:
         frame = classify_frame(kpts, box=box, frame_hw=frame_hw)
-        hip = _mid(_pt(kpts, L_HIP, 0.45), _pt(kpts, R_HIP, 0.45))
+        hip = _mid(_pt(kpts, L_HIP, 0.35), _pt(kpts, R_HIP, 0.35))
         sho = _mid(_pt(kpts, L_SHO), _pt(kpts, R_SHO))
+        ank = _mid(_pt(kpts, L_ANK, 0.3), _pt(kpts, R_ANK, 0.3))
         tilt = (
             _torso_tilt_deg(sho, hip)
             if sho is not None and hip is not None
@@ -232,6 +244,8 @@ class ActivityTracker:
             self.hips.clear()
         if not np.isnan(tilt):
             self.tilts.append(tilt)
+        if ank is not None:
+            self.ankles.append(ank.copy())
 
         if box is not None:
             x1, y1, x2, y2 = box
@@ -240,16 +254,18 @@ class ActivityTracker:
             self.centers.append(c)
             self.box_hs.append(bh)
 
-        # Fall first
+        # Fall first (overrides all)
         fall = self._fall_suspected()
         if fall:
             st = ActivityState("fall_suspected", 0.85, fall)
             self._last = st
             return st
 
-        # Walking: normalized centroid speed (not raw pixel jitter)
-        if (not upper_only) and hip is not None and self._is_walking():
-            st = ActivityState("walking", 0.75, "centroid_velocity")
+        # Walking before EMA so motion is not smoothed into standing
+        if (not upper_only) and frame.label not in ("lying",) and self._is_walking():
+            st = ActivityState("walking", 0.78, "centroid_velocity")
+            self.labels[-1] = "walking"
+            self._ema["walking"] = self._ema.get("walking", 0.0) + 0.4
             self._last = st
             return st
 
@@ -257,17 +273,17 @@ class ActivityTracker:
             self._last = frame
             return frame
 
-        # EMA over recent labels (stable output)
+        # EMA over recent labels (standing / sitting / lying)
         st = self._smooth(frame)
         self._last = st
         return st
 
     def _smooth(self, frame: ActivityState) -> ActivityState:
-        # decay and boost current
+        # decay and boost current (walking handled only by _is_walking)
         for k in list(self._ema.keys()):
             self._ema[k] *= 0.85
-        self._ema[frame.label] = self._ema.get(frame.label, 0.0) + 0.35
-        # also count window majority lightly
+        if frame.label != "walking":
+            self._ema[frame.label] = self._ema.get(frame.label, 0.0) + 0.35
         if self.labels:
             vals, counts = np.unique(np.array(self.labels), return_counts=True)
             for v, c in zip(vals, counts):
@@ -276,32 +292,68 @@ class ActivityTracker:
                     continue
                 self._ema[lab] = self._ema.get(lab, 0.0) + 0.05 * float(c)
 
-        best = max(self._ema.items(), key=lambda kv: kv[1])
+        candidates = {k: v for k, v in self._ema.items() if k != "walking"}
+        if not candidates:
+            return frame
+        best = max(candidates.items(), key=lambda kv: kv[1])
         lab, score = best[0], best[1]
-        if lab == "walking":
-            lab = frame.label if frame.label != "unknown" else "standing"
         conf = float(min(0.95, max(frame.confidence, score / 2.0)))
         detail = frame.detail if lab == frame.label else f"ema={lab}"
         return ActivityState(lab, conf, detail)
 
     def _is_walking(self) -> bool:
-        if len(self.centers) < 6 or len(self.box_hs) < 6:
-            self.walk_hits = max(0, self.walk_hits - 1)
-            return False
-        standingish = sum(1 for x in self.labels if x in ("standing", "walking"))
-        if standingish < max(4, len(self.labels) // 2):
+        """
+        Walking = upright-ish + sustained body motion (any direction).
+        Sideways OR toward/away camera both count (prior bug: horizontal-only).
+        """
+        if len(self.centers) < 5 or len(self.box_hs) < 5:
             self.walk_hits = max(0, self.walk_hits - 1)
             return False
 
-        # displacement over last ~5 steps, normalized by median bbox height
+        # Allow gait with slight knee bend (sitting flicker while stepping)
+        mobile = sum(
+            1 for x in self.labels if x in ("standing", "walking", "unknown")
+        )
+        lyingish = sum(1 for x in self.labels if x in ("lying", "fall_suspected"))
+        if lyingish >= 3 or mobile < max(3, len(self.labels) // 3):
+            self.walk_hits = max(0, self.walk_hits - 1)
+            return False
+
         cs = list(self.centers)
-        hs = float(np.median(list(self.box_hs)))
-        disp = float(np.linalg.norm(cs[-1] - cs[-6])) / hs
-        # require mostly horizontal motion
-        dxy = cs[-1] - cs[-6]
-        horiz = abs(float(dxy[0])) >= abs(float(dxy[1])) * 0.9
+        bhs = list(self.box_hs)
+        hs = max(1.0, float(np.median(bhs)))
+        # short + medium windows (sideways / diagonal)
+        d_short = float(np.linalg.norm(cs[-1] - cs[-4])) / hs
+        d_med = float(np.linalg.norm(cs[-1] - cs[max(0, len(cs) - 7)])) / hs
 
-        if disp > self.walk_speed * 5 and horiz:
+        # toward / away camera: bbox height changes while upright
+        scale_ok = False
+        if len(bhs) >= 6:
+            rel = abs(bhs[-1] - bhs[-6]) / max(1.0, float(np.mean(bhs[-6:])))
+            scale_ok = rel > 0.08  # ~8% size change over ~6 frames
+
+        # hip path (more stable than box jitter)
+        hip_ok = False
+        if len(self.hips) >= 5:
+            hips = list(self.hips)
+            d_hip = float(np.linalg.norm(hips[-1] - hips[-5])) / hs
+            hip_ok = d_hip > self.walk_speed * 3.5
+
+        # ankle stride (legs moving even if torso slow)
+        ank_ok = False
+        if len(self.ankles) >= 5:
+            anks = list(self.ankles)
+            d_ank = float(np.linalg.norm(anks[-1] - anks[-5])) / hs
+            ank_ok = d_ank > self.walk_speed * 4.0
+
+        moving = (
+            d_short > self.walk_speed * 3.0
+            or d_med > self.walk_speed * 5.0
+            or scale_ok
+            or hip_ok
+            or ank_ok
+        )
+        if moving:
             self.walk_hits += 1
         else:
             self.walk_hits = max(0, self.walk_hits - 1)
