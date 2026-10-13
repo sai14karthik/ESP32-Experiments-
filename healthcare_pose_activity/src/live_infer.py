@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from activity import ALL_ACTIVITIES, ActivityTracker  # noqa: E402
 from filters import draw_person, filter_person_indices  # noqa: E402
+from mjpeg import is_mjpeg_url, iter_mjpeg  # noqa: E402
 from patients import PersonView, infer_role, summarize  # noqa: E402
 
 ACTIVITY_COLOR = {
@@ -162,10 +163,26 @@ def resolve_profile(args: argparse.Namespace) -> dict:
 def use_half(device: str, disabled: bool) -> bool:
     if disabled:
         return False
-    # FP16 speeds CUDA and usually MPS; skip on CPU
-    return device in ("mps", "0", "cuda") or (
+    # FP16: CUDA yes; MPS often flaky / deprecated path in ultralytics — skip MPS
+    return device in ("0", "cuda") or (
         isinstance(device, str) and device.isdigit()
     )
+
+
+def _infer_kwargs(profile: dict, device: str, half: bool) -> dict:
+    kw = dict(
+        conf=profile["conf"],
+        imgsz=profile["imgsz"],
+        device=device,
+        verbose=False,
+        show=False,
+        classes=[0],
+        max_det=10,
+        nms=False,
+    )
+    if half:
+        kw["half"] = True
+    return kw
 
 
 def main() -> None:
@@ -196,242 +213,244 @@ def main() -> None:
     except Exception as e:
         print(f"fuse skipped ({e})", flush=True)
 
-    # Warmup — first real frame otherwise spikes latency
+    infer_kw = _infer_kwargs(profile, device, half)
+    # Warmup
     try:
         dummy = np.zeros((profile["imgsz"], profile["imgsz"], 3), dtype=np.uint8)
-        _ = model.predict(
-            dummy,
-            imgsz=profile["imgsz"],
-            device=device,
-            half=half,
-            verbose=False,
-            conf=profile["conf"],
-            classes=[0],
-            max_det=10,
-        )
+        _ = model.predict(dummy, **infer_kw)
         print("warmup done", flush=True)
     except Exception as e:
         print(f"warmup skipped ({e}); continuing", flush=True)
-        half = False
+        infer_kw.pop("half", None)
+        infer_kw.pop("nms", None)
 
     trackers: dict[int, ActivityTracker] = {}
-
-    predict_kw = dict(
-        source=source,
-        stream=True,
-        conf=profile["conf"],
-        imgsz=profile["imgsz"],
-        device=device,
-        half=half,
-        verbose=False,
-        show=False,
-        classes=[0],  # person only
-        max_det=10,  # patient rooms: few people
-        # YOLO26 is NMS-free end-to-end; keep official setting when supported
-        nms=False,
-    )
-
-    def _start_stream(kw: dict, track: bool):
-        if track:
+    want_track = not args.no_track
+    use_ids = False
+    if want_track:
+        try:
             import lap  # noqa: F401
 
-            return model.track(**kw, persist=True, tracker=args.tracker), True
-        return model.predict(**kw), False
-
-    use_ids = False
-    want_track = not args.no_track
-    try:
-        results_iter, use_ids = _start_stream(predict_kw, want_track)
-        if use_ids:
+            use_ids = True
             print(f"tracker={args.tracker}", flush=True)
-    except TypeError:
-        # Older ultralytics may not accept nms=
-        predict_kw.pop("nms", None)
-        results_iter, use_ids = _start_stream(predict_kw, want_track)
-    except Exception as e:
-        print(f"track/predict failed ({e}); retry without nms / track", flush=True)
-        predict_kw.pop("nms", None)
+        except Exception as e:
+            print(f"track unavailable ({e}); per-frame IDs", flush=True)
+            use_ids = False
+
+    # ESP :81/stream — native MJPEG (OpenCV/ffmpeg usually times out)
+    mjpeg_mode = is_mjpeg_url(source)
+    results_iter = None
+    if mjpeg_mode:
+        print(f"mjpeg reader: {source}", flush=True)
+    else:
+        predict_kw = dict(source=source, stream=True, **infer_kw)
+
+        def _start_stream(kw: dict, track: bool):
+            if track:
+                return (
+                    model.track(
+                        **kw, persist=True, tracker=args.tracker
+                    ),
+                    True,
+                )
+            return model.predict(**kw), False
+
         try:
-            results_iter, use_ids = _start_stream(predict_kw, want_track)
-        except Exception as e2:
-            print(f"track unavailable ({e2}); predict only", flush=True)
-            results_iter, use_ids = _start_stream(predict_kw, False)
+            results_iter, use_ids = _start_stream(predict_kw, use_ids)
+        except TypeError:
+            predict_kw.pop("nms", None)
+            results_iter, use_ids = _start_stream(predict_kw, use_ids)
+        except Exception as e:
+            print(f"track/predict failed ({e}); retry", flush=True)
+            predict_kw.pop("nms", None)
+            try:
+                results_iter, use_ids = _start_stream(predict_kw, use_ids)
+            except Exception as e2:
+                print(f"track unavailable ({e2}); predict only", flush=True)
+                results_iter, use_ids = _start_stream(predict_kw, False)
 
     win = "Patient pose + activity (q quit)"
     t0 = time.time()
     n = 0
+
+    def handle_result(r) -> bool:
+        """Annotate one YOLO result; return False if user quit."""
+        nonlocal n
+        n += 1
+        frame = r.orig_img.copy()
+        people: list[PersonView] = []
+        fh, fw = frame.shape[:2]
+        counts = {lab: 0 for lab in ALL_ACTIVITIES}
+
+        if (
+            r.keypoints is not None
+            and len(r.keypoints) > 0
+            and r.boxes is not None
+            and len(r.boxes) > 0
+        ):
+            kdata = r.keypoints.data.cpu().numpy()
+            boxes = r.boxes.xyxy.cpu().numpy()
+            ids = None
+            if use_ids and r.boxes.id is not None:
+                ids = r.boxes.id.cpu().numpy().astype(int)
+
+            keep = filter_person_indices(kdata, boxes, (fh, fw))
+            if keep:
+                areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                primary_i = max(keep, key=lambda j: float(areas[j]))
+                seen_ids: set[int] = set()
+                for i in keep:
+                    tid = int(ids[i]) if ids is not None else i
+                    seen_ids.add(tid)
+                    if tid not in trackers:
+                        trackers[tid] = ActivityTracker()
+                    box = tuple(float(x) for x in boxes[i])
+                    st = trackers[tid].update(
+                        kdata[i], box=box, frame_hw=(fh, fw)
+                    )
+                    role = infer_role(st, primary=(i == primary_i))
+                    people.append(
+                        PersonView(
+                            track_id=tid,
+                            activity=st,
+                            role=role,
+                            box=box,
+                            area=float(areas[i]),
+                        )
+                    )
+                    color = ACTIVITY_COLOR.get(st.label, (120, 120, 120))
+                    draw_person(frame, boxes[i], kdata[i], color)
+                    x1, y1, x2, y2 = map(int, boxes[i])
+                    role_short = (
+                        "patient"
+                        if role == "patient"
+                        else ("other" if role == "visitor_or_staff" else "unk")
+                    )
+                    tag = f"ID{tid} {role_short} | {st.label} {st.confidence:.2f}"
+                    (tw, th), _ = cv2.getTextSize(
+                        tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+                    )
+                    pad = 4
+                    ty1 = max(hud_safe_top(), y1 - th - 2 * pad)
+                    if ty1 < hud_safe_top():
+                        ty1 = min(y2 + 2, fh - th - 2 * pad)
+                    ty2 = ty1 + th + 2 * pad
+                    tx2 = min(fw - 1, x1 + tw + 2 * pad)
+                    cv2.rectangle(frame, (x1, ty1), (tx2, ty2), color, -1)
+                    cv2.putText(
+                        frame,
+                        tag,
+                        (x1 + pad, ty2 - pad - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (255, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                if len(trackers) > 32:
+                    for dead in list(trackers.keys()):
+                        if dead not in seen_ids:
+                            del trackers[dead]
+
+        scene = summarize(people)
+        for p in scene.people:
+            counts[p.activity.label] = counts.get(p.activity.label, 0) + 1
+
+        cv2.rectangle(
+            frame, (0, 0), (min(frame.shape[1], 720), HUD_H), (20, 20, 20), -1
+        )
+        line1 = (
+            f"People: {scene.people_count}   Patients: {scene.patients}   "
+            f"Other: {scene.others}"
+        )
+        line2 = (
+            f"stand:{counts['standing']} sit:{counts['sitting']} "
+            f"walk:{counts['walking']} lie:{counts['lying']} "
+            f"fall:{counts['fall_suspected']}"
+        )
+        if scene.people:
+            line3 = ", ".join(
+                f"ID{p.track_id}:{p.activity.label}" for p in scene.people[:5]
+            )
+        else:
+            line3 = f"{model_name} | standing|sitting|walking|lying|fall  (q quit)"
+        cv2.putText(
+            frame, line1, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
+        )
+        cv2.putText(
+            frame, line2, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 2, cv2.LINE_AA
+        )
+        cv2.putText(
+            frame, line3[:95], (12, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1, cv2.LINE_AA
+        )
+        if scene.fall_alerts:
+            cv2.putText(
+                frame,
+                "FALL SUSPECTED — check patient",
+                (12, HUD_H + 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        fps = n / max(1e-3, time.time() - t0)
+        cv2.putText(
+            frame,
+            f"{fps:.1f} FPS",
+            (frame.shape[1] - 110, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.imshow(win, frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            return False
+        if n % 30 == 0:
+            acts = {lab: counts[lab] for lab in ALL_ACTIVITIES if counts[lab]}
+            print(
+                f"people={scene.people_count} patients={scene.patients} "
+                f"acts={acts} falls={scene.fall_alerts} fps={fps:.1f}",
+                flush=True,
+            )
+        return True
+
     try:
-        for r in results_iter:
-            n += 1
-            frame = r.orig_img.copy()
-            people: list[PersonView] = []
-            fh, fw = frame.shape[:2]
-            counts = {lab: 0 for lab in ALL_ACTIVITIES}
-
-            if (
-                r.keypoints is not None
-                and len(r.keypoints) > 0
-                and r.boxes is not None
-                and len(r.boxes) > 0
-            ):
-                kdata = r.keypoints.data.cpu().numpy()
-                boxes = r.boxes.xyxy.cpu().numpy()
-                ids = None
-                if use_ids and r.boxes.id is not None:
-                    ids = r.boxes.id.cpu().numpy().astype(int)
-
-                keep = filter_person_indices(kdata, boxes, (fh, fw))
-                if keep:
-                    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-                    primary_i = max(keep, key=lambda j: float(areas[j]))
-
-                    seen_ids: set[int] = set()
-                    for i in keep:
-                        tid = int(ids[i]) if ids is not None else i
-                        seen_ids.add(tid)
-                        if tid not in trackers:
-                            trackers[tid] = ActivityTracker()
-                        box = tuple(float(x) for x in boxes[i])
-                        st = trackers[tid].update(
-                            kdata[i], box=box, frame_hw=(fh, fw)
-                        )
-                        role = infer_role(st, primary=(i == primary_i))
-                        people.append(
-                            PersonView(
-                                track_id=tid,
-                                activity=st,
-                                role=role,
-                                box=box,
-                                area=float(areas[i]),
-                            )
-                        )
-
-                        color = ACTIVITY_COLOR.get(st.label, (120, 120, 120))
-                        draw_person(frame, boxes[i], kdata[i], color)
-                        x1, y1, x2, y2 = map(int, boxes[i])
-                        role_short = (
-                            "patient"
-                            if role == "patient"
-                            else ("other" if role == "visitor_or_staff" else "unk")
-                        )
-                        tag = f"ID{tid} {role_short} | {st.label} {st.confidence:.2f}"
-                        (tw, th), _ = cv2.getTextSize(
-                            tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
-                        )
-                        pad = 4
-                        ty1 = max(hud_safe_top(), y1 - th - 2 * pad)
-                        if ty1 < hud_safe_top():
-                            ty1 = min(y2 + 2, fh - th - 2 * pad)
-                        ty2 = ty1 + th + 2 * pad
-                        tx2 = min(fw - 1, x1 + tw + 2 * pad)
-                        cv2.rectangle(frame, (x1, ty1), (tx2, ty2), color, -1)
-                        cv2.putText(
+        if mjpeg_mode:
+            print("opening ESP MJPEG (first frame can take a few seconds)…", flush=True)
+            for frame in iter_mjpeg(str(source)):
+                try:
+                    if use_ids:
+                        out = model.track(
                             frame,
-                            tag,
-                            (x1 + pad, ty2 - pad - 2),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.55,
-                            (255, 255, 255),
-                            2,
-                            cv2.LINE_AA,
+                            persist=True,
+                            tracker=args.tracker,
+                            **infer_kw,
                         )
-
-                    if len(trackers) > 32:
-                        for dead in list(trackers.keys()):
-                            if dead not in seen_ids:
-                                del trackers[dead]
-
-            scene = summarize(people)
-            for p in scene.people:
-                counts[p.activity.label] = counts.get(p.activity.label, 0) + 1
-
-            cv2.rectangle(
-                frame, (0, 0), (min(frame.shape[1], 720), HUD_H), (20, 20, 20), -1
-            )
-            line1 = (
-                f"People: {scene.people_count}   Patients: {scene.patients}   "
-                f"Other: {scene.others}"
-            )
-            line2 = (
-                f"stand:{counts['standing']} sit:{counts['sitting']} "
-                f"walk:{counts['walking']} lie:{counts['lying']} "
-                f"fall:{counts['fall_suspected']}"
-            )
-            if scene.people:
-                line3 = ", ".join(
-                    f"ID{p.track_id}:{p.activity.label}" for p in scene.people[:5]
-                )
-            else:
-                line3 = (
-                    f"{model_name} | standing|sitting|walking|lying|fall  "
-                    f"(q quit)"
-                )
-            cv2.putText(
-                frame,
-                line1,
-                (12, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                line2,
-                (12, 56),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (200, 220, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                line3[:95],
-                (12, 84),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (180, 255, 180),
-                1,
-                cv2.LINE_AA,
-            )
-
-            if scene.fall_alerts:
-                cv2.putText(
-                    frame,
-                    "FALL SUSPECTED — check patient",
-                    (12, HUD_H + 28),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-            fps = n / max(1e-3, time.time() - t0)
-            cv2.putText(
-                frame,
-                f"{fps:.1f} FPS",
-                (frame.shape[1] - 110, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
-            cv2.imshow(win, frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-            if n % 30 == 0:
-                acts = {lab: counts[lab] for lab in ALL_ACTIVITIES if counts[lab]}
-                print(
-                    f"people={scene.people_count} patients={scene.patients} "
-                    f"acts={acts} falls={scene.fall_alerts} fps={fps:.1f}",
-                    flush=True,
-                )
+                    else:
+                        out = model.predict(frame, **infer_kw)
+                except TypeError:
+                    infer_kw.pop("nms", None)
+                    if use_ids:
+                        out = model.track(
+                            frame,
+                            persist=True,
+                            tracker=args.tracker,
+                            **infer_kw,
+                        )
+                    else:
+                        out = model.predict(frame, **infer_kw)
+                if not out:
+                    continue
+                if not handle_result(out[0]):
+                    break
+        else:
+            assert results_iter is not None
+            for r in results_iter:
+                if not handle_result(r):
+                    break
     finally:
         cv2.destroyAllWindows()
         print(f"stopped after {n} frames", flush=True)
