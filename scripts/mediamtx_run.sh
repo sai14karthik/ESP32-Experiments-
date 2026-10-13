@@ -221,4 +221,5 @@ echo "  rtsp://${HOST_LAN}:8554/deepstream" >&2
 echo "  MacBook via GPU jump: ssh -N -L 18554:10.128.93.13:8554 ojl1977@10.128.81.10" >&2
 echo "  then ffplay -rtsp_transport tcp rtsp://127.0.0.1:18554/deepstream" >&2
 
+
 exec mediamtx "$CONF_RT"
