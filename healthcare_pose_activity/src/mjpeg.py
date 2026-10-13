@@ -1,6 +1,7 @@
-"""ESP CameraWebServer MJPEG reader (OpenCV/ffmpeg often fails on :81/stream)."""
+"""ESP CameraWebServer MJPEG + RTSP frame readers (Ultralytics LoadStreams is flaky)."""
 from __future__ import annotations
 
+import os
 import socket
 import time
 import urllib.error
@@ -21,6 +22,53 @@ def is_mjpeg_url(source) -> bool:
         return False
     # ESP CameraWebServer paths
     return "/stream" in s or ":81" in s or "mjpeg" in s
+
+
+def is_rtsp_url(source) -> bool:
+    return isinstance(source, str) and source.lower().startswith("rtsp://")
+
+
+def iter_rtsp(
+    url: str,
+    *,
+    reconnect_s: float = 1.5,
+    max_failures: int = 60,
+) -> Iterator[np.ndarray]:
+    """
+    Pull RTSP frames with OpenCV over TCP (MediaMTX / cam_sense).
+    Avoids Ultralytics 'Waiting for stream 0' stalls.
+    """
+    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+    failures = 0
+    while True:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        if not cap.isOpened():
+            failures += 1
+            print(f"rtsp: open failed ({failures}); retry in {reconnect_s}s…", flush=True)
+            time.sleep(reconnect_s)
+            if failures >= max_failures:
+                raise ConnectionError(f"RTSP open failed: {url}")
+            continue
+        print(f"rtsp: connected {url}", flush=True)
+        failures = 0
+        empty = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                empty += 1
+                if empty >= 30:
+                    print("rtsp: no frames, reconnecting…", flush=True)
+                    break
+                time.sleep(0.05)
+                continue
+            empty = 0
+            yield frame
+        cap.release()
+        time.sleep(reconnect_s)
 
 
 def _decode_jpeg(buf: bytes) -> Optional[np.ndarray]:

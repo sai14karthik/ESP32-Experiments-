@@ -16,6 +16,9 @@ shift || true
 
 # accurate → yolo26m-pose (68.8 COCO pose mAP) — best live accuracy/speed on Mac
 export POSE_QUALITY="${POSE_QUALITY:-accurate}"
+# MediaMTX / ESP RTSP: force TCP (stops Ultralytics "Waiting for stream 0")
+export OPENCV_FFMPEG_CAPTURE_OPTIONS="${OPENCV_FFMPEG_CAPTURE_OPTIONS:-rtsp_transport;tcp}"
+
 # Optional hard override: POSE_MODEL=yolo26l-pose.pt
 ARGS=(--quality "$POSE_QUALITY")
 if [[ -n "${POSE_MODEL:-}" ]]; then

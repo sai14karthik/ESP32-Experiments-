@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from activity import ALL_ACTIVITIES, ActivityTracker  # noqa: E402
 from filters import draw_person, filter_person_indices  # noqa: E402
-from mjpeg import is_mjpeg_url, iter_mjpeg  # noqa: E402
+from mjpeg import is_mjpeg_url, is_rtsp_url, iter_mjpeg, iter_rtsp  # noqa: E402
 from patients import PersonView, infer_role, summarize  # noqa: E402
 
 ACTIVITY_COLOR = {
@@ -237,11 +237,16 @@ def main() -> None:
             print(f"track unavailable ({e}); per-frame IDs", flush=True)
             use_ids = False
 
-    # ESP :81/stream — native MJPEG (OpenCV/ffmpeg usually times out)
+    # Frame pullers for ESP MJPEG / MediaMTX RTSP (Ultralytics stream often stalls)
     mjpeg_mode = is_mjpeg_url(source)
+    rtsp_mode = is_rtsp_url(source)
+    frame_mode = mjpeg_mode or rtsp_mode
     results_iter = None
     if mjpeg_mode:
         print(f"mjpeg reader: {source}", flush=True)
+    elif rtsp_mode:
+        print(f"rtsp reader (TCP): {source}", flush=True)
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
     else:
         predict_kw = dict(source=source, stream=True, **infer_kw)
 
@@ -417,31 +422,31 @@ def main() -> None:
             )
         return True
 
+    def _infer_frame(frame: np.ndarray):
+        try:
+            if use_ids:
+                return model.track(
+                    frame, persist=True, tracker=args.tracker, **infer_kw
+                )
+            return model.predict(frame, **infer_kw)
+        except TypeError:
+            infer_kw.pop("nms", None)
+            if use_ids:
+                return model.track(
+                    frame, persist=True, tracker=args.tracker, **infer_kw
+                )
+            return model.predict(frame, **infer_kw)
+
     try:
-        if mjpeg_mode:
-            print("opening ESP MJPEG (first frame can take a few seconds)…", flush=True)
-            for frame in iter_mjpeg(str(source)):
-                try:
-                    if use_ids:
-                        out = model.track(
-                            frame,
-                            persist=True,
-                            tracker=args.tracker,
-                            **infer_kw,
-                        )
-                    else:
-                        out = model.predict(frame, **infer_kw)
-                except TypeError:
-                    infer_kw.pop("nms", None)
-                    if use_ids:
-                        out = model.track(
-                            frame,
-                            persist=True,
-                            tracker=args.tracker,
-                            **infer_kw,
-                        )
-                    else:
-                        out = model.predict(frame, **infer_kw)
+        if frame_mode:
+            frames = (
+                iter_mjpeg(str(source))
+                if mjpeg_mode
+                else iter_rtsp(str(source))
+            )
+            print("opening stream (first frame can take a few seconds)…", flush=True)
+            for frame in frames:
+                out = _infer_frame(frame)
                 if not out:
                     continue
                 if not handle_result(out[0]):
