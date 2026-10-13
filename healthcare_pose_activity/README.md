@@ -35,11 +35,17 @@ cd healthcare_pose_activity
 
 HUD shows **People / Patients / Other / Fall alerts** plus per-ID activity. Press **`q`**. Prefer **Terminal.app**.
 
-## Stack
+## Stack (web-aligned)
 
-- **YOLO11n-pose** + ByteTrack → count + stable IDs + skeletons  
-- **Geometry + temporal rules** on keypoints → ADL / fall heuristics (CPU/Metal)  
-- ESP path: same RTSP/MJPEG sources as MediaMTX lab cameras  
+- **Pose:** Ultralytics **YOLO26s-pose** (default) — COCO-17 keypoints; official skeleton draw  
+  - Faster: `POSE_MODEL=yolo26n-pose.pt ./run_live.sh 0`
+- **Activity (real-time, no heavy ST-GCN):** hybrid rules used in open YOLO-pose HAR projects + fall papers:
+  - bbox aspect → lying (`w/h ≥ 1.5`) / upright
+  - hip–knee–ankle & shoulder–hip–knee angles → sitting vs standing
+  - normalized centroid velocity → walking (confirmed over several frames)
+  - temporal upright→horizontal → `fall_suspected`
+- **Not** left/right/up/down demos. GPU Skateformer path remains DeepStream RPM.
+- ESP: MediaMTX RTSP/MJPEG sources  
 
 ## Layout
 
@@ -55,6 +61,7 @@ healthcare_pose_activity/
 
 ## Notes
 
-- First run downloads `yolo11n-pose.pt` (`POSE_MODEL=…` to override).
-- `--no-track` if ByteTrack misbehaves (loses stable IDs).
-- For hospital-grade GPU action (PCT/Skateformer), use MediaMTX `deepstream` / RPM.
+- First run downloads `yolo26s-pose.pt`.
+- **Step back** so hips/knees are visible — required for accurate sit/stand/walk.
+- `--no-track` if ByteTrack misbehaves.
+- Production hospital action (PCT/Skateformer): MediaMTX `deepstream` / RPM on GPU.

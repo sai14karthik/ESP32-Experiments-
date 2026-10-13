@@ -1,16 +1,51 @@
-"""Drop false person boxes (hands/arms) and weak poses."""
+"""Drop false person boxes (hands/arms) and draw COCO-17 pose correctly."""
 from __future__ import annotations
-
-from typing import Optional
 
 import numpy as np
 
-# COCO-17 skeleton edges for drawing
+# Official Ultralytics / COCO-17 skeleton (0-indexed).
+# Matches ultralytics Annotator (1-indexed list minus 1).
 SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4),
-    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
-    (5, 11), (6, 12), (11, 12),
-    (11, 13), (13, 15), (12, 14), (14, 16),
+    (15, 13),
+    (13, 11),
+    (16, 14),
+    (14, 12),
+    (11, 12),
+    (5, 11),
+    (6, 12),
+    (5, 6),
+    (5, 7),
+    (6, 8),
+    (7, 9),
+    (8, 10),
+    (1, 2),
+    (0, 1),
+    (0, 2),
+    (1, 3),
+    (2, 4),
+    (3, 5),
+    (4, 6),
+]
+
+# Soft palette similar to Ultralytics pose colors (BGR)
+KPT_COLOR = [
+    (0, 255, 0),
+    (0, 255, 0),
+    (0, 255, 0),
+    (0, 255, 0),
+    (0, 255, 0),
+    (255, 128, 0),
+    (255, 128, 0),
+    (255, 128, 0),
+    (255, 128, 0),
+    (255, 128, 0),
+    (255, 128, 0),
+    (51, 153, 255),
+    (51, 153, 255),
+    (51, 153, 255),
+    (51, 153, 255),
+    (51, 153, 255),
+    (51, 153, 255),
 ]
 
 
@@ -54,7 +89,6 @@ def filter_person_indices(
         if bh < 1 or bw < 1:
             continue
         aspect = bw / bh
-        # Hand / arm crops tend to be small+wide or tiny
         if aspect > 2.0 and a < 0.55 * max_a:
             continue
         n_kpt, has_face = keypoint_score(kdata[i])
@@ -69,23 +103,31 @@ def draw_person(
     box: np.ndarray,
     kpts: np.ndarray,
     color: tuple[int, int, int],
-    thr: float = 0.25,
+    thr: float = 0.5,
 ) -> None:
+    """Draw box + COCO skeleton; only connect keypoints above confidence thr."""
     import cv2
 
     x1, y1, x2, y2 = map(int, box)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     if kpts is None or len(kpts) < 17:
         return
-    pts = []
+
+    pts: list[tuple[int, int] | None] = []
+    confs: list[float] = []
     for j in range(17):
-        if kpts.shape[1] >= 3 and float(kpts[j, 2]) < thr:
+        c = float(kpts[j, 2]) if kpts.shape[1] >= 3 else 1.0
+        confs.append(c)
+        if c < thr:
             pts.append(None)
         else:
             pts.append((int(kpts[j, 0]), int(kpts[j, 1])))
+
     for a, b in SKELETON:
         if pts[a] is not None and pts[b] is not None:
-            cv2.line(frame, pts[a], pts[b], color, 2)
-    for p in pts:
+            cv2.line(frame, pts[a], pts[b], color, 2, lineType=cv2.LINE_AA)
+
+    for j, p in enumerate(pts):
         if p is not None:
-            cv2.circle(frame, p, 3, color, -1)
+            cv2.circle(frame, p, 4, KPT_COLOR[j % len(KPT_COLOR)], -1, lineType=cv2.LINE_AA)
+            cv2.circle(frame, p, 4, (255, 255, 255), 1, lineType=cv2.LINE_AA)

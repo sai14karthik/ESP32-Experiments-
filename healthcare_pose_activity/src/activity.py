@@ -1,4 +1,15 @@
-"""Healthcare activity from COCO-17 pose keypoints + short temporal window."""
+"""
+Healthcare activity from YOLO-pose COCO-17 keypoints.
+
+Rules aligned with common open real-time pipelines (YOLO-pose + geometry):
+  - bbox aspect ratio → lying vs upright (pose-estimation-task / fall papers)
+  - hip–knee–ankle & shoulder–hip–knee angles → sitting vs standing
+    (YOLOv8 HAR angle demos; MediaPipe / ML Kit angle heuristics)
+  - normalized centroid velocity over a short window → walking
+  - upright → horizontal + drop → fall_suspected (temporal, not single frame)
+
+Pose keypoints themselves come from Ultralytics YOLO26-pose (not this file).
+"""
 from __future__ import annotations
 
 from collections import deque
@@ -7,7 +18,6 @@ from typing import Deque, Optional
 
 import numpy as np
 
-# COCO-17 used by Ultralytics YOLO-pose
 NOSE, L_SHO, R_SHO, L_HIP, R_HIP = 0, 5, 6, 11, 12
 L_KNEE, R_KNEE, L_ANK, R_ANK = 13, 14, 15, 16
 
@@ -19,7 +29,7 @@ class ActivityState:
     detail: str = ""
 
 
-def _ok(kpts: np.ndarray, idx: int, thr: float = 0.25) -> bool:
+def _ok(kpts: np.ndarray, idx: int, thr: float = 0.4) -> bool:
     if kpts is None or idx >= len(kpts):
         return False
     if kpts.shape[1] >= 3:
@@ -27,13 +37,7 @@ def _ok(kpts: np.ndarray, idx: int, thr: float = 0.25) -> bool:
     return True
 
 
-def _pt(kpts: np.ndarray, idx: int) -> Optional[np.ndarray]:
-    if not _ok(kpts, idx):
-        return None
-    return kpts[idx, :2].astype(float)
-
-
-def _pt_thr(kpts: np.ndarray, idx: int, thr: float) -> Optional[np.ndarray]:
+def _pt(kpts: np.ndarray, idx: int, thr: float = 0.4) -> Optional[np.ndarray]:
     if not _ok(kpts, idx, thr=thr):
         return None
     return kpts[idx, :2].astype(float)
@@ -46,7 +50,6 @@ def _mid(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> Optional[np.ndarra
 
 
 def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    """Angle at b (degrees) for points a-b-c."""
     ba = a - b
     bc = c - b
     nba = np.linalg.norm(ba)
@@ -58,9 +61,8 @@ def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
 
 
 def _torso_tilt_deg(shoulder: np.ndarray, hip: np.ndarray) -> float:
-    """0° ≈ vertical (standing), 90° ≈ horizontal (lying)."""
+    """0° ≈ vertical upright, 90° ≈ horizontal (lying)."""
     v = shoulder - hip
-    # angle from vertical up-axis (0, -1) in image coords (y down)
     vertical = np.array([0.0, -1.0])
     nv = np.linalg.norm(v)
     if nv < 1e-6:
@@ -69,31 +71,9 @@ def _torso_tilt_deg(shoulder: np.ndarray, hip: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cos)))
 
 
-def _classify_upper_body(
-    nose: Optional[np.ndarray],
-    shoulder: np.ndarray,
-    box: Optional[tuple[float, float, float, float]],
-    frame_hw: Optional[tuple[int, int]],
-) -> ActivityState:
-    """
-    No hips visible (close webcam). Do NOT always assume sitting —
-    use box height in the frame: tall near-top box ≈ standing close-up,
-    shorter mid box ≈ sitting at desk.
-    """
-    if box is not None and frame_hw is not None:
-        fh = max(1, int(frame_hw[0]))
-        x1, y1, x2, y2 = box
-        box_h = (y2 - y1) / fh
-        top = y1 / fh
-        # Standing close to camera: fills most of vertical FOV, head near top
-        if box_h >= 0.58 and top <= 0.22:
-            return ActivityState("standing", 0.62, f"upper_body tall_box h={box_h:.2f}")
-        # Sitting / desk: more headroom or shorter crop
-        if box_h <= 0.52 or top >= 0.18:
-            return ActivityState("sitting", 0.55, f"upper_body desk_box h={box_h:.2f}")
-    if nose is not None and nose[1] < shoulder[1]:
-        return ActivityState("unknown", 0.4, "upper_body_only (step back for legs)")
-    return ActivityState("unknown", 0.35, "upper_body_only")
+def _mean_angle(angles: list[float]) -> float:
+    vals = [a for a in angles if not np.isnan(a)]
+    return float(np.mean(vals)) if vals else float("nan")
 
 
 def classify_frame(
@@ -101,9 +81,25 @@ def classify_frame(
     box: Optional[tuple[float, float, float, float]] = None,
     frame_hw: Optional[tuple[int, int]] = None,
 ) -> ActivityState:
-    """Single-frame posture guess from one person keypoints (N,2|3)."""
+    """
+    Single-frame posture (before temporal walking/fall).
+    Priority: lying (aspect/tilt) → sitting (knee/hip angles) → standing.
+    """
     if kpts is None or len(kpts) < 17:
         return ActivityState("unknown", 0.0, "no_pose")
+
+    # --- bbox aspect (strong lying / upright cues) ---
+    aspect = float("nan")
+    box_h = float("nan")
+    if box is not None:
+        x1, y1, x2, y2 = box
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+        aspect = bw / bh
+        box_h = bh
+        # Lying: wide box (published rule: w > 1.5 * h)
+        if aspect >= 1.5:
+            return ActivityState("lying", 0.9, f"bbox_aspect={aspect:.2f}")
 
     nose = _pt(kpts, NOSE)
     l_sho, r_sho = _pt(kpts, L_SHO), _pt(kpts, R_SHO)
@@ -114,57 +110,101 @@ def classify_frame(
     shoulder = _mid(l_sho, r_sho)
     hip = _mid(l_hip, r_hip)
 
-    # Close-up: hips missing — use box geometry, not blind "sitting"
+    # Close-up without hips: limited confidence — prefer unknown over wrong sit
     if shoulder is not None and hip is None:
-        return _classify_upper_body(nose, shoulder, box, frame_hw)
+        if box is not None and frame_hw is not None:
+            fh = max(1, int(frame_hw[0]))
+            x1, y1, x2, y2 = box
+            rel_h = (y2 - y1) / fh
+            top = y1 / fh
+            if rel_h >= 0.6 and top <= 0.2:
+                return ActivityState("standing", 0.55, "upper_body close-up")
+            if rel_h <= 0.5:
+                return ActivityState("sitting", 0.5, "upper_body desk-crop")
+        return ActivityState("unknown", 0.35, "need_full_body (step back)")
 
     if shoulder is None or hip is None:
         return ActivityState("unknown", 0.0, "missing_torso")
 
     tilt = _torso_tilt_deg(shoulder, hip)
-    torso_len = float(np.linalg.norm(shoulder - hip)) + 1e-6
 
-    # Knee angles (bent ≈ sitting)
-    knee_angles = []
-    for hip_i, knee_i, ank_i in (
-        (l_hip, l_knee, l_ank),
-        (r_hip, r_knee, r_ank),
-    ):
-        if hip_i is not None and knee_i is not None and ank_i is not None:
-            knee_angles.append(_angle_deg(hip_i, knee_i, ank_i))
-    knee = float(np.nanmean(knee_angles)) if knee_angles else float("nan")
-
-    # Hip height vs shoulder (image y increases downward)
-    hip_drop = float((hip[1] - shoulder[1]) / torso_len)
-
-    # Lying: torso near horizontal
+    # Lying by torso orientation
     if not np.isnan(tilt) and tilt >= 55:
-        return ActivityState("lying", min(0.95, 0.55 + (tilt - 55) / 80), f"tilt={tilt:.0f}")
+        conf = min(0.95, 0.6 + (tilt - 55) / 70)
+        return ActivityState("lying", conf, f"torso_tilt={tilt:.0f}")
 
-    # Sitting: hips clearly below shoulders, knees bent
-    if hip_drop > 0.55 and (np.isnan(knee) or knee < 145):
-        conf = 0.6
-        if not np.isnan(knee) and knee < 120:
-            conf = 0.85
-        return ActivityState("sitting", conf, f"drop={hip_drop:.2f} knee={knee:.0f}")
+    # Knee angles (hip–knee–ankle) — sitting / squatting when bent
+    knee_angles = []
+    for hi, kn, an in ((l_hip, l_knee, l_ank), (r_hip, r_knee, r_ank)):
+        if hi is not None and kn is not None and an is not None:
+            knee_angles.append(_angle_deg(hi, kn, an))
+    knee = _mean_angle(knee_angles)
 
-    # Standing-like
-    if not np.isnan(tilt) and tilt < 35 and hip_drop > 0.35:
-        conf = 0.75 if (np.isnan(knee) or knee > 140) else 0.55
-        return ActivityState("standing", conf, f"tilt={tilt:.0f} knee={knee:.0f}")
+    # Hip angles (shoulder–hip–knee) — HAR demos use ~110° sit threshold
+    hip_angles = []
+    for sh, hi, kn in ((l_sho, l_hip, l_knee), (r_sho, r_hip, r_knee)):
+        if sh is not None and hi is not None and kn is not None:
+            hip_angles.append(_angle_deg(sh, hi, kn))
+    hip_ang = _mean_angle(hip_angles)
 
-    return ActivityState("unknown", 0.3, f"tilt={tilt:.0f} drop={hip_drop:.2f}")
+    # Nose–hip–knee (alternate sit cue when shoulders noisy)
+    nhk = float("nan")
+    if nose is not None and hip is not None:
+        for kn in (l_knee, r_knee):
+            if kn is not None:
+                a = _angle_deg(nose, hip, kn)
+                if not np.isnan(a):
+                    nhk = a if np.isnan(nhk) else 0.5 * (nhk + a)
+
+    # Sitting: bent knees OR bent hip
+    if (not np.isnan(knee) and knee < 130) or (not np.isnan(hip_ang) and hip_ang < 115):
+        conf = 0.7
+        if not np.isnan(knee) and knee < 110:
+            conf = 0.88
+        return ActivityState(
+            "sitting",
+            conf,
+            f"knee={knee:.0f} hip_ang={hip_ang:.0f}",
+        )
+    if not np.isnan(nhk) and nhk < 110:
+        return ActivityState("sitting", 0.72, f"nose_hip_knee={nhk:.0f}")
+
+    # Standing: upright bbox and/or straight legs
+    upright_box = (not np.isnan(aspect) and aspect < 0.65) or (
+        not np.isnan(tilt) and tilt < 40
+    )
+    straight_legs = np.isnan(knee) or knee >= 140
+    if upright_box and straight_legs:
+        conf = 0.8 if (not np.isnan(knee) and knee >= 150) else 0.65
+        return ActivityState("standing", conf, f"tilt={tilt:.0f} knee={knee:.0f} asp={aspect:.2f}")
+
+    if upright_box:
+        return ActivityState("standing", 0.55, f"upright_box asp={aspect:.2f}")
+
+    return ActivityState("unknown", 0.3, f"tilt={tilt:.0f} knee={knee:.0f} asp={aspect:.2f}")
 
 
 class ActivityTracker:
-    """Smooth labels + walking / fall_suspected from short history."""
+    """Temporal smoothing + walking / fall_suspected."""
 
-    def __init__(self, window: int = 18, fall_frames: int = 8):
+    def __init__(
+        self,
+        window: int = 20,
+        fall_frames: int = 8,
+        walk_speed: float = 0.035,  # fraction of bbox height per frame
+        walk_confirm: int = 3,
+    ):
         self.window = window
         self.fall_frames = fall_frames
+        self.walk_speed = walk_speed
+        self.walk_confirm = walk_confirm
         self.labels: Deque[str] = deque(maxlen=window)
         self.hips: Deque[np.ndarray] = deque(maxlen=window)
         self.tilts: Deque[float] = deque(maxlen=window)
+        self.centers: Deque[np.ndarray] = deque(maxlen=12)
+        self.box_hs: Deque[float] = deque(maxlen=12)
+        self.walk_hits = 0
+        self._ema: dict[str, float] = {}
         self._last = ActivityState()
 
     def update(
@@ -174,85 +214,122 @@ class ActivityTracker:
         frame_hw: Optional[tuple[int, int]] = None,
     ) -> ActivityState:
         frame = classify_frame(kpts, box=box, frame_hw=frame_hw)
-        # Stricter hips for walking (ignore weak/jittery hip guesses)
-        hip = _mid(_pt_thr(kpts, L_HIP, 0.45), _pt_thr(kpts, R_HIP, 0.45))
+        hip = _mid(_pt(kpts, L_HIP, 0.45), _pt(kpts, R_HIP, 0.45))
         sho = _mid(_pt(kpts, L_SHO), _pt(kpts, R_SHO))
-        tilt = _torso_tilt_deg(sho, hip) if sho is not None and hip is not None else float("nan")
-        upper_only = "upper_body" in (frame.detail or "")
+        tilt = (
+            _torso_tilt_deg(sho, hip)
+            if sho is not None and hip is not None
+            else float("nan")
+        )
+        upper_only = "upper_body" in (frame.detail or "") or "need_full_body" in (
+            frame.detail or ""
+        )
 
         self.labels.append(frame.label)
         if hip is not None:
             self.hips.append(hip.copy())
         else:
-            # Close-up / no hips: clear stale hip path so we don't fake "walking"
             self.hips.clear()
         if not np.isnan(tilt):
             self.tilts.append(tilt)
 
-        # Fall: recent upright-ish then sudden high tilt + hip drop in y
+        if box is not None:
+            x1, y1, x2, y2 = box
+            c = np.array([(x1 + x2) * 0.5, (y1 + y2) * 0.5], dtype=float)
+            bh = max(1.0, y2 - y1)
+            self.centers.append(c)
+            self.box_hs.append(bh)
+
+        # Fall first
         fall = self._fall_suspected()
         if fall:
-            st = ActivityState("fall_suspected", 0.8, fall)
+            st = ActivityState("fall_suspected", 0.85, fall)
             self._last = st
             return st
 
-        # Walking only with real hips visible this frame (not close-up wobble)
+        # Walking: normalized centroid speed (not raw pixel jitter)
         if (not upper_only) and hip is not None and self._is_walking():
-            st = ActivityState("walking", 0.7, "motion+standing")
+            st = ActivityState("walking", 0.75, "centroid_velocity")
             self._last = st
             return st
 
-        # Close-up standing: trust current frame, don't majority-vote into walking/sitting
-        if upper_only and frame.label == "standing":
+        if upper_only and frame.label in ("standing", "sitting", "unknown"):
             self._last = frame
             return frame
 
-        # Majority vote over window
+        # EMA over recent labels (stable output)
+        st = self._smooth(frame)
+        self._last = st
+        return st
+
+    def _smooth(self, frame: ActivityState) -> ActivityState:
+        # decay and boost current
+        for k in list(self._ema.keys()):
+            self._ema[k] *= 0.85
+        self._ema[frame.label] = self._ema.get(frame.label, 0.0) + 0.35
+        # also count window majority lightly
         if self.labels:
             vals, counts = np.unique(np.array(self.labels), return_counts=True)
-            maj = str(vals[int(np.argmax(counts))])
-            # Never let majority invent "walking" without the motion check above
-            if maj == "walking":
-                maj = "standing" if frame.label in ("standing", "walking", "unknown") else frame.label
-            conf = float(counts.max() / len(self.labels))
-            if maj == "unknown" and frame.label != "unknown":
-                st = frame
-            else:
-                st = ActivityState(maj, max(frame.confidence, conf * 0.9), frame.detail)
-            self._last = st
-            return st
+            for v, c in zip(vals, counts):
+                lab = str(v)
+                if lab == "walking":
+                    continue
+                self._ema[lab] = self._ema.get(lab, 0.0) + 0.05 * float(c)
 
-        self._last = frame
-        return frame
+        best = max(self._ema.items(), key=lambda kv: kv[1])
+        lab, score = best[0], best[1]
+        if lab == "walking":
+            lab = frame.label if frame.label != "unknown" else "standing"
+        conf = float(min(0.95, max(frame.confidence, score / 2.0)))
+        detail = frame.detail if lab == frame.label else f"ema={lab}"
+        return ActivityState(lab, conf, detail)
 
     def _is_walking(self) -> bool:
-        if len(self.labels) < self.window // 2:
+        if len(self.centers) < 6 or len(self.box_hs) < 6:
+            self.walk_hits = max(0, self.walk_hits - 1)
             return False
         standingish = sum(1 for x in self.labels if x in ("standing", "walking"))
-        if standingish < len(self.labels) * 0.6:
+        if standingish < max(4, len(self.labels) // 2):
+            self.walk_hits = max(0, self.walk_hits - 1)
             return False
-        if len(self.hips) < 10:
-            return False
-        arr = np.stack(list(self.hips), axis=0)
-        dx = float(np.std(arr[:, 0]))
-        dy = float(np.std(arr[:, 1]))
-        # Need clear lateral travel — camera shake alone is usually smaller / isotropic
-        return dx > 18.0 and dx > dy * 1.15
+
+        # displacement over last ~5 steps, normalized by median bbox height
+        cs = list(self.centers)
+        hs = float(np.median(list(self.box_hs)))
+        disp = float(np.linalg.norm(cs[-1] - cs[-6])) / hs
+        # require mostly horizontal motion
+        dxy = cs[-1] - cs[-6]
+        horiz = abs(float(dxy[0])) >= abs(float(dxy[1])) * 0.9
+
+        if disp > self.walk_speed * 5 and horiz:
+            self.walk_hits += 1
+        else:
+            self.walk_hits = max(0, self.walk_hits - 1)
+
+        return self.walk_hits >= self.walk_confirm
 
     def _fall_suspected(self) -> str:
-        # Need upright history *before* the recent window, then horizontal now.
         need = self.fall_frames * 2
-        if len(self.tilts) < need or len(self.hips) < need:
+        if len(self.tilts) < need:
             return ""
         tilts = list(self.tilts)
-        hips = list(self.hips)
         past = float(np.mean(tilts[-need : -self.fall_frames]))
         now = float(np.mean(tilts[-max(2, self.fall_frames // 3) :]))
-        dy = float(hips[-1][1] - hips[-need][1])
-        # upright -> horizontal; hips usually move down the image (optional boost)
-        if past < 40 and now > 55 and dy > 15:
+        dy = 0.0
+        if len(self.hips) >= need:
+            hips = list(self.hips)
+            dy = float(hips[-1][1] - hips[-need][1])
+        if past < 40 and now > 55 and dy > 12:
             return f"tilt {past:.0f}->{now:.0f} dy={dy:.0f}"
         if past < 35 and now > 60:
-            # strong tilt change alone (bed fall / camera angle)
             return f"tilt {past:.0f}->{now:.0f}"
+        # also: recent labels flipped to lying quickly
+        if len(self.labels) >= 10:
+            early = list(self.labels)[-10:-5]
+            late = list(self.labels)[-5:]
+            if (
+                sum(1 for x in early if x in ("standing", "walking", "sitting")) >= 3
+                and sum(1 for x in late if x == "lying") >= 3
+            ):
+                return "label standing/sit → lying"
         return ""

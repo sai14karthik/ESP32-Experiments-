@@ -50,7 +50,11 @@ def parse_args() -> argparse.Namespace:
         default="0",
         help="webcam index, RTSP URL, or HTTP MJPEG (default: 0)",
     )
-    ap.add_argument("--model", default=None, help="pose weights (default yolo11n-pose.pt)")
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="pose weights (default yolo26s-pose.pt; faster: yolo26n-pose.pt)",
+    )
     ap.add_argument(
         "--conf",
         type=float,
@@ -91,7 +95,7 @@ def pick_device(requested: str) -> str:
 def main() -> None:
     args = parse_args()
     source = resolve_source(args.source)
-    model_name = args.model or os.environ.get("POSE_MODEL", "yolo11n-pose.pt")
+    model_name = args.model or os.environ.get("POSE_MODEL", "yolo26s-pose.pt")
     device = pick_device(args.device)
 
     print("loading torch/ultralytics (first run can take ~30–60s)…", flush=True)
@@ -101,8 +105,10 @@ def main() -> None:
         f"patient monitor | model={model_name} device={device} source={source}",
         flush=True,
     )
-    print("loading pose weights…", flush=True)
+    print("loading YOLO26s pose weights (accurate COCO-17)…", flush=True)
     model = YOLO(model_name)
+    if getattr(model, "task", None) != "pose":
+        raise SystemExit(f"Expected a pose model, got task={model.task!r} for {model_name}")
     print("opening camera / stream…", flush=True)
     # Persistent activity state per track id
     trackers: dict[int, ActivityTracker] = {}
