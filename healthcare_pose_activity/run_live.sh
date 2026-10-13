@@ -17,10 +17,10 @@ shift || true
 # accurate → yolo26m-pose (68.8 COCO pose mAP) — best live accuracy/speed on Mac
 export POSE_QUALITY="${POSE_QUALITY:-accurate}"
 # Optional hard override: POSE_MODEL=yolo26l-pose.pt
-EXTRA=()
+ARGS=(--quality "$POSE_QUALITY")
 if [[ -n "${POSE_MODEL:-}" ]]; then
-  EXTRA+=(--model "$POSE_MODEL")
+  ARGS+=(--model "$POSE_MODEL")
 fi
 
 exec uv run --with "ultralytics>=8.4.175" --with opencv-python --with numpy --with lap \
-  python src/live_infer.py "$SOURCE" --quality "$POSE_QUALITY" "${EXTRA[@]}" "$@"
+  python src/live_infer.py "$SOURCE" "${ARGS[@]}" "$@"
