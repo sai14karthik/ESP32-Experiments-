@@ -65,10 +65,24 @@ def test_classify() -> None:
     assert sit.label == "sitting", sit
     ly = classify_frame(lying_kpts())
     assert ly.label == "lying", ly
-    up = classify_frame(upper_only_kpts())
-    assert up.label == "sitting", up
-    print("classify_frame OK:", s.label, sit.label, ly.label, up.label)
-
+    # Tall close-up box → standing (not blind sitting)
+    up_stand = classify_frame(
+        upper_only_kpts(), box=(100, 10, 500, 700), frame_hw=(720, 1280)
+    )
+    assert up_stand.label == "standing", up_stand
+    # Shorter desk crop → sitting
+    up_sit = classify_frame(
+        upper_only_kpts(), box=(200, 150, 500, 480), frame_hw=(720, 1280)
+    )
+    assert up_sit.label == "sitting", up_sit
+    print(
+        "classify_frame OK:",
+        s.label,
+        sit.label,
+        ly.label,
+        up_stand.label,
+        up_sit.label,
+    )
 
 def test_fall() -> None:
     t = ActivityTracker(window=18, fall_frames=8)

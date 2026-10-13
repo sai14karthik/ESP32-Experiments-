@@ -33,6 +33,12 @@ def _pt(kpts: np.ndarray, idx: int) -> Optional[np.ndarray]:
     return kpts[idx, :2].astype(float)
 
 
+def _pt_thr(kpts: np.ndarray, idx: int, thr: float) -> Optional[np.ndarray]:
+    if not _ok(kpts, idx, thr=thr):
+        return None
+    return kpts[idx, :2].astype(float)
+
+
 def _mid(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if a is None or b is None:
         return None
@@ -63,7 +69,38 @@ def _torso_tilt_deg(shoulder: np.ndarray, hip: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cos)))
 
 
-def classify_frame(kpts: np.ndarray) -> ActivityState:
+def _classify_upper_body(
+    nose: Optional[np.ndarray],
+    shoulder: np.ndarray,
+    box: Optional[tuple[float, float, float, float]],
+    frame_hw: Optional[tuple[int, int]],
+) -> ActivityState:
+    """
+    No hips visible (close webcam). Do NOT always assume sitting —
+    use box height in the frame: tall near-top box ≈ standing close-up,
+    shorter mid box ≈ sitting at desk.
+    """
+    if box is not None and frame_hw is not None:
+        fh = max(1, int(frame_hw[0]))
+        x1, y1, x2, y2 = box
+        box_h = (y2 - y1) / fh
+        top = y1 / fh
+        # Standing close to camera: fills most of vertical FOV, head near top
+        if box_h >= 0.58 and top <= 0.22:
+            return ActivityState("standing", 0.62, f"upper_body tall_box h={box_h:.2f}")
+        # Sitting / desk: more headroom or shorter crop
+        if box_h <= 0.52 or top >= 0.18:
+            return ActivityState("sitting", 0.55, f"upper_body desk_box h={box_h:.2f}")
+    if nose is not None and nose[1] < shoulder[1]:
+        return ActivityState("unknown", 0.4, "upper_body_only (step back for legs)")
+    return ActivityState("unknown", 0.35, "upper_body_only")
+
+
+def classify_frame(
+    kpts: np.ndarray,
+    box: Optional[tuple[float, float, float, float]] = None,
+    frame_hw: Optional[tuple[int, int]] = None,
+) -> ActivityState:
     """Single-frame posture guess from one person keypoints (N,2|3)."""
     if kpts is None or len(kpts) < 17:
         return ActivityState("unknown", 0.0, "no_pose")
@@ -77,15 +114,9 @@ def classify_frame(kpts: np.ndarray) -> ActivityState:
     shoulder = _mid(l_sho, r_sho)
     hip = _mid(l_hip, r_hip)
 
-    # Close-up webcam / ESP: often only head+shoulders → treat as sitting (patient/chair)
+    # Close-up: hips missing — use box geometry, not blind "sitting"
     if shoulder is not None and hip is None:
-        if nose is not None:
-            # nose above shoulders → upright upper body
-            if nose[1] < shoulder[1]:
-                return ActivityState(
-                    "sitting", 0.55, "upper_body_only (assume sitting)"
-                )
-        return ActivityState("sitting", 0.45, "no_hips (assume sitting)")
+        return _classify_upper_body(nose, shoulder, box, frame_hw)
 
     if shoulder is None or hip is None:
         return ActivityState("unknown", 0.0, "missing_torso")
@@ -136,15 +167,25 @@ class ActivityTracker:
         self.tilts: Deque[float] = deque(maxlen=window)
         self._last = ActivityState()
 
-    def update(self, kpts: np.ndarray) -> ActivityState:
-        frame = classify_frame(kpts)
-        hip = _mid(_pt(kpts, L_HIP), _pt(kpts, R_HIP))
+    def update(
+        self,
+        kpts: np.ndarray,
+        box: Optional[tuple[float, float, float, float]] = None,
+        frame_hw: Optional[tuple[int, int]] = None,
+    ) -> ActivityState:
+        frame = classify_frame(kpts, box=box, frame_hw=frame_hw)
+        # Stricter hips for walking (ignore weak/jittery hip guesses)
+        hip = _mid(_pt_thr(kpts, L_HIP, 0.45), _pt_thr(kpts, R_HIP, 0.45))
         sho = _mid(_pt(kpts, L_SHO), _pt(kpts, R_SHO))
         tilt = _torso_tilt_deg(sho, hip) if sho is not None and hip is not None else float("nan")
+        upper_only = "upper_body" in (frame.detail or "")
 
         self.labels.append(frame.label)
         if hip is not None:
             self.hips.append(hip.copy())
+        else:
+            # Close-up / no hips: clear stale hip path so we don't fake "walking"
+            self.hips.clear()
         if not np.isnan(tilt):
             self.tilts.append(tilt)
 
@@ -155,16 +196,24 @@ class ActivityTracker:
             self._last = st
             return st
 
-        # Walking: majority standing + ankle/hip motion
-        if self._is_walking():
+        # Walking only with real hips visible this frame (not close-up wobble)
+        if (not upper_only) and hip is not None and self._is_walking():
             st = ActivityState("walking", 0.7, "motion+standing")
             self._last = st
             return st
+
+        # Close-up standing: trust current frame, don't majority-vote into walking/sitting
+        if upper_only and frame.label == "standing":
+            self._last = frame
+            return frame
 
         # Majority vote over window
         if self.labels:
             vals, counts = np.unique(np.array(self.labels), return_counts=True)
             maj = str(vals[int(np.argmax(counts))])
+            # Never let majority invent "walking" without the motion check above
+            if maj == "walking":
+                maj = "standing" if frame.label in ("standing", "walking", "unknown") else frame.label
             conf = float(counts.max() / len(self.labels))
             if maj == "unknown" and frame.label != "unknown":
                 st = frame
@@ -182,13 +231,13 @@ class ActivityTracker:
         standingish = sum(1 for x in self.labels if x in ("standing", "walking"))
         if standingish < len(self.labels) * 0.6:
             return False
-        if len(self.hips) < 6:
+        if len(self.hips) < 10:
             return False
         arr = np.stack(list(self.hips), axis=0)
-        # horizontal jitter of hip (normalize by median step)
-        dx = np.std(arr[:, 0])
-        dy = np.std(arr[:, 1])
-        return dx > 8.0 and dx > dy * 0.6
+        dx = float(np.std(arr[:, 0]))
+        dy = float(np.std(arr[:, 1]))
+        # Need clear lateral travel — camera shake alone is usually smaller / isotropic
+        return dx > 18.0 and dx > dy * 1.15
 
     def _fall_suspected(self) -> str:
         # Need upright history *before* the recent window, then horizontal now.

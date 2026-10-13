@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from activity import ActivityTracker  # noqa: E402
+from filters import draw_person, filter_person_indices  # noqa: E402
 from patients import PersonView, infer_role, summarize  # noqa: E402
 
 ACTIVITY_COLOR = {
@@ -50,7 +51,12 @@ def parse_args() -> argparse.Namespace:
         help="webcam index, RTSP URL, or HTTP MJPEG (default: 0)",
     )
     ap.add_argument("--model", default=None, help="pose weights (default yolo11n-pose.pt)")
-    ap.add_argument("--conf", type=float, default=0.35)
+    ap.add_argument(
+        "--conf",
+        type=float,
+        default=0.45,
+        help="detection confidence (higher reduces hand false-people)",
+    )
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--device", default="mps", help="mps | cpu | 0 (cuda)")
     ap.add_argument(
@@ -134,12 +140,10 @@ def main() -> None:
     try:
         for r in results_iter:
             n += 1
-            # Skeleton + boxes only — no YOLO "id person 0.xx" text (avoids overlap)
-            if r.boxes is not None and len(r.boxes):
-                frame = r.plot(labels=False, conf=False, boxes=True, kpt_line=True)
-            else:
-                frame = r.orig_img.copy()
+            # Custom draw only (no YOLO text; no hand false-boxes)
+            frame = r.orig_img.copy()
             people: list[PersonView] = []
+            fh, fw = frame.shape[:2]
 
             if (
                 r.keypoints is not None
@@ -153,63 +157,66 @@ def main() -> None:
                 if use_ids and r.boxes.id is not None:
                     ids = r.boxes.id.cpu().numpy().astype(int)
 
-                areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-                primary = int(np.argmax(areas)) if len(areas) else 0
+                keep = filter_person_indices(kdata, boxes, (fh, fw))
+                if keep:
+                    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                    primary_i = max(keep, key=lambda j: float(areas[j]))
 
-                seen_ids: set[int] = set()
-                for i in range(len(kdata)):
-                    tid = int(ids[i]) if ids is not None else i
-                    seen_ids.add(tid)
-                    if tid not in trackers:
-                        trackers[tid] = ActivityTracker()
-                    st = trackers[tid].update(kdata[i])
-                    box = tuple(float(x) for x in boxes[i])
-                    role = infer_role(st, primary=(i == primary))
-                    people.append(
-                        PersonView(
-                            track_id=tid,
-                            activity=st,
-                            role=role,
-                            box=box,
-                            area=float(areas[i]),
+                    seen_ids: set[int] = set()
+                    for i in keep:
+                        tid = int(ids[i]) if ids is not None else i
+                        seen_ids.add(tid)
+                        if tid not in trackers:
+                            trackers[tid] = ActivityTracker()
+                        box = tuple(float(x) for x in boxes[i])
+                        st = trackers[tid].update(
+                            kdata[i], box=box, frame_hw=(fh, fw)
                         )
-                    )
+                        role = infer_role(st, primary=(i == primary_i))
+                        people.append(
+                            PersonView(
+                                track_id=tid,
+                                activity=st,
+                                role=role,
+                                box=box,
+                                area=float(areas[i]),
+                            )
+                        )
 
-                    x1, y1, x2, y2 = map(int, boxes[i])
-                    color = ACTIVITY_COLOR.get(st.label, (120, 120, 120))
-                    # Single clean tag under HUD, above box (not stacked on YOLO text)
-                    role_short = "patient" if role == "patient" else (
-                        "other" if role == "visitor_or_staff" else "unk"
-                    )
-                    tag = f"ID{tid} {role_short} | {st.label} {st.confidence:.2f}"
-                    (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-                    pad = 4
-                    ty1 = max(hud_safe_top(), y1 - th - 2 * pad)
-                    if ty1 < hud_safe_top():
-                        ty1 = min(y2 + 2, frame.shape[0] - th - 2 * pad)
-                    ty2 = ty1 + th + 2 * pad
-                    tx2 = min(frame.shape[1] - 1, x1 + tw + 2 * pad)
-                    cv2.rectangle(frame, (x1, ty1), (tx2, ty2), color, -1)
-                    cv2.putText(
-                        frame,
-                        tag,
-                        (x1 + pad, ty2 - pad - 2),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (255, 255, 255),
-                        2,
-                        cv2.LINE_AA,
-                    )
+                        color = ACTIVITY_COLOR.get(st.label, (120, 120, 120))
+                        draw_person(frame, boxes[i], kdata[i], color)
+                        x1, y1, x2, y2 = map(int, boxes[i])
+                        role_short = (
+                            "patient"
+                            if role == "patient"
+                            else ("other" if role == "visitor_or_staff" else "unk")
+                        )
+                        tag = f"ID{tid} {role_short} | {st.label} {st.confidence:.2f}"
+                        (tw, th), _ = cv2.getTextSize(
+                            tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+                        )
+                        pad = 4
+                        ty1 = max(hud_safe_top(), y1 - th - 2 * pad)
+                        if ty1 < hud_safe_top():
+                            ty1 = min(y2 + 2, fh - th - 2 * pad)
+                        ty2 = ty1 + th + 2 * pad
+                        tx2 = min(fw - 1, x1 + tw + 2 * pad)
+                        cv2.rectangle(frame, (x1, ty1), (tx2, ty2), color, -1)
+                        cv2.putText(
+                            frame,
+                            tag,
+                            (x1 + pad, ty2 - pad - 2),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55,
+                            (255, 255, 255),
+                            2,
+                            cv2.LINE_AA,
+                        )
 
-                # Drop stale trackers
-                for dead in [t for t in trackers if t not in seen_ids]:
-                    # keep briefly — clear if idle many frames via simple prune
-                    pass
-                if len(trackers) > 32:
-                    # hard cap
-                    for dead in list(trackers.keys()):
-                        if dead not in seen_ids:
-                            del trackers[dead]
+                    if len(trackers) > 32:
+                        for dead in list(trackers.keys()):
+                            if dead not in seen_ids:
+                                del trackers[dead]
 
             scene = summarize(people)
             # HUD
