@@ -64,12 +64,13 @@ def filter_person_indices(
     boxes: np.ndarray,
     frame_hw: tuple[int, int],
     *,
-    min_kpts: int = 4,
-    min_area_frac: float = 0.025,
-    min_vs_largest: float = 0.28,
+    min_kpts: int = 5,
+    min_area_frac: float = 0.018,
+    min_vs_largest: float = 0.22,
 ) -> list[int]:
     """
     Keep real people; drop hand/arm fragments that YOLO sometimes labels person.
+    Tuned for multi-person rooms (distant people kept; tiny hand boxes dropped).
     """
     if kdata is None or boxes is None or len(boxes) == 0:
         return []
@@ -89,10 +90,17 @@ def filter_person_indices(
         if bh < 1 or bw < 1:
             continue
         aspect = bw / bh
-        if aspect > 2.0 and a < 0.55 * max_a:
+        # hand-like: very wide and much smaller than main person
+        if aspect > 2.2 and a < 0.50 * max_a:
             continue
-        n_kpt, has_face = keypoint_score(kdata[i])
+        n_kpt, has_face = keypoint_score(kdata[i], thr=0.35)
         if n_kpt < min_kpts or not has_face:
+            continue
+        # Prefer detections with at least one hip (better activity)
+        conf = kdata[i][:, 2] if kdata[i].shape[1] >= 3 else np.ones(17)
+        has_hip = bool(conf[11] >= 0.3 or conf[12] >= 0.3)
+        # Keep upper-body-only only if large in frame (close-up)
+        if not has_hip and a < 0.12 * frame_area:
             continue
         keep.append(i)
     return keep

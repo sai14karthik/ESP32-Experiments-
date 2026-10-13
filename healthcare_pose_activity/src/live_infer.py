@@ -2,9 +2,12 @@
 """
 Live multi-person patient monitoring:
   - people count
-  - pose (YOLO-pose skeleton)
+  - pose (YOLO26-pose COCO-17 skeleton)
   - activity per person (sit/stand/walk/lie/fall)
   - heuristic patient vs visitor/staff role
+
+Default model: YOLO26m-pose — best accuracy that still runs real-time on Apple MPS.
+Official COCO pose mAP50-95: n=57.2  s=63.0  m=68.8  l=70.4  x=71.6
 """
 from __future__ import annotations
 
@@ -35,9 +38,39 @@ ACTIVITY_COLOR = {
 assert set(ALL_ACTIVITIES) <= set(ACTIVITY_COLOR), "missing activity colors"
 HUD_H = 110
 
+# Ultralytics YOLO26-pose quality presets (COCO Keypoints mAP50-95 e2e)
+QUALITY = {
+    "fast": {
+        "model": "yolo26n-pose.pt",
+        "imgsz": 512,
+        "conf": 0.40,
+        "map": "57.2",
+    },
+    "balanced": {
+        "model": "yolo26s-pose.pt",
+        "imgsz": 640,
+        "conf": 0.42,
+        "map": "63.0",
+    },
+    # Default: max useful accuracy for live webcam / room monitoring
+    "accurate": {
+        "model": "yolo26m-pose.pt",
+        "imgsz": 640,
+        "conf": 0.40,
+        "map": "68.8",
+    },
+    # Slightly higher mAP; slower — use when FPS headroom exists
+    "max": {
+        "model": "yolo26l-pose.pt",
+        "imgsz": 640,
+        "conf": 0.38,
+        "map": "70.4",
+    },
+}
+DEFAULT_QUALITY = "accurate"
+
 
 def hud_safe_top() -> int:
-    """Keep person tags below the top status bar."""
     return HUD_H + 4
 
 
@@ -52,22 +85,39 @@ def parse_args() -> argparse.Namespace:
         help="webcam index, RTSP URL, or HTTP MJPEG (default: 0)",
     )
     ap.add_argument(
+        "--quality",
+        choices=tuple(QUALITY.keys()),
+        default=os.environ.get("POSE_QUALITY", DEFAULT_QUALITY),
+        help="fast|balanced|accurate(default)|max — model+imgsz preset",
+    )
+    ap.add_argument(
         "--model",
         default=None,
-        help="pose weights (default yolo26s-pose.pt; faster: yolo26n-pose.pt)",
+        help="override pose weights (else from --quality / POSE_MODEL)",
     )
     ap.add_argument(
         "--conf",
         type=float,
-        default=0.45,
-        help="detection confidence (higher reduces hand false-people)",
+        default=None,
+        help="detection confidence (default from --quality)",
     )
-    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--imgsz", type=int, default=None, help="inference size")
     ap.add_argument("--device", default="mps", help="mps | cpu | 0 (cuda)")
+    ap.add_argument(
+        "--tracker",
+        default="bytetrack.yaml",
+        choices=("bytetrack.yaml", "botsort.yaml"),
+        help="ByteTrack (faster) or BoT-SORT (stabler IDs)",
+    )
     ap.add_argument(
         "--no-track",
         action="store_true",
-        help="disable ByteTrack IDs (per-frame only)",
+        help="disable multi-object tracking (per-frame only)",
+    )
+    ap.add_argument(
+        "--no-half",
+        action="store_true",
+        help="disable FP16 (slower, sometimes more stable on MPS)",
     )
     return ap.parse_args()
 
@@ -93,53 +143,119 @@ def pick_device(requested: str) -> str:
     return "cpu" if requested == "mps" else requested
 
 
+def resolve_profile(args: argparse.Namespace) -> dict:
+    q = QUALITY[args.quality]
+    model = (
+        args.model
+        or os.environ.get("POSE_MODEL")
+        or q["model"]
+    )
+    return {
+        "model": model,
+        "imgsz": int(args.imgsz or q["imgsz"]),
+        "conf": float(args.conf if args.conf is not None else q["conf"]),
+        "map": q["map"],
+        "quality": args.quality,
+    }
+
+
+def use_half(device: str, disabled: bool) -> bool:
+    if disabled:
+        return False
+    # FP16 speeds CUDA and usually MPS; skip on CPU
+    return device in ("mps", "0", "cuda") or (
+        isinstance(device, str) and device.isdigit()
+    )
+
+
 def main() -> None:
     args = parse_args()
     source = resolve_source(args.source)
-    model_name = args.model or os.environ.get("POSE_MODEL", "yolo26s-pose.pt")
+    profile = resolve_profile(args)
+    model_name = profile["model"]
     device = pick_device(args.device)
+    half = use_half(device, args.no_half)
 
-    print("loading torch/ultralytics (first run can take ~30–60s)…", flush=True)
+    print("loading torch/ultralytics (first run can take ~30–90s)…", flush=True)
     from ultralytics import YOLO
 
     print(
-        f"patient monitor | model={model_name} device={device} source={source}",
+        f"patient monitor | quality={profile['quality']} "
+        f"model={model_name} (COCO pose mAP≈{profile['map']}) "
+        f"imgsz={profile['imgsz']} conf={profile['conf']} "
+        f"device={device} half={half} source={source}",
         flush=True,
     )
-    print("loading YOLO26s pose weights (accurate COCO-17)…", flush=True)
     model = YOLO(model_name)
     if getattr(model, "task", None) != "pose":
-        raise SystemExit(f"Expected a pose model, got task={model.task!r} for {model_name}")
-    print("opening camera / stream…", flush=True)
-    # Persistent activity state per track id
+        raise SystemExit(
+            f"Expected a pose model (*-pose.pt), got task={model.task!r} for {model_name}"
+        )
+    try:
+        model.fuse()
+    except Exception as e:
+        print(f"fuse skipped ({e})", flush=True)
+
+    # Warmup — first real frame otherwise spikes latency
+    try:
+        dummy = np.zeros((profile["imgsz"], profile["imgsz"], 3), dtype=np.uint8)
+        _ = model.predict(
+            dummy,
+            imgsz=profile["imgsz"],
+            device=device,
+            half=half,
+            verbose=False,
+            conf=profile["conf"],
+            classes=[0],
+            max_det=10,
+        )
+        print("warmup done", flush=True)
+    except Exception as e:
+        print(f"warmup skipped ({e}); continuing", flush=True)
+        half = False
+
     trackers: dict[int, ActivityTracker] = {}
 
     predict_kw = dict(
         source=source,
         stream=True,
-        conf=args.conf,
-        imgsz=args.imgsz,
+        conf=profile["conf"],
+        imgsz=profile["imgsz"],
         device=device,
+        half=half,
         verbose=False,
         show=False,
         classes=[0],  # person only
+        max_det=10,  # patient rooms: few people
+        # YOLO26 is NMS-free end-to-end; keep official setting when supported
+        nms=False,
     )
 
-    use_ids = False
-    if args.no_track:
-        results_iter = model.predict(**predict_kw)
-    else:
-        try:
-            import lap  # noqa: F401 — required by Ultralytics ByteTrack
+    def _start_stream(kw: dict, track: bool):
+        if track:
+            import lap  # noqa: F401
 
-            results_iter = model.track(
-                **predict_kw, persist=True, tracker="bytetrack.yaml"
-            )
-            use_ids = True
-        except Exception as e:
-            print(f"track unavailable ({e}); falling back to predict", flush=True)
-            results_iter = model.predict(**predict_kw)
-            use_ids = False
+            return model.track(**kw, persist=True, tracker=args.tracker), True
+        return model.predict(**kw), False
+
+    use_ids = False
+    want_track = not args.no_track
+    try:
+        results_iter, use_ids = _start_stream(predict_kw, want_track)
+        if use_ids:
+            print(f"tracker={args.tracker}", flush=True)
+    except TypeError:
+        # Older ultralytics may not accept nms=
+        predict_kw.pop("nms", None)
+        results_iter, use_ids = _start_stream(predict_kw, want_track)
+    except Exception as e:
+        print(f"track/predict failed ({e}); retry without nms / track", flush=True)
+        predict_kw.pop("nms", None)
+        try:
+            results_iter, use_ids = _start_stream(predict_kw, want_track)
+        except Exception as e2:
+            print(f"track unavailable ({e2}); predict only", flush=True)
+            results_iter, use_ids = _start_stream(predict_kw, False)
 
     win = "Patient pose + activity (q quit)"
     t0 = time.time()
@@ -147,10 +263,10 @@ def main() -> None:
     try:
         for r in results_iter:
             n += 1
-            # Custom draw only (no YOLO text; no hand false-boxes)
             frame = r.orig_img.copy()
             people: list[PersonView] = []
             fh, fw = frame.shape[:2]
+            counts = {lab: 0 for lab in ALL_ACTIVITIES}
 
             if (
                 r.keypoints is not None
@@ -226,32 +342,59 @@ def main() -> None:
                                 del trackers[dead]
 
             scene = summarize(people)
-            # HUD — all activities: standing / sitting / walking / lying / fall
-            cv2.rectangle(frame, (0, 0), (min(frame.shape[1], 720), HUD_H), (20, 20, 20), -1)
-            line1 = f"People: {scene.people_count}   Patients: {scene.patients}   Other: {scene.others}"
-            counts = {lab: 0 for lab in ALL_ACTIVITIES}
             for p in scene.people:
                 counts[p.activity.label] = counts.get(p.activity.label, 0) + 1
+
+            cv2.rectangle(
+                frame, (0, 0), (min(frame.shape[1], 720), HUD_H), (20, 20, 20), -1
+            )
+            line1 = (
+                f"People: {scene.people_count}   Patients: {scene.patients}   "
+                f"Other: {scene.others}"
+            )
             line2 = (
                 f"stand:{counts['standing']} sit:{counts['sitting']} "
                 f"walk:{counts['walking']} lie:{counts['lying']} "
                 f"fall:{counts['fall_suspected']}"
             )
             if scene.people:
-                acts = ", ".join(
+                line3 = ", ".join(
                     f"ID{p.track_id}:{p.activity.label}" for p in scene.people[:5]
                 )
-                line3 = acts
             else:
-                line3 = "labels: standing | sitting | walking | lying | fall_suspected"
+                line3 = (
+                    f"{model_name} | standing|sitting|walking|lying|fall  "
+                    f"(q quit)"
+                )
             cv2.putText(
-                frame, line1, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
+                frame,
+                line1,
+                (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
             )
             cv2.putText(
-                frame, line2, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 2, cv2.LINE_AA
+                frame,
+                line2,
+                (12, 56),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (200, 220, 255),
+                2,
+                cv2.LINE_AA,
             )
             cv2.putText(
-                frame, line3[:95], (12, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1, cv2.LINE_AA
+                frame,
+                line3[:95],
+                (12, 84),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (180, 255, 180),
+                1,
+                cv2.LINE_AA,
             )
 
             if scene.fall_alerts:
