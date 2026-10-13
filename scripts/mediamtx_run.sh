@@ -179,6 +179,14 @@ EOF
     emit_av_path "$name" "$b"
     i=$((i + 1))
   done
+  # Pull DeepStream annotated RTSP (GPU sink2 :8664) into MediaMTX for viewers.
+  # DS is an RTSP server — do not change its port to 8554; MediaMTX pulls it.
+  cat <<'EOF'
+  deepstream:
+    source: rtsp://10.128.81.10:8664/ds-test
+    sourceOnDemand: yes
+    rtspTransport: tcp
+EOF
 } >"$CONF_RT"
 
 echo "N=${#URLS[@]} video-only camera(s)" >&2
@@ -206,5 +214,11 @@ for b in "${SENSE_BASES[@]+"${SENSE_BASES[@]}"}"; do
   echo "      http://${HOST_LAN}:8888/${name}/" >&2
   i=$((i + 1))
 done
+
+echo "DeepStream MediaMTX relay (pull from GPU :8664):" >&2
+echo "  rtsp://127.0.0.1:8554/deepstream" >&2
+echo "  rtsp://${HOST_LAN}:8554/deepstream" >&2
+echo "  MacBook via GPU jump: ssh -N -L 18554:10.128.93.13:8554 ojl1977@10.128.81.10" >&2
+echo "  then ffplay -rtsp_transport tcp rtsp://127.0.0.1:18554/deepstream" >&2
 
 exec mediamtx "$CONF_RT"

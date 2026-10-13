@@ -46,3 +46,6 @@
 [submodule "whisper-diarization"]
 	path = whisper-diarization
 	url = https://github.com/MahmoudAshraf97/whisper-diarization
+[submodule "Human-Pose-Estimation-and-Action-Recognition"]
+	path = Human-Pose-Estimation-and-Action-Recognition
+	url = https://github.com/MdJafirAshraf/Human-Pose-Estimation-and-Action-Recognition
