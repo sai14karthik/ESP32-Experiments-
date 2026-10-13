@@ -55,6 +55,28 @@ def upper_only_kpts() -> np.ndarray:
     return k
 
 
+def overhead_sitting_kpts() -> np.ndarray:
+    """Ceiling cam sit: bent knees, ankles near hips."""
+    k = _blank()
+    k[0] = [320, 180, 0.9]
+    k[5], k[6] = [280, 220, 0.9], [360, 220, 0.9]
+    k[11], k[12] = [290, 300, 0.9], [350, 300, 0.9]
+    k[13], k[14] = [270, 340, 0.9], [370, 340, 0.9]
+    k[15], k[16] = [285, 320, 0.9], [355, 320, 0.9]
+    return k
+
+
+def overhead_lying_kpts() -> np.ndarray:
+    """Ceiling cam prone: shoulders wide vs short body height."""
+    k = _blank()
+    k[0] = [320, 200, 0.9]
+    k[5], k[6] = [250, 240, 0.9], [390, 240, 0.9]  # wide shoulders
+    k[11], k[12] = [270, 300, 0.9], [370, 300, 0.9]
+    k[13], k[14] = [280, 330, 0.9], [360, 330, 0.9]
+    k[15], k[16] = [290, 350, 0.9], [350, 350, 0.9]
+    return k
+
+
 def test_classify() -> None:
     s = classify_frame(standing_kpts(), box=(180, 80, 300, 500), frame_hw=(720, 1280))
     assert s.label == "standing", s
@@ -70,7 +92,24 @@ def test_classify() -> None:
         upper_only_kpts(), box=(80, 5, 560, 700), frame_hw=(720, 1280)
     )
     assert up.label == "standing", up
-    print("classify_frame OK:", s.label, sit.label, ly_box.label, ly.label, up.label)
+    oh_sit = classify_frame(
+        overhead_sitting_kpts(), box=(250, 160, 400, 370), frame_hw=(480, 640)
+    )
+    assert oh_sit.label == "sitting", oh_sit
+    oh_lie = classify_frame(
+        overhead_lying_kpts(), box=(240, 190, 400, 360), frame_hw=(480, 640)
+    )
+    assert oh_lie.label == "lying", oh_lie
+    print(
+        "classify_frame OK:",
+        s.label,
+        sit.label,
+        ly_box.label,
+        ly.label,
+        up.label,
+        oh_sit.label,
+        oh_lie.label,
+    )
 
 
 def test_walking() -> None:

@@ -1,14 +1,11 @@
 """
 Healthcare activity from YOLO-pose COCO-17 keypoints.
 
-Rules aligned with common open real-time pipelines (YOLO-pose + geometry):
-  - bbox aspect ratio → lying vs upright (pose-estimation-task / fall papers)
-  - hip–knee–ankle & shoulder–hip–knee angles → sitting vs standing
-    (YOLOv8 HAR angle demos; MediaPipe / ML Kit angle heuristics)
-  - normalized centroid velocity over a short window → walking
-  - upright → horizontal + drop → fall_suspected (temporal, not single frame)
-
-Pose keypoints themselves come from Ultralytics YOLO26-pose (not this file).
+Works for side views and overhead / ceiling cameras (Sense room cams):
+  - lying: bbox aspect, torso tilt, OR body width/height from keypoints (top-down)
+  - sitting: knee/hip angles OR ankles close to hips (foreshortened sit)
+  - standing: tall body vs shoulder width + straight legs
+  - walking / fall_suspected: temporal (unchanged)
 """
 from __future__ import annotations
 
@@ -21,7 +18,6 @@ import numpy as np
 NOSE, L_SHO, R_SHO, L_HIP, R_HIP = 0, 5, 6, 11, 12
 L_KNEE, R_KNEE, L_ANK, R_ANK = 13, 14, 15, 16
 
-# Full healthcare label set (live HUD + roles must cover all of these)
 ALL_ACTIVITIES = (
     "standing",
     "sitting",
@@ -39,7 +35,7 @@ class ActivityState:
     detail: str = ""
 
 
-def _ok(kpts: np.ndarray, idx: int, thr: float = 0.4) -> bool:
+def _ok(kpts: np.ndarray, idx: int, thr: float = 0.35) -> bool:
     if kpts is None or idx >= len(kpts):
         return False
     if kpts.shape[1] >= 3:
@@ -47,7 +43,7 @@ def _ok(kpts: np.ndarray, idx: int, thr: float = 0.4) -> bool:
     return True
 
 
-def _pt(kpts: np.ndarray, idx: int, thr: float = 0.4) -> Optional[np.ndarray]:
+def _pt(kpts: np.ndarray, idx: int, thr: float = 0.35) -> Optional[np.ndarray]:
     if not _ok(kpts, idx, thr=thr):
         return None
     return kpts[idx, :2].astype(float)
@@ -71,7 +67,7 @@ def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
 
 
 def _torso_tilt_deg(shoulder: np.ndarray, hip: np.ndarray) -> float:
-    """0° ≈ vertical upright, 90° ≈ horizontal (lying)."""
+    """0° ≈ image-vertical, 90° ≈ image-horizontal."""
     v = shoulder - hip
     vertical = np.array([0.0, -1.0])
     nv = np.linalg.norm(v)
@@ -86,29 +82,41 @@ def _mean_angle(angles: list[float]) -> float:
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def _kpt_span(kpts: np.ndarray, thr: float = 0.3) -> tuple[float, float, float]:
+    """Return (width, height, shoulder_width) of confident keypoints."""
+    pts = []
+    for i in range(min(17, len(kpts))):
+        if _ok(kpts, i, thr=thr):
+            pts.append(kpts[i, :2].astype(float))
+    if len(pts) < 3:
+        return float("nan"), float("nan"), float("nan")
+    arr = np.stack(pts, axis=0)
+    w = float(arr[:, 0].max() - arr[:, 0].min())
+    h = float(arr[:, 1].max() - arr[:, 1].min())
+    l_sho, r_sho = _pt(kpts, L_SHO, thr), _pt(kpts, R_SHO, thr)
+    sw = float(np.linalg.norm(l_sho - r_sho)) if l_sho is not None and r_sho is not None else float("nan")
+    return w, h, sw
+
+
 def classify_frame(
     kpts: np.ndarray,
     box: Optional[tuple[float, float, float, float]] = None,
     frame_hw: Optional[tuple[int, int]] = None,
 ) -> ActivityState:
     """
-    Single-frame posture (before temporal walking/fall).
-    Priority: lying (aspect/tilt) → sitting (knee/hip angles) → standing.
+    Priority: lying → sitting → standing.
+    Overhead-safe: uses body width/height + ankle–hip compactness, not only side-view tilt.
     """
     if kpts is None or len(kpts) < 17:
         return ActivityState("unknown", 0.0, "no_pose")
 
-    # --- bbox aspect (strong lying / upright cues) ---
     aspect = float("nan")
-    box_h = float("nan")
     if box is not None:
         x1, y1, x2, y2 = box
         bw = max(1.0, x2 - x1)
         bh = max(1.0, y2 - y1)
         aspect = bw / bh
-        box_h = bh
-        # Lying: wide box (published rule: w > 1.5 * h)
-        if aspect >= 1.5:
+        if aspect >= 1.35:
             return ActivityState("lying", 0.9, f"bbox_aspect={aspect:.2f}")
 
     nose = _pt(kpts, NOSE)
@@ -119,8 +127,18 @@ def classify_frame(
 
     shoulder = _mid(l_sho, r_sho)
     hip = _mid(l_hip, r_hip)
+    ankle = _mid(l_ank, r_ank)
+    knee = _mid(l_knee, r_knee)
 
-    # Close-up without hips: limited confidence — prefer unknown over wrong sit
+    span_w, span_h, sho_w = _kpt_span(kpts)
+    body_wh = (
+        span_w / max(span_h, 1.0) if not np.isnan(span_w) and not np.isnan(span_h) else float("nan")
+    )
+    # Overhead lying: body fills frame more like a blob — wide vs tall OR shoulders wide vs height
+    flatness = (
+        sho_w / max(span_h, 1.0) if not np.isnan(sho_w) and not np.isnan(span_h) else float("nan")
+    )
+
     if shoulder is not None and hip is None:
         if box is not None and frame_hw is not None:
             fh = max(1, int(frame_hw[0]))
@@ -137,27 +155,46 @@ def classify_frame(
         return ActivityState("unknown", 0.0, "missing_torso")
 
     tilt = _torso_tilt_deg(shoulder, hip)
+    torso_len = float(np.linalg.norm(shoulder - hip))
 
-    # Lying by torso orientation
-    if not np.isnan(tilt) and tilt >= 55:
-        conf = min(0.95, 0.6 + (tilt - 55) / 70)
+    # --- Lying ---
+    if not np.isnan(tilt) and tilt >= 50:
+        conf = min(0.95, 0.6 + (tilt - 50) / 70)
         return ActivityState("lying", conf, f"torso_tilt={tilt:.0f}")
+    if not np.isnan(body_wh) and body_wh >= 1.15:
+        return ActivityState("lying", 0.85, f"kpt_aspect={body_wh:.2f}")
+    if not np.isnan(flatness) and flatness >= 0.55 and (
+        np.isnan(tilt) or tilt >= 25
+    ):
+        # Top-down on bed: shoulders almost as wide as body height in image
+        return ActivityState("lying", 0.8, f"flatness={flatness:.2f} tilt={tilt:.0f}")
+    # Prone along image vertical (common overhead fail): ankles near shoulders in Y
+    # and torso short vs shoulder width → collapsed on bed
+    if (
+        ankle is not None
+        and not np.isnan(sho_w)
+        and torso_len > 1
+        and sho_w / torso_len >= 1.15
+    ):
+        ank_hip = float(np.linalg.norm(ankle - hip))
+        if ank_hip < torso_len * 1.35:
+            return ActivityState(
+                "lying", 0.78, f"prone_compact sho/torso={sho_w / torso_len:.2f}"
+            )
 
-    # Knee angles (hip–knee–ankle) — sitting / squatting when bent
+    # --- Angles ---
     knee_angles = []
     for hi, kn, an in ((l_hip, l_knee, l_ank), (r_hip, r_knee, r_ank)):
         if hi is not None and kn is not None and an is not None:
             knee_angles.append(_angle_deg(hi, kn, an))
-    knee = _mean_angle(knee_angles)
+    knee_ang = _mean_angle(knee_angles)
 
-    # Hip angles (shoulder–hip–knee) — HAR demos use ~110° sit threshold
     hip_angles = []
     for sh, hi, kn in ((l_sho, l_hip, l_knee), (r_sho, r_hip, r_knee)):
         if sh is not None and hi is not None and kn is not None:
             hip_angles.append(_angle_deg(sh, hi, kn))
     hip_ang = _mean_angle(hip_angles)
 
-    # Nose–hip–knee (alternate sit cue when shoulders noisy)
     nhk = float("nan")
     if nose is not None and hip is not None:
         for kn in (l_knee, r_knee):
@@ -166,42 +203,67 @@ def classify_frame(
                 if not np.isnan(a):
                     nhk = a if np.isnan(nhk) else 0.5 * (nhk + a)
 
-    # Sitting: bent knees OR bent hip
-    if (not np.isnan(knee) and knee < 130) or (not np.isnan(hip_ang) and hip_ang < 115):
-        conf = 0.7
-        if not np.isnan(knee) and knee < 110:
+    # Ankle–hip distance vs torso (sitting / crouched from above)
+    sit_compact = float("nan")
+    if ankle is not None and torso_len > 1:
+        sit_compact = float(np.linalg.norm(ankle - hip)) / torso_len
+    elif knee is not None and torso_len > 1:
+        sit_compact = float(np.linalg.norm(knee - hip)) / torso_len
+
+    # --- Sitting ---
+    # Angle: bent knees/hips. Geom: ankles close to hips (overhead sit); stand ~1.4+
+    sit_angle = (not np.isnan(knee_ang) and knee_ang < 135) or (
+        not np.isnan(hip_ang) and hip_ang < 120
+    )
+    sit_geom = not np.isnan(sit_compact) and sit_compact < 1.15
+    if sit_angle or sit_geom:
+        conf = 0.72
+        if not np.isnan(knee_ang) and knee_ang < 120:
             conf = 0.88
+        elif sit_geom:
+            conf = 0.8
         return ActivityState(
             "sitting",
             conf,
-            f"knee={knee:.0f} hip_ang={hip_ang:.0f}",
+            f"knee={knee_ang:.0f} hip_ang={hip_ang:.0f} compact={sit_compact:.2f}",
         )
-    if not np.isnan(nhk) and nhk < 110:
+    if not np.isnan(nhk) and nhk < 115:
         return ActivityState("sitting", 0.72, f"nose_hip_knee={nhk:.0f}")
 
-    # Standing: upright bbox and/or straight legs
-    upright_box = (not np.isnan(aspect) and aspect < 0.65) or (
-        not np.isnan(tilt) and tilt < 40
+    # --- Standing ---
+    tall = (not np.isnan(flatness) and flatness < 0.42) or (
+        not np.isnan(aspect) and aspect < 0.75
     )
-    straight_legs = np.isnan(knee) or knee >= 140
-    if upright_box and straight_legs:
-        conf = 0.8 if (not np.isnan(knee) and knee >= 150) else 0.65
-        return ActivityState("standing", conf, f"tilt={tilt:.0f} knee={knee:.0f} asp={aspect:.2f}")
+    legs_long = np.isnan(sit_compact) or sit_compact >= 1.25
+    straight = np.isnan(knee_ang) or knee_ang >= 140
+    upright_tilt = np.isnan(tilt) or tilt < 45
 
-    if upright_box:
-        return ActivityState("standing", 0.55, f"upright_box asp={aspect:.2f}")
+    if tall and legs_long and straight and upright_tilt:
+        conf = 0.8 if (not np.isnan(knee_ang) and knee_ang >= 155) else 0.65
+        return ActivityState(
+            "standing",
+            conf,
+            f"tilt={tilt:.0f} knee={knee_ang:.0f} flat={flatness:.2f} compact={sit_compact:.2f}",
+        )
 
-    return ActivityState("unknown", 0.3, f"tilt={tilt:.0f} knee={knee:.0f} asp={aspect:.2f}")
+    if upright_tilt and legs_long and (np.isnan(flatness) or flatness < 0.5):
+        return ActivityState("standing", 0.5, f"upright_fallback tilt={tilt:.0f}")
+
+    return ActivityState(
+        "unknown",
+        0.3,
+        f"tilt={tilt:.0f} knee={knee_ang:.0f} flat={flatness:.2f} compact={sit_compact:.2f}",
+    )
 
 
 class ActivityTracker:
-    """Temporal smoothing + walking / fall_suspected for all ALL_ACTIVITIES labels."""
+    """Temporal smoothing + walking / fall_suspected."""
 
     def __init__(
         self,
         window: int = 20,
         fall_frames: int = 8,
-        walk_speed: float = 0.022,  # fraction of bbox height per frame
+        walk_speed: float = 0.022,
         walk_confirm: int = 2,
     ):
         self.window = window
@@ -225,9 +287,9 @@ class ActivityTracker:
         frame_hw: Optional[tuple[int, int]] = None,
     ) -> ActivityState:
         frame = classify_frame(kpts, box=box, frame_hw=frame_hw)
-        hip = _mid(_pt(kpts, L_HIP, 0.35), _pt(kpts, R_HIP, 0.35))
+        hip = _mid(_pt(kpts, L_HIP, 0.3), _pt(kpts, R_HIP, 0.3))
         sho = _mid(_pt(kpts, L_SHO), _pt(kpts, R_SHO))
-        ank = _mid(_pt(kpts, L_ANK, 0.3), _pt(kpts, R_ANK, 0.3))
+        ank = _mid(_pt(kpts, L_ANK, 0.25), _pt(kpts, R_ANK, 0.25))
         tilt = (
             _torso_tilt_deg(sho, hip)
             if sho is not None and hip is not None
@@ -254,14 +316,12 @@ class ActivityTracker:
             self.centers.append(c)
             self.box_hs.append(bh)
 
-        # Fall first (overrides all)
         fall = self._fall_suspected()
         if fall:
             st = ActivityState("fall_suspected", 0.85, fall)
             self._last = st
             return st
 
-        # Walking before EMA so motion is not smoothed into standing
         if (not upper_only) and frame.label not in ("lying",) and self._is_walking():
             st = ActivityState("walking", 0.78, "centroid_velocity")
             self.labels[-1] = "walking"
@@ -273,24 +333,21 @@ class ActivityTracker:
             self._last = frame
             return frame
 
-        # EMA over recent labels (standing / sitting / lying)
         st = self._smooth(frame)
         self._last = st
         return st
 
     def _smooth(self, frame: ActivityState) -> ActivityState:
-        # decay and boost current (walking handled only by _is_walking)
         for k in list(self._ema.keys()):
-            self._ema[k] *= 0.85
+            self._ema[k] *= 0.78  # faster forget — posture changes quickly
+        boost = 0.55 if frame.label in ("lying", "sitting", "fall_suspected") else 0.35
+        if frame.confidence >= 0.75:
+            boost += 0.15
         if frame.label != "walking":
-            self._ema[frame.label] = self._ema.get(frame.label, 0.0) + 0.35
-        if self.labels:
-            vals, counts = np.unique(np.array(self.labels), return_counts=True)
-            for v, c in zip(vals, counts):
-                lab = str(v)
-                if lab == "walking":
-                    continue
-                self._ema[lab] = self._ema.get(lab, 0.0) + 0.05 * float(c)
+            self._ema[frame.label] = self._ema.get(frame.label, 0.0) + boost
+        # Strong lie/sit should not stay stuck on standing
+        if frame.label in ("lying", "sitting") and frame.confidence >= 0.75:
+            self._ema["standing"] = self._ema.get("standing", 0.0) * 0.4
 
         candidates = {k: v for k, v in self._ema.items() if k != "walking"}
         if not candidates:
@@ -302,44 +359,35 @@ class ActivityTracker:
         return ActivityState(lab, conf, detail)
 
     def _is_walking(self) -> bool:
-        """
-        Walking = upright-ish + sustained body motion (any direction).
-        Sideways OR toward/away camera both count (prior bug: horizontal-only).
-        """
         if len(self.centers) < 5 or len(self.box_hs) < 5:
             self.walk_hits = max(0, self.walk_hits - 1)
             return False
 
-        # Allow gait with slight knee bend (sitting flicker while stepping)
         mobile = sum(
             1 for x in self.labels if x in ("standing", "walking", "unknown")
         )
-        lyingish = sum(1 for x in self.labels if x in ("lying", "fall_suspected"))
-        if lyingish >= 3 or mobile < max(3, len(self.labels) // 3):
+        lyingish = sum(1 for x in self.labels if x in ("lying", "fall_suspected", "sitting"))
+        if lyingish >= 4 or mobile < max(3, len(self.labels) // 3):
             self.walk_hits = max(0, self.walk_hits - 1)
             return False
 
         cs = list(self.centers)
         bhs = list(self.box_hs)
         hs = max(1.0, float(np.median(bhs)))
-        # short + medium windows (sideways / diagonal)
         d_short = float(np.linalg.norm(cs[-1] - cs[-4])) / hs
         d_med = float(np.linalg.norm(cs[-1] - cs[max(0, len(cs) - 7)])) / hs
 
-        # toward / away camera: bbox height changes while upright
         scale_ok = False
         if len(bhs) >= 6:
             rel = abs(bhs[-1] - bhs[-6]) / max(1.0, float(np.mean(bhs[-6:])))
-            scale_ok = rel > 0.08  # ~8% size change over ~6 frames
+            scale_ok = rel > 0.08
 
-        # hip path (more stable than box jitter)
         hip_ok = False
         if len(self.hips) >= 5:
             hips = list(self.hips)
             d_hip = float(np.linalg.norm(hips[-1] - hips[-5])) / hs
             hip_ok = d_hip > self.walk_speed * 3.5
 
-        # ankle stride (legs moving even if torso slow)
         ank_ok = False
         if len(self.ankles) >= 5:
             anks = list(self.ankles)
@@ -375,7 +423,6 @@ class ActivityTracker:
             return f"tilt {past:.0f}->{now:.0f} dy={dy:.0f}"
         if past < 35 and now > 60:
             return f"tilt {past:.0f}->{now:.0f}"
-        # also: recent labels flipped to lying quickly
         if len(self.labels) >= 10:
             early = list(self.labels)[-10:-5]
             late = list(self.labels)[-5:]

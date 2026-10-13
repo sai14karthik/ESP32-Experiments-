@@ -157,9 +157,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--device", default="mps", help="mps | cpu | 0 (cuda)")
     ap.add_argument(
         "--tracker",
-        default="bytetrack.yaml",
-        choices=("bytetrack.yaml", "botsort.yaml"),
-        help="ByteTrack (faster) or BoT-SORT (stabler IDs)",
+        default=str(ROOT / "trackers" / "bytetrack_stable.yaml"),
+        help="tracker yaml (default: longer-buffer ByteTrack for stable IDs)",
     )
     ap.add_argument(
         "--no-track",
