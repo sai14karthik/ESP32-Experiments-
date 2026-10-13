@@ -21,7 +21,7 @@ if [[ -n "${POSE_MODEL:-}" ]]; then
 fi
 
 VENV="${ROOT}/.venv"
-DEPS=(ultralytics>=8.4.175 opencv-python numpy lap)
+DEPS=("ultralytics>=8.4.175" opencv-python numpy lap)
 
 # Persistent venv — avoids hitting PyPI every launch (lab DNS often broken)
 ensure_venv() {
