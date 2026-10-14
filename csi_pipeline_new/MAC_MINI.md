@@ -363,35 +363,45 @@ Session `recv_port` is stored as `tcp:9055:multi`. Rows include `source_id` (cli
 
 ## Method 4.2 — Between two devices (same AP)
 
-**Two** C5s join the **same** AP. **Sense** board measures CSI from **peer** MAC `1a:00:00:00:00:0a`.
+Espressif **§4.2 Get CSI between devices** (`csi_between_devices`).  
+Both STAs join the **same** AP and ping the gateway. **Sense** measures CSI from **peer** MAC `1a:00:00:00:00:0a` (peer’s ping frames), **not** from the router reply (§4.1).
+
+Canonical docs: [`docs/CSI_METHODS.md`](../docs/CSI_METHODS.md) · diagram `esp-csi/docs/_static/get_device_csi.png`.
 
 ### Flash
 
 ```bash
 cd ~/Desktop/camera_module
-./scripts/flash_csi_between.sh 'YourSSID' 'YourPassword' /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-# first port = PEER, second = SENSE (ingest this one)
+./scripts/flash_csi_between.sh 'YourSSID' 'YourPassword' /dev/cu.usbmodem101 /dev/cu.usbserial-110
+# first port = PEER, second = SENSE (ingest / monitor this one)
+./scripts/monitor_csi_between.sh /dev/cu.usbserial-110
 ```
 
 ### Hardware on the Mini
 
 | Board | Connection |
 |-------|------------|
-| **Sense** (CSI output) | USB → Mac Mini |
+| **Sense** (CSI output) | USB → Mac Mini (or laptop) |
 | **Peer** (traffic generator) | Power or second USB (no ingest on peer port) |
 
 ### Ingest (sense port only)
 
 ```bash
-cd csi_pipeline
-./run_ingest.sh --probe          # pick the port with CSI_DATA
-./run_ingest.sh --port /dev/cu.usbmodem2101 --method 4.2 --label between_run1
+# Postgres path (csi_pipeline_new)
+./run_ingest.sh --probe
+./run_ingest.sh --port /dev/cu.usbserial-110 --method 4.2 --label between_run1
+
+# Or presence GT folder collect
+cd ../csi_presence_c5
+./scripts/collect_session.sh --rx /dev/cu.usbserial-110 --session between_01 \
+  --camera rtsp://127.0.0.1:8554/cam_sense
 ```
 
 | Expect | Value |
 |--------|--------|
 | `mac` | `1a:00:00:00:00:0a` (peer) |
 | AP | Required; both boards on same SSID |
+| Mini TCP `:9055` | **No** — that is §4.1 `csi_recv_router` only |
 
 ---
 

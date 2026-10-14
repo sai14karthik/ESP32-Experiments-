@@ -1,19 +1,26 @@
 # CSI presence data collection (Mac Mini + wall-powered ESP32-C5)
 
 **Collect only** — CSI + CV ground truth (empty vs occupied).  
-**Target host:** Mac Mini. Boards run on **wall power**; USB is for flash only.
+**Target host:** Mac Mini.
+
+Espressif methods (see [`docs/CSI_METHODS.md`](../docs/CSI_METHODS.md)):
+
+| Method | Firmware | How CSI is taken | This project |
+|--------|----------|------------------|--------------|
+| **§4.1** Router CSI | `csi_recv_router` + TCP | Each C5: CSI from **AP** ping reply | **Default** — wall power → Mini `:9055` |
+| **§4.2** Between devices | `csi_between_devices` | Sense C5: CSI from **peer** STA MAC | USB `--rx` on sense (peer can be wall) |
+| **§4.3** Sender+recv | `csi_send` + `csi_recv` | ESP‑NOW | Later |
 
 ```
+§4.1 (default Mini path)
 LabPSK AP
-   ↑ CSI (method 4.1 ping)
+   ↑ CSI (router ping reply)
 C5 #1 (wall) ──TCP :9055──┐
 C5 #2 (wall) ──TCP :9055──┼──► Mac Mini collect + YOLO26-pose GT
-Webcam/camera on Mini ────┘
+Sense cam (.15 / MediaMTX) ──┘
 ```
 
-## Once: flash boards (USB), then unplug to wall power
-
-On a machine with ESP-IDF (this Mac or Mini):
+## Flash §4.1 (wall TCP) — default
 
 ```bash
 cd csi_presence_c5
@@ -24,6 +31,29 @@ cp configs/wifi.env.example configs/wifi.env
 ```
 
 Then unplug USB → wall power. Boards join LabPSK and open TCP to Mini `:9055`.
+
+## Flash §4.2 (between devices) — optional campaign
+
+From **repo root** (not this folder). First port = **PEER**, second = **SENSE**:
+
+```bash
+cd ..   # camera_module root
+./scripts/flash_csi_between.sh   # uses csi_presence_c5/configs/wifi.env if present
+# or: ./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'PASSWORD' PEER_PORT SENSE_PORT
+
+./scripts/monitor_csi_between.sh SENSE_PORT
+# expect: CSI_DATA,…,1a:00:00:00:00:0a,…
+```
+
+Collect with **sense on USB** (Mini TCP will not see 4.2 boards):
+
+```bash
+cd csi_presence_c5
+./scripts/collect_session.sh --rx /dev/cu.usbserial-110 \
+  --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
+```
+
+To go back to Mini wall TCP, re-run `./scripts/flash_wall_tcp.sh` (§4.1).
 
 ## Collect on Mac Mini
 

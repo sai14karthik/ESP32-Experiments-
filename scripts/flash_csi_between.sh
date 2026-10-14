@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Espressif 4.2 — flash CSI-between-devices on two ESP32-C5 boards.
-# Both join the same AP and ping the gateway. Sense board measures CSI from peer MAC.
+# Espressif §4.2 — Get CSI between devices
+#   https://github.com/espressif/esp-csi  (README “4.2 Get CSI between devices”)
+# Example: esp-csi/examples/get-started/csi_between_devices
+#
+# Both STAs join the same AP and ping the gateway. The SENSE board enables
+# promiscuous CSI and filters by the PEER STA MAC (1a:00:00:00:00:0a) —
+# CSI is from the peer’s ping frames, not from the router reply (that is §4.1).
 #
 # Usage (from repo root):
-#   ./scripts/flash_csi_between.sh 'SaiPhone' '123456789'
-#   ./scripts/flash_csi_between.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+#   ./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'PASSWORD'
+#   ./scripts/flash_csi_between.sh 'SSID' 'PASS' /dev/cu.usbmodem101 /dev/cu.usbserial-110
+#   ./scripts/flash_csi_between.sh   # SSID/PASS from wifi.env or sdkconfig.defaults.local
 #
-# If SSID/PASS omitted, reuses csi_recv_router/sdkconfig.defaults.local when present.
-# First port = PEER (traffic, MAC 1a:00:00:00:00:0a)
-# Second port = SENSE (plot this one)
+# First port  = PEER  (traffic source, fixed MAC 1a:00:00:00:00:0a)
+# Second port = SENSE (CSI_DATA / plot / collect --rx)
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/serial_helpers.sh
@@ -18,21 +23,35 @@ source "$ROOT/scripts/serial_helpers.sh"
 
 PROJECT="$ROOT/esp-csi/examples/get-started/csi_between_devices"
 ROUTER_LOCAL="$ROOT/esp-csi/examples/get-started/csi_recv_router/sdkconfig.defaults.local"
+PRESENCE_WIFI="$ROOT/csi_presence_c5/configs/wifi.env"
 LOCAL="$PROJECT/sdkconfig.defaults.local"
 
 SSID="${1:-}"
 PASS="${2:-}"
 
+# Optional: only SSID/PASS omitted → try known local configs
+if [[ -z "$SSID" || -z "$PASS" ]]; then
+  if [[ -f "$PRESENCE_WIFI" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "$PRESENCE_WIFI"; set +a
+    SSID="${WIFI_SSID:-}"
+    PASS="${WIFI_PASSWORD:-}"
+  fi
+fi
 if [[ -z "$SSID" || -z "$PASS" ]]; then
   if [[ -f "$ROUTER_LOCAL" ]]; then
     SSID="$(sed -n 's/^CONFIG_EXAMPLE_WIFI_SSID="\(.*\)"/\1/p' "$ROUTER_LOCAL" | head -1)"
     PASS="$(sed -n 's/^CONFIG_EXAMPLE_WIFI_PASSWORD="\(.*\)"/\1/p' "$ROUTER_LOCAL" | head -1)"
   fi
 fi
+if [[ -z "$SSID" || -z "$PASS" ]] && [[ -f "$LOCAL" ]]; then
+  SSID="$(sed -n 's/^CONFIG_EXAMPLE_WIFI_SSID="\(.*\)"/\1/p' "$LOCAL" | head -1)"
+  PASS="$(sed -n 's/^CONFIG_EXAMPLE_WIFI_PASSWORD="\(.*\)"/\1/p' "$LOCAL" | head -1)"
+fi
 
 if [[ -z "$SSID" || -z "$PASS" ]]; then
   echo "Usage: $0 \"SSID\" \"PASSWORD\" [peer-port] [sense-port]"
-  echo "Or create Wi-Fi local config first via ./scripts/set_csi_wifi.sh"
+  echo "Or set csi_presence_c5/configs/wifi.env / run ./scripts/set_csi_wifi.sh first"
   exit 1
 fi
 
@@ -136,8 +155,13 @@ bash --noprofile --norc -c '
 '
 
 echo
-echo "Done (Espressif 4.2)."
-echo "  Peer  MAC 1a:00:00:00:00:0a : $PEER_PORT"
-echo "  Sense (plot this)           : $SENSE_PORT"
-echo "Enable Wi-Fi \"$SSID\", then:"
+echo "Done (Espressif §4.2 — CSI between devices)."
+echo "  Peer  MAC 1a:00:00:00:00:0a : $PEER_PORT   (power + same AP; no CSI plot)"
+echo "  Sense (CSI_DATA)            : $SENSE_PORT   (monitor / plot / collect --rx)"
+echo "AP SSID: $SSID"
+echo "Verify:"
+echo "  ./scripts/monitor_csi_between.sh $SENSE_PORT"
+echo "  # expect CSI_DATA,…,1a:00:00:00:00:0a,…"
 echo "  ./scripts/plot_csi.sh $SENSE_PORT"
+echo "Presence collect (USB sense, not Mini TCP 4.1):"
+echo "  cd csi_presence_c5 && ./scripts/collect_session.sh --rx $SENSE_PORT --session between_01 --camera rtsp://127.0.0.1:8554/cam_sense"

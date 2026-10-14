@@ -78,50 +78,60 @@ screen /dev/cu.usbmodem101 115200
 
 ## 4.2 — Get CSI between devices (two C5s + AP)
 
-Both join the **same** AP and ping. Sense board measures CSI from the **peer** STA (`1a:00:00:00:00:0a`), not the router.
+Espressif README: *“ESP32 A and B both send Ping packets to the router, and ESP32 A receives the CSI information carried in the Ping sent by ESP32 B.”*
 
-| | |
-|---|---|
-| Boards | 2× |
-| Firmware | `csi_between_devices` |
-| Peer port | Traffic only (usually no CSI lines) |
-| Sense port | **Terminal / plot this one** |
+Diagram in tree: `esp-csi/docs/_static/get_device_csi.png` (looks similar to two router pings; **trust the text + MAC filter**, not the arrow art alone).
+
+| | §4.1 router CSI | **§4.2 between devices** |
+|---|---|---|
+| Example | `csi_recv_router` | `csi_between_devices` |
+| CSI source MAC | AP BSSID | **Peer STA** `1a:00:00:00:00:0a` |
+| Boards | 1× (or N× each sensing the AP) | **2×** with roles PEER + SENSE |
+| Sense does | CSI on router ping *reply* | Promiscuous CSI on peer’s ping *frames* |
+| Mini TCP wall collect | Yes (`flash_wall_tcp.sh`) | Not yet — use **USB sense** (`--rx`) |
+
+| Role | Firmware flag | What it does |
+|------|---------------|--------------|
+| **PEER** | `CONFIG_CSI_BETWEEN_ROLE_PEER` | Sets STA MAC `1a:00:00:00:00:0a`, joins AP, pings GW (traffic) |
+| **SENSE** | `CONFIG_CSI_BETWEEN_ROLE_SENSE` | Joins AP, pings GW, CSI filter = peer MAC only |
 
 ### Flash examples
 
 ```bash
-./scripts/flash_csi_between.sh 'SaiPhone' '123456789'
-./scripts/flash_csi_between.sh 'SaiPhone' '123456789' /dev/cu.usbmodem101 /dev/cu.usbmodem2101
+# Explicit SSID + ports (1st=PEER, 2nd=SENSE)
+./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'PASSWORD' \
+  /dev/cu.usbmodem101 /dev/cu.usbserial-110
 
-./scripts/flash_csi_between.sh 'SpectrumSetup-EB9C' 'unitedvideo788' \
-  /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-
-./scripts/flash_csi_between.sh 'YourSSID' 'YourPassword' \
-  /dev/cu.usbmodem101 /dev/cu.usbmodem2101
-
-# Reuse Wi‑Fi from csi_recv_router/sdkconfig.defaults.local; auto-detect ports
+# SSID/PASS from csi_presence_c5/configs/wifi.env or sdkconfig.defaults.local
 ./scripts/flash_csi_between.sh
+./scripts/flash_csi_between.sh '' '' /dev/cu.usbmodem101 /dev/cu.usbserial-110
 ```
 
-### See output in terminal (sense board)
+Flash verifies each image: peer build has `CONFIG_CSI_BETWEEN_ROLE_PEER=y`, sense has `…_SENSE=y`.
+
+### See output in terminal (sense board only)
 
 ```bash
-source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
-cd esp-csi/examples/get-started/csi_between_devices
-idf.py -B build-sense -p /dev/cu.usbmodem2101 monitor
+./scripts/monitor_csi_between.sh /dev/cu.usbserial-110
 
 # Or plain serial
-screen /dev/cu.usbmodem2101 115200
+screen /dev/cu.usbserial-110 115200
 ```
 
-(`./scripts/monitor_csi.sh` is **4.1 only** — do not use it for 4.2.)
+(`./scripts/monitor_csi.sh` is **4.1 only** — wrong example tree.)
 
-**Expect:** `CSI_DATA,…,1a:00:00:00:00:0a,…`
+**Expect:** `role=SENSE` then `CSI_DATA,…,1a:00:00:00:00:0a,…`  
+Peer log: `role=PEER` / pinging — usually **no** `CSI_DATA`.
 
-### Optional plot
+### Optional plot / presence GT
 
 ```bash
-./scripts/plot_csi.sh /dev/cu.usbmodem2101
+./scripts/plot_csi.sh /dev/cu.usbserial-110
+
+# Presence session (sense USB; peer on wall power OK)
+cd csi_presence_c5
+./scripts/collect_session.sh --rx /dev/cu.usbserial-110 \
+  --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
 ```
 
 ---
@@ -184,11 +194,17 @@ One firmware image per board at a time.
 |--------|---------|---------|
 | `./scripts/set_csi_wifi.sh` | 4.1 | Set SSID/password, build, flash `csi_recv_router` |
 | `./scripts/monitor_csi.sh` | **4.1 only** | IDF serial monitor (`csi_recv_router`) |
-| `./scripts/flash_csi_between.sh` | 4.2 | Flash peer + sense |
+| `./scripts/flash_csi_between.sh` | **4.2** | Flash peer + sense (`csi_between_devices`) |
+| `./scripts/monitor_csi_between.sh` | **4.2 only** | IDF monitor on **sense** port |
 | `./scripts/flash_csi_pair.sh` | 4.3 | Flash send + recv |
-| [`csi_pipeline/MAC_MINI.md`](csi_pipeline/MAC_MINI.md) | 4.1–4.3 | Mac Mini → PostgreSQL ingest |
-| `idf.py -p PORT monitor` | 4.2 / 4.3 | Terminal output (from correct example dir) |
-| `screen PORT 115200` | all | Terminal output without IDF |
+| [`csi_pipeline_new/MAC_MINI.md`](csi_pipeline_new/MAC_MINI.md) | 4.1–4.3 | Mac Mini → PostgreSQL ingest |
+| `idf.py -B build-sense -p PORT monitor` | 4.2 | From `csi_between_devices` |
+| `screen PORT 115200` | all | Terminal without IDF |
 | `./scripts/plot_csi.sh` | all | Live CSI plot (optional) |
 | `./scripts/setup_python.sh` | — | Create `.venv` for the plotter |
+
+IDF activate (when needed):
+
+```bash
 source "$HOME/.espressif/tools/activate_idf_v6.0.2.sh"
+```

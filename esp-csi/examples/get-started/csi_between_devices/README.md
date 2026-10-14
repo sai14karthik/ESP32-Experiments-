@@ -1,24 +1,33 @@
 # csi_between_devices (Espressif §4.2)
 
-CSI **between two STAs** on the same AP — matches [esp-csi README §4.2](../../../README.md#42-get-csi-between-devices).
+**Get CSI between devices** — matches [esp-csi README §4.2](../../../README.md#42-get-csi-between-devices) and diagram [`docs/_static/get_device_csi.png`](../../../docs/_static/get_device_csi.png).
 
-Both boards join Wi‑Fi and ping the gateway. The **sense** board enables promiscuous mode and filters CSI by the **peer** board’s fixed MAC (`1a:00:00:00:00:0a`).
+> Both STAs join the same AP and ping the gateway. The **sense** board measures CSI from frames **transmitted by the peer STA** (promiscuous + MAC filter `1a:00:00:00:00:0a`), *not* from the router’s ping reply (that is §4.1 `csi_recv_router`).
 
 ## Roles
 
-| Role | What it does |
-|------|----------------|
-| **PEER** | Sets STA MAC to `1a:00:00:00:00:0a`, joins AP, pings gateway (traffic source) |
-| **SENSE** | Joins AP, pings gateway, CSI from peer MAC only (plot this board) |
+| Role | `sdkconfig` | What it does |
+|------|-------------|--------------|
+| **PEER** | `sdkconfig.defaults.peer` → `CONFIG_CSI_BETWEEN_ROLE_PEER` | STA MAC forced to `1a:00:00:00:00:0a`, joins AP, pings gateway (traffic source) |
+| **SENSE** | `sdkconfig.defaults.sense` → `CONFIG_CSI_BETWEEN_ROLE_SENSE` | Joins AP, pings gateway, CSI callback filtered to peer MAC only |
+
+Firmware: `main/app_main.c` (`wifi_csi_init_from_peer`, `apply_peer_mac`).
 
 ## Repo helpers (from repository root)
 
 ```bash
-./scripts/flash_csi_between.sh 'SSID' 'PASSWORD' [peer-port] [sense-port]
-./scripts/plot_csi.sh <sense-port>
+# 1st port = PEER, 2nd = SENSE
+./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'PASSWORD' \
+  /dev/cu.usbmodem101 /dev/cu.usbserial-110
+
+# Or SSID/PASS from csi_presence_c5/configs/wifi.env
+./scripts/flash_csi_between.sh
+
+./scripts/monitor_csi_between.sh /dev/cu.usbserial-110   # sense only
+./scripts/plot_csi.sh /dev/cu.usbserial-110
 ```
 
-See also [CSI_METHODS.md](../../../../docs/CSI_METHODS.md) at the repo root.
+See [CSI_METHODS.md](../../../../docs/CSI_METHODS.md).
 
 ## Manual flash
 
@@ -32,6 +41,17 @@ idf.py -B build-sense -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaul
 idf.py -B build-sense build flash -p PORT_SENSE
 ```
 
-Wi‑Fi: copy `sdkconfig.defaults.local.example` → `sdkconfig.defaults.local` and set SSID/password.
+Wi‑Fi: copy `sdkconfig.defaults.local.example` → `sdkconfig.defaults.local` (gitignored) and set SSID/password.
 
+**Expect on sense:** `CSI_DATA,…,1a:00:00:00:00:0a,…`  
 Console baud: **115200**.
+
+## vs presence Mini TCP (4.1)
+
+| | This example (§4.2) | `csi_presence_c5` wall TCP (§4.1) |
+|--|---------------------|-------------------------------------|
+| Firmware | `csi_between_devices` | `csi_recv_router` + TCP forward |
+| CSI from | peer STA | router |
+| Host path | USB serial on **sense** | Mini `:9055` multi-client |
+
+Do not mix images: flashing 4.2 replaces 4.1 TCP firmware on those boards.
