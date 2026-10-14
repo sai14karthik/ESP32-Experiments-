@@ -88,7 +88,7 @@ Diagram in tree: `esp-csi/docs/_static/get_device_csi.png` (looks similar to two
 | CSI source MAC | AP BSSID | **Peer STA** `1a:00:00:00:00:0a` |
 | Boards | 1× (or N× each sensing the AP) | **2×** with roles PEER + SENSE |
 | Sense does | CSI on router ping *reply* | Promiscuous CSI on peer’s ping *frames* |
-| Mini TCP wall collect | Yes (`flash_wall_tcp.sh`) | Not yet — use **USB sense** (`--rx`) |
+| Mini TCP wall collect | Yes (each RX → `:9055`) | Yes — **sense only** TCP → `:9055` (peer wall, no TCP) |
 
 | Role | Firmware flag | What it does |
 |------|---------------|--------------|
@@ -123,15 +123,24 @@ screen /dev/cu.usbserial-110 115200
 **Expect:** `role=SENSE` then `CSI_DATA,…,1a:00:00:00:00:0a,…`  
 Peer log: `role=PEER` / pinging — usually **no** `CSI_DATA`.
 
-### Optional plot / presence GT
+### Wall power + Mini collect (preferred)
+
+Sense firmware TCP-forwards `CSI_DATA` to `CSI_TCP_HOST:9055` (same listener as §4.1).
+
+```bash
+# After flash: unplug both → wall power in the room
+# On Mini:
+cd csi_presence_c5
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
+# expect 1 TCP client (sense); peer stays radio-only
+```
+
+### Optional USB plot / serial
 
 ```bash
 ./scripts/plot_csi.sh /dev/cu.usbserial-110
-
-# Presence session (sense USB; peer on wall power OK)
-cd csi_presence_c5
-./scripts/collect_session.sh --rx /dev/cu.usbserial-110 \
-  --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
+./scripts/collect_session.sh --rx /dev/cu.usbserial-110 --session between_usb \
+  --camera rtsp://127.0.0.1:8554/cam_sense
 ```
 
 ---

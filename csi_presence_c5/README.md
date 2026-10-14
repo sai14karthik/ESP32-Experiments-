@@ -8,7 +8,7 @@ Espressif methods (see [`docs/CSI_METHODS.md`](../docs/CSI_METHODS.md)):
 | Method | Firmware | How CSI is taken | This project |
 |--------|----------|------------------|--------------|
 | **§4.1** Router CSI | `csi_recv_router` + TCP | Each C5: CSI from **AP** ping reply | **Default** — wall power → Mini `:9055` |
-| **§4.2** Between devices | `csi_between_devices` | Sense C5: CSI from **peer** STA MAC | USB `--rx` on sense (peer can be wall) |
+| **§4.2** Between devices | `csi_between_devices` | Sense C5: CSI from **peer** STA MAC | Sense TCP → Mini `:9055` (peer wall-only) |
 | **§4.3** Sender+recv | `csi_send` + `csi_recv` | ESP‑NOW | Later |
 
 ```
@@ -32,28 +32,23 @@ cp configs/wifi.env.example configs/wifi.env
 
 Then unplug USB → wall power. Boards join LabPSK and open TCP to Mini `:9055`.
 
-## Flash §4.2 (between devices) — optional campaign
+## Flash §4.2 (between devices) — wall power + Mini
 
-From **repo root** (not this folder). First port = **PEER**, second = **SENSE**:
+From **repo root**. First port = **PEER**, second = **SENSE** (TCP → `CSI_TCP_HOST` in `wifi.env`):
 
 ```bash
 cd ..   # camera_module root
-./scripts/flash_csi_between.sh   # uses csi_presence_c5/configs/wifi.env if present
-# or: ./scripts/flash_csi_between.sh 'LabHealthSecurePSK' 'PASSWORD' PEER_PORT SENSE_PORT
+./scripts/flash_csi_between.sh   # uses configs/wifi.env SSID + CSI_TCP_HOST
+# then unplug both → wall power
 
-./scripts/monitor_csi_between.sh SENSE_PORT
-# expect: CSI_DATA,…,1a:00:00:00:00:0a,…
-```
-
-Collect with **sense on USB** (Mini TCP will not see 4.2 boards):
-
-```bash
+# On Mini (same collect as 4.1 — opens :9055):
 cd csi_presence_c5
-./scripts/collect_session.sh --rx /dev/cu.usbserial-110 \
-  --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
+# expect 1 TCP client (sense only); CSI MAC = 1a:00:00:00:00:0a
 ```
 
-To go back to Mini wall TCP, re-run `./scripts/flash_wall_tcp.sh` (§4.1).
+USB debug optional: `./scripts/monitor_csi_between.sh SENSE_PORT`.  
+Back to §4.1 multi-RX: `./scripts/flash_wall_tcp.sh`.
 
 ## Collect on Mac Mini
 

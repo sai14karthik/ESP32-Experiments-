@@ -46,12 +46,19 @@ Wi‑Fi: copy `sdkconfig.defaults.local.example` → `sdkconfig.defaults.local` 
 **Expect on sense:** `CSI_DATA,…,1a:00:00:00:00:0a,…`  
 Console baud: **115200**.
 
-## vs presence Mini TCP (4.1)
+## Wall power → Mini (same collect script as §4.1)
 
-| | This example (§4.2) | `csi_presence_c5` wall TCP (§4.1) |
-|--|---------------------|-------------------------------------|
-| Firmware | `csi_between_devices` | `csi_recv_router` + TCP forward |
+Sense enables `CONFIG_CSI_TCP_*` and forwards `CSI_DATA` to the Mini (`10.128.93.13:9055` by default). Peer is radio-only (no TCP).
+
+```bash
+# After flash_csi_between.sh: unplug both → wall power
+cd csi_presence_c5
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session between_01
+# expect 1 TCP client (sense); MAC 1a:00:00:00:00:0a
+```
+
+| | This example (§4.2) | Multi-RX §4.1 |
+|--|---------------------|---------------|
+| Firmware | `csi_between_devices` | `csi_recv_router` |
 | CSI from | peer STA | router |
-| Host path | USB serial on **sense** | Mini `:9055` multi-client |
-
-Do not mix images: flashing 4.2 replaces 4.1 TCP firmware on those boards.
+| TCP clients on Mini | **1** (sense) | N (each RX) |

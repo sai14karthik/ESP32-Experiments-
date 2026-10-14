@@ -96,15 +96,22 @@ if ! IDF_ACTIVATE="$(find_idf_activate)"; then
   exit 1
 fi
 
+# Mini TCP ingest (sense only; peer build ignores via Kconfig depends)
+CSI_TCP_HOST="${CSI_TCP_HOST:-10.128.93.13}"
+CSI_TCP_PORT="${CSI_TCP_PORT:-9055}"
+
 cat > "$LOCAL" <<EOF
 # Local only — do not commit.
 CONFIG_EXAMPLE_WIFI_SSID="$SSID"
 CONFIG_EXAMPLE_WIFI_PASSWORD="$PASS"
 CONFIG_EXAMPLE_WIFI_AUTH_WPA2_PSK=y
+CONFIG_CSI_TCP_ENABLE=y
+CONFIG_CSI_TCP_HOST="$CSI_TCP_HOST"
+CONFIG_CSI_TCP_PORT=$CSI_TCP_PORT
 EOF
-echo "Wrote $LOCAL (SSID=$SSID)"
-echo "Peer  (traffic): $PEER_PORT"
-echo "Sense (CSI/plot): $SENSE_PORT"
+echo "Wrote $LOCAL (SSID=$SSID, sense TCP → $CSI_TCP_HOST:$CSI_TCP_PORT)"
+echo "Peer  (traffic, wall OK): $PEER_PORT"
+echo "Sense (CSI + TCP→Mini):   $SENSE_PORT"
 
 for p in "$PEER_PORT" "$SENSE_PORT"; do
   pids="$(lsof -t "$p" 2>/dev/null || true)"
@@ -155,13 +162,12 @@ bash --noprofile --norc -c '
 '
 
 echo
-echo "Done (Espressif §4.2 — CSI between devices)."
-echo "  Peer  MAC 1a:00:00:00:00:0a : $PEER_PORT   (power + same AP; no CSI plot)"
-echo "  Sense (CSI_DATA)            : $SENSE_PORT   (monitor / plot / collect --rx)"
+echo "Done (Espressif §4.2 — CSI between devices + sense TCP)."
+echo "  Peer  MAC 1a:00:00:00:00:0a : $PEER_PORT   (wall power OK)"
+echo "  Sense CSI→TCP $CSI_TCP_HOST:$CSI_TCP_PORT : $SENSE_PORT   (wall power OK)"
 echo "AP SSID: $SSID"
-echo "Verify:"
-echo "  ./scripts/monitor_csi_between.sh $SENSE_PORT"
-echo "  # expect CSI_DATA,…,1a:00:00:00:00:0a,…"
-echo "  ./scripts/plot_csi.sh $SENSE_PORT"
-echo "Presence collect (USB sense, not Mini TCP 4.1):"
-echo "  cd csi_presence_c5 && ./scripts/collect_session.sh --rx $SENSE_PORT --session between_01 --camera rtsp://127.0.0.1:8554/cam_sense"
+echo "Unplug USB → wall power both. On Mac Mini:"
+echo "  cd csi_presence_c5"
+echo "  ./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session between_01"
+echo "  # expect 1 TCP client (sense); CSI MAC 1a:00:00:00:00:0a"
+echo "USB debug (optional): ./scripts/monitor_csi_between.sh $SENSE_PORT"

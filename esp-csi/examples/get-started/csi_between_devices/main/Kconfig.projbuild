@@ -14,3 +14,29 @@ menu "CSI between devices (Espressif 4.2)"
     endchoice
 
 endmenu
+
+menu "CSI TCP forwarder (sense → Mini)"
+
+config CSI_TCP_ENABLE
+    bool "Forward CSI_DATA lines over TCP (sense board)"
+    default y
+    depends on CSI_BETWEEN_ROLE_SENSE
+    help
+        Sense board only: each CSI_DATA line is also sent to CONFIG_CSI_TCP_HOST
+        (Mac Mini collect / ingest on :9055). Peer does not enable this.
+        USB serial printing still works when plugged in.
+
+config CSI_TCP_HOST
+    string "Ingest host IPv4 address"
+    depends on CSI_TCP_ENABLE
+    default "10.128.93.13"
+    help
+        LabPSK IP of the Mini running collect_session / listen-tcp 9055.
+
+config CSI_TCP_PORT
+    int "Ingest TCP port"
+    depends on CSI_TCP_ENABLE
+    range 1 65535
+    default 9055
+
+endmenu
