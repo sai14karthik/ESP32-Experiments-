@@ -1,0 +1,19 @@
+# Lab ESP targets for ./scripts/check_esp.sh
+
+[sense]
+# CameraWebServer / Sense A/V (CV ground truth)
+host = "10.128.93.15"
+mjpeg = "http://10.128.93.15:81/stream"
+audio = "http://10.128.93.15/audio"
+# Optional MediaMTX path on Mini
+rtsp = "rtsp://127.0.0.1:8554/cam_sense"
+
+[csi]
+# Wall-powered C5s forward CSI_DATA here (Mini listens)
+tcp_port = 9055
+# Optional known board STA IPs (fill in after DHCP settles)
+# hosts = ["10.128.93.29", "10.128.93.30"]
+
+[usb]
+# Present when boards are plugged for flash/debug
+patterns = ["/dev/cu.usbmodem*", "/dev/cu.usbserial*"]

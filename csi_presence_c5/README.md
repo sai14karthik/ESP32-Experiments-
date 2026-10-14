@@ -30,6 +30,10 @@ Then unplug USB → wall power. Boards join LabPSK and open TCP to Mini `:9055`.
 ```bash
 cd csi_presence_c5
 uv sync
+
+# Are Sense cam / CSI boards up?
+./scripts/check_esp.sh
+
 # Default CV GT = ESP cam http://10.128.93.15:81/stream (not local webcam)
 ./scripts/collect_session.sh --seconds 120
 ```
