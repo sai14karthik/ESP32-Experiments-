@@ -13,8 +13,10 @@ camera = "http://10.128.93.15:81/stream"
 quality = "accurate"
 # Optional hard override (same as POSE_MODEL env)
 # model = "yolo26l-pose.pt"
-# Frames with a person needed in a window to mark occupied
-min_person_frames = 2
+# Stricter GT: need several agreeing frames (kills empty-room YOLO flickers)
+min_person_frames = 4
+# Override YOLO conf for presence (default in code 0.45; healthcare live uses 0.25)
+person_conf = 0.45
 
 [labels]
 # empty | occupied | auto (from YOLO26-pose)

@@ -43,11 +43,16 @@ def resolve_profile(
         raise ValueError(f"unknown quality={qname!r}; choose from {tuple(QUALITY)}")
     q = QUALITY[qname]
     model_name = model or os.environ.get("POSE_MODEL") or q["model"]
+    # Presence GT default conf is stricter than healthcare live (0.25) —
+    # empty-room false positives (chairs) otherwise label as occupied.
+    _PRESENCE_CONF = 0.45
     return {
         "quality": qname,
         "model": model_name,
         "imgsz": int(imgsz if imgsz is not None else q["imgsz"]),
-        "conf": float(conf if conf is not None else q["conf"]),
+        "conf": float(
+            conf if conf is not None else float(os.environ.get("POSE_CONF", _PRESENCE_CONF))
+        ),
         "map": q["map"],
     }
 
@@ -83,13 +88,44 @@ def infer_kwargs(profile: dict[str, Any], device: str) -> dict[str, Any]:
     )
 
 
-def frame_has_person(result, *, min_box_area: float = 800.0) -> bool:
-    """Binary presence: any non-tiny person box → someone is there."""
+def frame_has_person(
+    result,
+    *,
+    min_box_area: float = 8000.0,
+    min_box_conf: float = 0.45,
+    min_keypoints: int = 4,
+    min_kpt_conf: float = 0.35,
+) -> bool:
+    """Binary presence GT — stricter than raw YOLO so empty rooms stay empty.
+
+    Requires a decent-size person box + (when pose kpts exist) several visible joints.
+    Chairs / coats / posters often fire conf=0.25 boxes without real pose.
+    """
     if result.boxes is None or len(result.boxes) == 0:
         return False
     xyxy = result.boxes.xyxy.cpu().numpy()
-    for box in xyxy:
+    confs = (
+        result.boxes.conf.cpu().numpy()
+        if result.boxes.conf is not None
+        else [1.0] * len(xyxy)
+    )
+    kpts = None
+    if getattr(result, "keypoints", None) is not None and result.keypoints is not None:
+        try:
+            # (N, K, 3) x,y,conf
+            kpts = result.keypoints.data.cpu().numpy()
+        except Exception:
+            kpts = None
+
+    for i, box in enumerate(xyxy):
+        if float(confs[i]) < min_box_conf:
+            continue
         x1, y1, x2, y2 = box
-        if float((x2 - x1) * (y2 - y1)) >= min_box_area:
-            return True
+        if float((x2 - x1) * (y2 - y1)) < min_box_area:
+            continue
+        if kpts is not None and i < len(kpts):
+            visible = int((kpts[i][:, 2] >= min_kpt_conf).sum())
+            if visible < min_keypoints:
+                continue
+        return True
     return False

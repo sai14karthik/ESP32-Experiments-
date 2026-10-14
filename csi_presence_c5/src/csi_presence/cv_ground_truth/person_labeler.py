@@ -102,10 +102,19 @@ class PersonLabeler:
             except Exception:
                 pass
 
-    def recent_occupied(self, window_sec: float, min_hits: int = 2) -> bool:
+    def recent_occupied(
+        self,
+        window_sec: float,
+        min_hits: int = 4,
+        min_ratio: float = 0.7,
+    ) -> bool:
+        """Occupied only if most recent polls agree — kills 1–2 frame flickers."""
         now = time.time()
-        recent = [h for t, h in self._hits if now - t <= window_sec and h]
-        return len(recent) >= min_hits
+        recent = [h for t, h in self._hits if now - t <= window_sec]
+        if len(recent) < min_hits:
+            return False
+        hits = sum(1 for h in recent if h)
+        return hits >= min_hits and (hits / len(recent)) >= min_ratio
 
     def poll(self) -> bool:
         """Grab one frame, update occupancy. Must run on main thread if previewing."""
