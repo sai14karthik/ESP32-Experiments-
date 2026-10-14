@@ -33,7 +33,7 @@ def _load_collect_defaults() -> dict:
     """Optional denser defaults from configs/collect.toml."""
     out: dict = {
         "window_sec": 1.0,
-        "hop_sec": 0.25,
+        "hop_sec": 0.125,
         "seconds": 300.0,
     }
     if not COLLECT_TOML.exists():
@@ -150,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         "--hop-sec",
         type=float,
         default=dflt["hop_sec"],
-        help="Label/write every hop (default 0.25s ≈4 windows/s; was 0.5)",
+        help="Label/write every hop (default 0.125s ≈8 windows/s)",
     )
     p.add_argument(
         "--quality",
@@ -165,7 +165,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--person-conf", type=float, default=None, help="override pose conf")
     p.add_argument("--imgsz", type=int, default=None, help="override pose imgsz")
-    p.add_argument("--no-preview", action="store_true")
+    p.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="disable OpenCV live GT window (EMPTY/OCCUPIED overlay)",
+    )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="less console status (still prints every ~5s)",
+    )
+    p.add_argument(
+        "--live-hz",
+        type=float,
+        default=4.0,
+        help="console live status rate (default 4 lines/s; use 1 for quieter)",
+    )
     p.add_argument(
         "--session",
         "-s",
@@ -289,8 +304,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.label == "auto":
         print("leave/enter frame in the SAME run — CV flips empty↔occupied")
+        if not args.no_preview:
+            print("live: OpenCV window 'csi_presence_c5 CV GT' + console status")
+        else:
+            print("live: console status only (--no-preview)")
     else:
         print(f"forced label={args.label}")
+
+    live_period = 1.0 / max(args.live_hz, 0.2)
+    last_live_print = 0.0
+    last_full_print = 0.0
 
     try:
         with raw_path.open("a") as raw_f, windows_path.open("a") as win_f:
@@ -414,20 +437,24 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 win_f.write(json.dumps(rec) + "\n")
                 n_windows += 1
-                # Status ~ every 2.5s at hop=0.25
-                status_every = max(1, int(round(2.5 / max(args.hop_sec, 1e-3))))
-                if n_windows % status_every == 0:
+                elapsed = max(now - t0, 1e-3)
+                tag = "OCCUPIED" if occupied else "EMPTY"
+                line = (
+                    f"t={elapsed:5.1f}s  {tag:8s}  method={method}  "
+                    f"empty={n_empty} occupied={n_occupied}  "
+                    f"win={n_windows} ({n_windows / elapsed:.1f}/s)  "
+                    f"csi={n_lines} ({n_lines / elapsed:.1f}/s)  "
+                    f"n={len(win)}  clients={sorted(sources) or ['—']}"
+                )
+                # Live console: same-line update, full newline periodically
+                if not args.quiet and (now - last_live_print) >= live_period:
+                    print(f"\r  {line}    ", end="", flush=True)
+                    last_live_print = now
+                if (now - last_full_print) >= (5.0 if args.quiet else 2.5):
                     raw_f.flush()
                     win_f.flush()
-                    tag = "OCCUPIED" if occupied else "EMPTY"
-                    elapsed = max(now - t0, 1e-3)
-                    print(
-                        f"  t={elapsed:.0f}s  now={tag}  method={method}  "
-                        f"empty={n_empty} occupied={n_occupied}  "
-                        f"windows={n_windows} ({n_windows / elapsed:.1f}/s)  "
-                        f"csi={n_lines} ({n_lines / elapsed:.1f}/s)  "
-                        f"clients={sorted(sources) or ['—']}"
-                    )
+                    print(f"\n  {line}")
+                    last_full_print = now
     except KeyboardInterrupt:
         print("\nstopped by user")
     finally:

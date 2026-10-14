@@ -30,7 +30,8 @@ def window_features(samples: list[CsiSample]) -> np.ndarray | None:
     Compact feature vector from a time window of CSI samples.
     Shape: (D,) float64 — mean/std amp, RSSI stats, temporal energy.
     """
-    if len(samples) < 3:
+    # Dense hop (0.125s) still uses a 1s window — need a few CSI frames
+    if len(samples) < 2:
         return None
     mat = samples_to_amp_matrix(samples)
     if mat.size == 0:

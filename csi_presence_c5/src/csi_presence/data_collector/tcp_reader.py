@@ -71,13 +71,12 @@ class CsiTcpListener:
             now = time.time()
             if now - last_status >= 5.0:
                 n = self.active_clients
+                # Only nag when idle — live window lines come from collect_session
                 if n == 0:
                     print(
                         f"[csi] waiting for C5 TCP clients on :{self.port}… "
                         "(boards on LabPSK + wall power)"
                     )
-                else:
-                    print(f"[csi] active TCP clients={n}")
                 last_status = now
 
             try:

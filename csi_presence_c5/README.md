@@ -59,7 +59,7 @@ uv sync
 # Sense cam (.15) + CSI C5s (USB / TCP :9055)
 ./scripts/check_esp.sh
 
-# denser defaults: hop 0.25s (~4 windows/s), 300s (configs/collect.toml)
+# denser defaults: hop 0.125s (~8 windows/s), 300s (configs/collect.toml)
 # --session TAG names the folder, e.g. 20261014T…_session1
 ./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session session1
 ```
@@ -69,11 +69,11 @@ Leave/enter the **ESP cam** frame in the same run. Sessions → `data/sessions/`
 ESP `/stream` is usually **one client only**. If MediaMTX already holds `.15`, direct MJPEG times out — use RTSP instead (or stop MediaMTX):
 
 ```bash
-# Recommended when mediamtx_run.sh is up (default 300s / hop 0.25):
+# Recommended when mediamtx_run.sh is up (default 300s / hop 0.125 ≈8 win/s):
 ./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense
 
-# Shorter / denser overrides:
-./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --seconds 180 --hop-sec 0.2
+# Even denser (more overlapping windows):
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --hop-sec 0.1
 
 # Direct ESP (no other MJPEG client):
 ./scripts/collect_session.sh --camera http://10.128.93.15:81/stream --seconds 180
