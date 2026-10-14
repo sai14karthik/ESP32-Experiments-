@@ -36,14 +36,14 @@ uv sync
 
 Leave/enter the **ESP cam** frame in the same run. Sessions → `data/sessions/`.
 
-Optional:
-```bash
-# explicit ESP URL / MediaMTX / local webcam
-./scripts/collect_session.sh --camera http://10.128.93.15:81/stream --seconds 120
-./scripts/collect_session.sh --camera rtsp://10.128.93.13:8554/cam_sense --seconds 120
-./scripts/collect_session.sh --camera 0 --seconds 60   # local webcam only if needed
+ESP `/stream` is usually **one client only**. If MediaMTX already holds `.15`, direct MJPEG times out — use RTSP instead (or stop MediaMTX):
 
-POSE_QUALITY=fast ./scripts/collect_session.sh --seconds 120
+```bash
+# Recommended when mediamtx_run.sh is up:
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --seconds 120
+
+# Direct ESP (no other MJPEG client):
+./scripts/collect_session.sh --camera http://10.128.93.15:81/stream --seconds 120
 ```
 
 ## Laptop USB debug (optional)
