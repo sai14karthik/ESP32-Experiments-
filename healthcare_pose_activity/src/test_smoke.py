@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -19,17 +20,30 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from activity import ALL_ACTIVITIES, ActivityTracker, classify_frame  # noqa: E402
 from filters import draw_person, filter_person_indices  # noqa: E402
-from live_infer import ACTIVITY_COLOR, fit_center, to_display, view_layout  # noqa: E402
+from live_infer import (  # noqa: E402
+    ACTIVITY_COLOR,
+    audio_playback_command,
+    fit_center,
+    parse_args,
+    start_rtsp_audio,
+    to_display,
+    view_layout,
+)
 from mjpeg import is_mjpeg_url, is_rtsp_url  # noqa: E402
-from patients import PersonView, infer_role, summarize  # noqa: E402
+from patients import PersonView, summarize  # noqa: E402
 from test_activity import (  # noqa: E402
     lying_kpts,
     sitting_kpts,
     standing_kpts,
     test_all_labels_covered,
     test_classify,
+    test_activity_hysteresis_on_pose_dropout,
     test_fall,
+    test_fall_rejects_posture_only_and_gaps,
+    test_posture_transition,
     test_scene,
+    test_stable_person_ids,
+    test_unknown_when_pose_is_insufficient,
     test_walking,
 )
 
@@ -42,6 +56,32 @@ def test_url_detect() -> None:
     assert is_rtsp_url("rtsp://127.0.0.1:18554/cam_sense")
     assert not is_rtsp_url("http://x:81/stream")
     print("url_detect OK")
+
+
+def test_rtsp_audio_command() -> None:
+    command = audio_playback_command(
+        "/opt/homebrew/bin/ffplay", "rtsp://127.0.0.1:18554/cam_sense"
+    )
+    assert command[0] == "/opt/homebrew/bin/ffplay"
+    assert "-rtsp_transport" in command and "tcp" in command
+    assert "-nodisp" in command and "-vn" in command
+    assert command[-1] == "rtsp://127.0.0.1:18554/cam_sense"
+    assert parse_args(["rtsp://127.0.0.1:18554/cam_sense"]).audio is False
+    assert parse_args(["rtsp://127.0.0.1:18554/cam_sense", "--audio"]).audio is True
+    with patch("live_infer.shutil.which", return_value="/fake/ffplay"), patch(
+        "live_infer.subprocess.Popen"
+    ) as popen:
+        popen.return_value = object()
+        assert start_rtsp_audio(
+            "rtsp://127.0.0.1:18554/cam_sense", enabled=False
+        ) is None
+        player = start_rtsp_audio(
+            "rtsp://127.0.0.1:18554/cam_sense", enabled=True
+        )
+        assert player is popen.return_value
+        assert popen.call_args.args[0][-1] == "rtsp://127.0.0.1:18554/cam_sense"
+        popen.assert_called_once()
+    print("RTSP audio playback command OK")
 
 
 def test_view_layout_matrix() -> None:
@@ -117,10 +157,24 @@ def test_filters_and_draw() -> None:
     assert 0 in keep, keep
     assert 1 not in keep, f"hand should be filtered: {keep}"
 
+    # A legitimate distant person should survive even if their box is much
+    # smaller than the foreground person's box.
+    two_people = np.array(
+        [
+            [180, 40, 500, 450],
+            [20, 20, 90, 140],
+            [520, 20, 570, 110],
+        ],
+        dtype=float,
+    )
+    valid_poses = np.stack([k_person, k_person, k_person], axis=0)
+    keep_two = filter_person_indices(valid_poses, two_people, (fh, fw))
+    assert keep_two == [0, 1, 2], keep_two
+
     frame = np.zeros((fh, fw, 3), dtype=np.uint8)
     draw_person(frame, boxes[0], k_person, ACTIVITY_COLOR["standing"])
     assert frame.sum() > 0
-    print("filters_and_draw OK:", keep)
+    print("filters_and_draw OK:", keep, "multi-scale:", keep_two)
 
 
 def test_overlay_pipeline_all_sizes() -> None:
@@ -137,7 +191,6 @@ def test_overlay_pipeline_all_sizes() -> None:
         box = (fw * 0.25, fh * 0.1, fw * 0.55, fh * 0.9)
         t = ActivityTracker()
         st = t.update(k, box=box, frame_hw=(fh, fw))
-        role = infer_role(st, primary=True)
         color = ACTIVITY_COLOR.get(st.label, (120, 120, 120))
         draw_person(frame, np.array(box), k, color)
         hud = frame.copy()
@@ -186,7 +239,7 @@ def test_activity_tracker_burst() -> None:
 
 
 def test_yolo_offline_video() -> None:
-    if os.environ.get("RUN_YOLO", "1") != "1":
+    if os.environ.get("RUN_YOLO", "0") != "1":
         print("yolo SKIP (RUN_YOLO=0)")
         return
     print("loading YOLO (may download weights)…", flush=True)
@@ -254,16 +307,22 @@ def main() -> None:
     print("=== vigorous offline smoke ===", flush=True)
     test_all_labels_covered()
     test_classify()
+    test_posture_transition()
+    test_unknown_when_pose_is_insufficient()
     test_walking()
     test_fall()
+    test_fall_rejects_posture_only_and_gaps()
+    test_stable_person_ids()
     test_scene()
     test_url_detect()
+    test_rtsp_audio_command()
     test_view_layout_matrix()
     test_to_display()
     test_fit_center()
     test_filters_and_draw()
     test_overlay_pipeline_all_sizes()
     test_activity_tracker_burst()
+    test_activity_hysteresis_on_pose_dropout()
     test_colors_cover_activities()
     test_yolo_offline_video()
     print("=== ALL_SMOKE_OK ===", flush=True)

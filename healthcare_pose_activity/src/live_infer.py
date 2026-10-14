@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""
-Live multi-person patient monitoring:
-  - people count
-  - pose (YOLO26-pose COCO-17 skeleton)
-  - activity per person (sit/stand/walk/lie/fall)
-  - heuristic patient vs visitor/staff role
+"""Live multi-person pose/activity monitoring with room-wide fall alerts.
 
-Default model: YOLO26m-pose — best accuracy that still runs real-time on Apple MPS.
-Official COCO pose mAP50-95: n=57.2  s=63.0  m=68.8  l=70.4  x=71.6
+YOLO26-pose estimates COCO-17 keypoints; activity labels are geometry and
+motion heuristics, not a separately trained action-recognition model. No
+patient/staff/doctor roles are inferred in this stage.
+
+Default model: YOLO26m-pose. Published COCO pose mAP50-95: n=57.2, s=63.0,
+m=68.8, l=70.4, x=71.6. Pose mAP does not measure activity accuracy.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,9 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from activity import ALL_ACTIVITIES, ActivityTracker  # noqa: E402
-from filters import draw_person, filter_person_indices  # noqa: E402
+from filters import StablePersonIds, draw_person, filter_person_indices  # noqa: E402
 from mjpeg import is_mjpeg_url, is_rtsp_url, iter_mjpeg, iter_rtsp  # noqa: E402
-from patients import PersonView, infer_role, summarize  # noqa: E402
+from patients import PersonView, summarize  # noqa: E402
 
 ACTIVITY_COLOR = {
     "standing": (40, 180, 40),
@@ -43,27 +44,27 @@ QUALITY = {
     "fast": {
         "model": "yolo26n-pose.pt",
         "imgsz": 512,
-        "conf": 0.40,
+        "conf": 0.25,
         "map": "57.2",
     },
     "balanced": {
         "model": "yolo26s-pose.pt",
         "imgsz": 640,
-        "conf": 0.42,
+        "conf": 0.25,
         "map": "63.0",
     },
     # Default: max useful accuracy for live webcam / room monitoring
     "accurate": {
         "model": "yolo26m-pose.pt",
         "imgsz": 640,
-        "conf": 0.40,
+        "conf": 0.25,
         "map": "68.8",
     },
     # Slightly higher mAP; slower — use when FPS headroom exists
     "max": {
         "model": "yolo26l-pose.pt",
         "imgsz": 640,
-        "conf": 0.38,
+        "conf": 0.25,
         "map": "70.4",
     },
 }
@@ -87,7 +88,6 @@ def view_layout(
     tag_font = float(np.clip(fh / 800.0, 0.35, 0.65))
     thick = 2 if fh >= 720 else 1
     status_y = max(14, int(hud_h * 0.72))
-    max_chars = max(40, fw // 7)
 
     if view_scale and view_scale > 0:
         scale = float(view_scale)
@@ -110,7 +110,6 @@ def view_layout(
         "tag_font": tag_font,
         "thick": thick,
         "status_y": status_y,
-        "max_chars": max_chars,
         "scale": scale,
     }
 
@@ -175,7 +174,7 @@ def window_canvas_size(
     return max(fallback_w, img_w), max(fallback_h, img_h)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Patient room: count people + pose + activity"
     )
@@ -220,6 +219,11 @@ def parse_args() -> argparse.Namespace:
         help="disable FP16 (slower, sometimes more stable on MPS)",
     )
     ap.add_argument(
+        "--audio",
+        action="store_true",
+        help="play audio from an RTSP source via ffplay (default: silent)",
+    )
+    ap.add_argument(
         "--view-width",
         type=int,
         default=int(os.environ.get("POSE_VIEW_WIDTH", "0")),
@@ -236,7 +240,7 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("POSE_CANVAS", "1280x720"),
         help="display canvas WxH; video is centered (fullscreen-friendly). 0x0=off",
     )
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
 
 def parse_canvas(spec: str) -> tuple[int, int]:
@@ -255,6 +259,55 @@ def parse_canvas(spec: str) -> tuple[int, int]:
 
 def resolve_source(raw: str):
     return int(raw) if raw.isdigit() else raw
+
+
+def audio_playback_command(ffplay: str, source: str) -> list[str]:
+    """Build an audio-only FFmpeg player command for an RTSP source."""
+    return [
+        ffplay,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-rtsp_transport",
+        "tcp",
+        "-nodisp",
+        "-vn",
+        source,
+    ]
+
+
+def start_rtsp_audio(source: str, *, enabled: bool = False) -> subprocess.Popen | None:
+    """Play a stream's audio independently so OpenCV remains the video renderer."""
+    if not enabled or not is_rtsp_url(source):
+        return None
+    ffplay = shutil.which("ffplay")
+    if ffplay is None:
+        print("audio: ffplay not found; install FFmpeg to use --audio", flush=True)
+        return None
+    try:
+        player = subprocess.Popen(
+            audio_playback_command(ffplay, source),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"audio: could not start ffplay ({exc})", flush=True)
+        return None
+    print(f"audio: playing RTSP audio via {ffplay}", flush=True)
+    return player
+
+
+def stop_audio_player(player: subprocess.Popen | None) -> None:
+    """Stop the child player without delaying shutdown if it does not exit."""
+    if player is None or player.poll() is not None:
+        return
+    player.terminate()
+    try:
+        player.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        player.kill()
+        player.wait(timeout=1.0)
 
 
 def pick_device(requested: str) -> str:
@@ -355,6 +408,8 @@ def main() -> None:
         infer_kw.pop("nms", None)
 
     trackers: dict[int, ActivityTracker] = {}
+    tracker_last_seen: dict[int, float] = {}
+    stable_ids = StablePersonIds(max_age=90)
     want_track = not args.no_track
     use_ids = False
     if want_track:
@@ -371,6 +426,9 @@ def main() -> None:
     mjpeg_mode = is_mjpeg_url(source)
     rtsp_mode = is_rtsp_url(source)
     frame_mode = mjpeg_mode or rtsp_mode
+    audio_player = None
+    audio_exit_reported = False
+    audio_retry_at: float | None = None
     results_iter = None
     if mjpeg_mode:
         print(f"mjpeg reader: {source}", flush=True)
@@ -412,10 +470,23 @@ def main() -> None:
     t0 = time.time()
     n = 0
 
-    def handle_result(r) -> bool:
+    def handle_result(r, capture_timestamp: float | None = None) -> bool:
         """Annotate one YOLO result; return False if user quit."""
-        nonlocal n
+        nonlocal n, audio_exit_reported, audio_player, audio_retry_at
         n += 1
+        if (
+            audio_player is not None
+            and audio_player.poll() is not None
+            and not audio_exit_reported
+        ):
+            print("audio: ffplay exited; retrying shortly while video continues", flush=True)
+            audio_player = None
+            audio_retry_at = time.monotonic() + 3.0
+            audio_exit_reported = True
+        if audio_player is None and audio_retry_at is not None and time.monotonic() >= audio_retry_at:
+            audio_player = start_rtsp_audio(source, enabled=args.audio)
+            audio_retry_at = None
+            audio_exit_reported = False
         frame = r.orig_img.copy()
         people: list[PersonView] = []
         fh, fw = frame.shape[:2]
@@ -425,8 +496,6 @@ def main() -> None:
             view_width=args.view_width,
             view_scale=args.view_scale,
         )
-        counts = {lab: 0 for lab in ALL_ACTIVITIES}
-
         if (
             r.keypoints is not None
             and len(r.keypoints) > 0
@@ -440,25 +509,27 @@ def main() -> None:
                 ids = r.boxes.id.cpu().numpy().astype(int)
 
             keep = filter_person_indices(kdata, boxes, (fh, fw))
+            display_ids = stable_ids.update(
+                boxes[keep],
+                [int(ids[i]) if ids is not None else None for i in keep],
+            )
             if keep:
                 areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-                primary_i = max(keep, key=lambda j: float(areas[j]))
-                seen_ids: set[int] = set()
-                for i in keep:
-                    tid = int(ids[i]) if ids is not None else i
-                    seen_ids.add(tid)
+                for i, tid in zip(keep, display_ids):
                     if tid not in trackers:
                         trackers[tid] = ActivityTracker()
+                    tracker_last_seen[tid] = time.monotonic()
                     box = tuple(float(x) for x in boxes[i])
                     st = trackers[tid].update(
-                        kdata[i], box=box, frame_hw=(fh, fw)
+                        kdata[i],
+                        box=box,
+                        frame_hw=(fh, fw),
+                        timestamp=capture_timestamp,
                     )
-                    role = infer_role(st, primary=(i == primary_i))
                     people.append(
                         PersonView(
                             track_id=tid,
                             activity=st,
-                            role=role,
                             box=box,
                             area=float(areas[i]),
                         )
@@ -466,12 +537,7 @@ def main() -> None:
                     color = ACTIVITY_COLOR.get(st.label, (120, 120, 120))
                     draw_person(frame, boxes[i], kdata[i], color)
                     x1, y1, x2, y2 = map(int, boxes[i])
-                    role_short = (
-                        "patient"
-                        if role == "patient"
-                        else ("other" if role == "visitor_or_staff" else "unk")
-                    )
-                    tag = f"ID{tid} {role_short}|{st.label}"
+                    tag = f"ID{tid} | {st.label.replace('_', ' ')}"
                     font_sc = lay["tag_font"]
                     thick = lay["thick"]
                     (tw, th), _ = cv2.getTextSize(
@@ -482,9 +548,7 @@ def main() -> None:
                     ty1 = max(hud_h + 2, min(y1 + 2, max(0, y2 - th - 2 * pad)))
                     ty2 = ty1 + th + 2 * pad
                     tx2 = min(fw - 1, x1 + tw + 2 * pad)
-                    overlay = frame.copy()
-                    cv2.rectangle(overlay, (x1, ty1), (tx2, ty2), color, -1)
-                    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+                    cv2.rectangle(frame, (x1, ty1), (tx2, ty2), color, -1)
                     cv2.putText(
                         frame,
                         tag,
@@ -495,36 +559,56 @@ def main() -> None:
                         thick,
                         cv2.LINE_AA,
                     )
-                if len(trackers) > 32:
-                    for dead in list(trackers.keys()):
-                        if dead not in seen_ids:
-                            del trackers[dead]
+        else:
+            stable_ids.update(np.empty((0, 4), dtype=float), [])
+
+        expired_trackers = [
+            tid
+            for tid, last_seen in tracker_last_seen.items()
+            if time.monotonic() - last_seen > 15.0
+        ]
+        for tid in expired_trackers:
+            tracker_last_seen.pop(tid, None)
+            trackers.pop(tid, None)
 
         scene = summarize(people)
-        for p in scene.people:
-            counts[p.activity.label] = counts.get(p.activity.label, 0) + 1
-
+        counts = {lab: 0 for lab in ALL_ACTIVITIES}
+        for person in people:
+            counts[person.activity.label] = counts.get(person.activity.label, 0) + 1
         fps = n / max(1e-3, time.time() - t0)
         hud_h = lay["hud_h"]
         hud = frame.copy()
         cv2.rectangle(hud, (0, 0), (fw, hud_h), (15, 15, 15), -1)
         cv2.addWeighted(hud, 0.55, frame, 0.45, 0, frame)
-        status = (
-            f"P:{scene.people_count} pat:{scene.patients}  "
-            f"stand:{counts['standing']} sit:{counts['sitting']} "
-            f"walk:{counts['walking']} lie:{counts['lying']} "
-            f"fall:{counts['fall_suspected']}  {fps:.0f}fps"
+        activity_text = ", ".join(
+            f"{lab.replace('_', ' ').title()}: {count}"
+            for lab, count in counts.items()
+            if count and lab != "fall_suspected"
         )
-        if scene.people:
-            status += "  |  " + ",".join(
-                f"{p.track_id}:{p.activity.label}" for p in scene.people[:4]
+        if not activity_text:
+            activity_text = (
+                "Fall suspected"
+                if counts["fall_suspected"]
+                else "No activity detected"
             )
+        status = (
+            f"People: {scene.people_count} | {activity_text} | "
+            f"Fall alerts: {scene.fall_alerts} | FPS: {fps:.0f}"
+        )
+        status_font = lay["font"]
+        while status_font > 0.2:
+            (status_width, _status_height), _ = cv2.getTextSize(
+                status, cv2.FONT_HERSHEY_SIMPLEX, status_font, lay["thick"]
+            )
+            if status_width <= fw - 16:
+                break
+            status_font = max(0.2, status_font * 0.9)
         cv2.putText(
             frame,
-            status[: lay["max_chars"]],
+            status,
             (8, lay["status_y"]),
             cv2.FONT_HERSHEY_SIMPLEX,
-            lay["font"],
+            status_font,
             (240, 240, 240),
             lay["thick"],
             cv2.LINE_AA,
@@ -547,13 +631,14 @@ def main() -> None:
             )
             view = fit_center(view, cw, ch)
         cv2.imshow(win, view)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
             return False
         if n % 30 == 0:
             acts = {lab: counts[lab] for lab in ALL_ACTIVITIES if counts[lab]}
             print(
-                f"people={scene.people_count} patients={scene.patients} "
-                f"acts={acts} falls={scene.fall_alerts} fps={fps:.1f} "
+                f"people={scene.people_count} acts={acts} "
+                f"falls={scene.fall_alerts} fps={fps:.1f} "
                 f"src={fw}x{fh} view={view.shape[1]}x{view.shape[0]} "
                 f"scale={lay['scale']:.2f}",
                 flush=True,
@@ -575,6 +660,7 @@ def main() -> None:
                 )
             return model.predict(frame, **infer_kw)
 
+    audio_player = start_rtsp_audio(source, enabled=args.audio)
     try:
         if frame_mode:
             frames = (
@@ -583,18 +669,19 @@ def main() -> None:
                 else iter_rtsp(str(source))
             )
             print("opening stream (first frame can take a few seconds)…", flush=True)
-            for frame in frames:
+            for frame, capture_timestamp in frames:
                 out = _infer_frame(frame)
                 if not out:
                     continue
-                if not handle_result(out[0]):
+                if not handle_result(out[0], capture_timestamp):
                     break
         else:
             assert results_iter is not None
             for r in results_iter:
-                if not handle_result(r):
+                if not handle_result(r, time.monotonic()):
                     break
     finally:
+        stop_audio_player(audio_player)
         cv2.destroyAllWindows()
         print(f"stopped after {n} frames", flush=True)
 

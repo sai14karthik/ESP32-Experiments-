@@ -9,7 +9,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from activity import ALL_ACTIVITIES, ActivityTracker, classify_frame
-from patients import PersonView, infer_role, summarize
+from filters import StablePersonIds
+from patients import PersonView, summarize
 
 
 def _blank() -> np.ndarray:
@@ -28,6 +29,14 @@ def standing_kpts(dx: float = 0.0) -> np.ndarray:
     return k
 
 
+def foreshortened_standing_kpts() -> np.ndarray:
+    """Upright standing pose with short projected legs from an elevated view."""
+    k = standing_kpts()
+    k[13], k[14] = [215, 330, 0.9], [265, 330, 0.9]
+    k[15], k[16] = [220, 400, 0.9], [260, 400, 0.9]
+    return k
+
+
 def sitting_kpts() -> np.ndarray:
     k = _blank()
     k[0] = [240, 100, 0.9]
@@ -35,6 +44,13 @@ def sitting_kpts() -> np.ndarray:
     k[11], k[12] = [210, 280, 0.9], [270, 280, 0.9]
     k[13], k[14] = [180, 340, 0.9], [300, 340, 0.9]
     k[15], k[16] = [210, 300, 0.9], [270, 300, 0.9]
+    return k
+
+
+def reclining_sitting_kpts() -> np.ndarray:
+    """Seated with a sideways-leaning torso; legs still show a seated pose."""
+    k = sitting_kpts()
+    k[5], k[6] = [310, 250, 0.9], [350, 310, 0.9]
     return k
 
 
@@ -80,18 +96,28 @@ def overhead_lying_kpts() -> np.ndarray:
 def test_classify() -> None:
     s = classify_frame(standing_kpts(), box=(180, 80, 300, 500), frame_hw=(720, 1280))
     assert s.label == "standing", s
+    foreshortened = classify_frame(
+        foreshortened_standing_kpts(),
+        box=(180, 80, 300, 420),
+        frame_hw=(720, 1280),
+    )
+    assert foreshortened.label == "standing", foreshortened
     sit = classify_frame(sitting_kpts(), box=(160, 100, 320, 380), frame_hw=(720, 1280))
     assert sit.label == "sitting", sit
-    ly_box = classify_frame(
+    reclined_sit = classify_frame(
+        reclining_sitting_kpts(), box=(160, 100, 400, 380), frame_hw=(720, 1280)
+    )
+    assert reclined_sit.label == "sitting", reclined_sit
+    wide_box_stand = classify_frame(
         standing_kpts(), box=(50, 300, 500, 420), frame_hw=(720, 1280)
     )
-    assert ly_box.label == "lying", ly_box
+    assert wide_box_stand.label == "standing", wide_box_stand
     ly = classify_frame(lying_kpts(), box=(100, 180, 500, 280), frame_hw=(720, 1280))
     assert ly.label == "lying", ly
     up = classify_frame(
         upper_only_kpts(), box=(80, 5, 560, 700), frame_hw=(720, 1280)
     )
-    assert up.label == "standing", up
+    assert up.label == "unknown", up
     oh_sit = classify_frame(
         overhead_sitting_kpts(), box=(250, 160, 400, 370), frame_hw=(480, 640)
     )
@@ -103,13 +129,85 @@ def test_classify() -> None:
     print(
         "classify_frame OK:",
         s.label,
+        foreshortened.label,
         sit.label,
-        ly_box.label,
+        reclined_sit.label,
+        wide_box_stand.label,
         ly.label,
         up.label,
         oh_sit.label,
         oh_lie.label,
     )
+
+
+def test_posture_transition() -> None:
+    """The displayed activity should follow a real sit-to-stand transition promptly."""
+    tracker = ActivityTracker()
+    for _ in range(20):
+        state = tracker.update(
+            sitting_kpts(), box=(160, 100, 320, 380), frame_hw=(720, 1280)
+        )
+    assert state.label == "sitting", state
+
+    labels = [
+        tracker.update(
+            foreshortened_standing_kpts(),
+            box=(180, 80, 300, 420),
+            frame_hw=(720, 1280),
+        ).label
+        for _ in range(8)
+    ]
+    assert "standing" in labels[:6] and labels[-1] == "standing", labels
+    print("sit-to-stand transition OK:", labels)
+
+
+def test_unknown_when_pose_is_insufficient() -> None:
+    no_pose = classify_frame(_blank())
+    assert no_pose.label == "unknown" and no_pose.detail == "missing_torso", no_pose
+
+    partial = classify_frame(
+        upper_only_kpts(), box=(80, 5, 560, 700), frame_hw=(720, 1280)
+    )
+    assert partial.label == "unknown", partial
+
+    weak_legs = standing_kpts()
+    weak_legs[13:17, 2] = 0.0
+    weak = classify_frame(weak_legs, box=(180, 80, 300, 500), frame_hw=(720, 1280))
+    assert weak.label == "unknown", weak
+
+    tracker = ActivityTracker()
+    for _ in range(8):
+        tracker.update(
+            standing_kpts(), box=(180, 80, 300, 500), frame_hw=(720, 1280)
+        )
+    state = None
+    for _ in range(12):
+        state = tracker.update(
+            upper_only_kpts(), box=(80, 5, 560, 700), frame_hw=(720, 1280)
+        )
+    assert state.label == "unknown", state
+    print("unknown abstention OK:", no_pose.detail, partial.detail, weak.detail)
+
+
+def test_activity_hysteresis_on_pose_dropout() -> None:
+    tracker = ActivityTracker()
+    for _ in range(12):
+        state = tracker.update(
+            sitting_kpts(), box=(160, 100, 320, 380), frame_hw=(720, 1280)
+        )
+    assert state.label == "sitting", state
+
+    brief_dropout = tracker.update(
+        upper_only_kpts(), box=(80, 5, 560, 700), frame_hw=(720, 1280)
+    )
+    assert brief_dropout.label == "sitting", brief_dropout
+
+    for _ in range(12):
+        state = tracker.update(
+            upper_only_kpts(), box=(80, 5, 560, 700), frame_hw=(720, 1280)
+        )
+    assert state.label == "unknown", state
+    print("activity dropout hysteresis OK")
 
 
 def test_walking() -> None:
@@ -119,7 +217,12 @@ def test_walking() -> None:
     for i in range(14):
         dx = i * 28.0  # ~person-height fraction per few frames
         box = (180 + dx, 80, 300 + dx, 500)
-        st = t.update(standing_kpts(dx=dx), box=box, frame_hw=(720, 1280))
+        st = t.update(
+            standing_kpts(dx=dx),
+            box=box,
+            frame_hw=(720, 1280),
+            timestamp=i / 8,
+        )
     assert st is not None and st.label == "walking", st
     print("walking sideways OK:", st.detail)
 
@@ -133,22 +236,140 @@ def test_walking() -> None:
         box = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
         k = standing_kpts(dx=0)
         k[:, 1] += i * 6  # slight vertical centroid shift
-        st2 = t2.update(k, box=box, frame_hw=(720, 1280))
+        st2 = t2.update(k, box=box, frame_hw=(720, 1280), timestamp=i / 8)
     assert st2 is not None and st2.label == "walking", st2
     print("walking toward-camera OK:", st2.detail)
 
+    # Equal physical movement over the same duration at different sample rates.
+    for fps in (5, 10):
+        tracker = ActivityTracker(window=20)
+        state = None
+        for i in range(fps * 3):
+            dx = i * (100.0 / fps)
+            state = tracker.update(
+                standing_kpts(dx=dx),
+                box=(180 + dx, 80, 300 + dx, 500),
+                frame_hw=(720, 1280),
+                timestamp=i / fps,
+            )
+        assert state is not None and state.label == "walking", (fps, state)
+    print("walking frame-rate invariance OK")
+
 
 def test_fall() -> None:
-    t = ActivityTracker(window=18, fall_frames=8)
-    for _ in range(16):
-        t.update(standing_kpts(), box=(180, 80, 300, 500), frame_hw=(720, 1280))
+    t = ActivityTracker(window=18)
+    for i in range(16):
+        t.update(
+            standing_kpts(),
+            box=(180, 80, 300, 500),
+            frame_hw=(720, 1280),
+            timestamp=i / 8,
+        )
     st = None
     for i in range(10):
         k = lying_kpts()
         k[:, 1] += 50 + i * 8
-        st = t.update(k, box=(50, 300, 500, 420), frame_hw=(720, 1280))
+        st = t.update(
+            k,
+            box=(50, 300, 500, 420),
+            frame_hw=(720, 1280),
+            timestamp=(16 + i) / 8,
+        )
     assert st is not None and st.label == "fall_suspected", st
     print("fall_suspected OK:", st.detail)
+
+    for i in range(16):
+        st = t.update(
+            lying_kpts(),
+            box=(50, 300, 500, 420),
+            frame_hw=(720, 1280),
+            timestamp=(26 + i) / 8,
+        )
+    assert st.label == "fall_suspected", st
+
+    for i in range(10):
+        st = t.update(
+            standing_kpts(),
+            box=(180, 80, 300, 500),
+            frame_hw=(720, 1280),
+            timestamp=(42 + i) / 8,
+        )
+    assert st.label != "fall_suspected", st
+    print("fall alert latch/recovery OK")
+
+
+def test_fall_rejects_posture_only_and_gaps() -> None:
+    hw = (720, 1280)
+    tracker = ActivityTracker()
+    for i in range(20):
+        state = tracker.update(
+            standing_kpts(), box=(180, 80, 300, 500), frame_hw=hw, timestamp=i / 10
+        )
+
+    # A person may lie down without a fall; shape changes but the body does not
+    # move down relative to the previous person-sized box.
+    flat_box = (50, 230, 500, 350)
+    for i in range(10):
+        state = tracker.update(
+            lying_kpts(), box=flat_box, frame_hw=hw, timestamp=2.0 + i / 10
+        )
+    assert state.label != "fall_suspected", state
+
+    # A long unobserved gap must not be mistaken for an observed fall transition.
+    tracker = ActivityTracker()
+    for i in range(16):
+        tracker.update(
+            standing_kpts(), box=(180, 80, 300, 500), frame_hw=hw, timestamp=i / 8
+        )
+    state = None
+    for i in range(10):
+        state = tracker.update(
+            lying_kpts(),
+            box=(50, 300, 500, 420),
+            frame_hw=hw,
+            timestamp=4.0 + i / 8,
+        )
+    assert state is not None and state.label != "fall_suspected", state
+
+    # Sitting/reclining with a large box shift is not an observed lying fall.
+    tracker = ActivityTracker()
+    for i in range(16):
+        tracker.update(
+            standing_kpts(),
+            box=(180, 80, 300, 500),
+            frame_hw=hw,
+            timestamp=i / 8,
+        )
+    state = None
+    for i in range(10):
+        state = tracker.update(
+            reclining_sitting_kpts(),
+            box=(160, 220, 400, 500),
+            frame_hw=hw,
+            timestamp=(16 + i) / 8,
+        )
+    assert state is not None and state.label != "fall_suspected", state
+    print("fall false-positive guards OK")
+
+
+def test_stable_person_ids() -> None:
+    ids = StablePersonIds(max_age=12)
+    first = np.array([[10, 10, 110, 210], [300, 10, 400, 210]], dtype=float)
+    initial = ids.update(first, [7, 8])
+    assert initial == [1, 2], initial
+
+    # Detection order changes and the first track receives a new raw tracker ID.
+    reordered = np.array([[302, 10, 402, 210], [12, 10, 112, 210]], dtype=float)
+    continued = ids.update(reordered, [8, 99])
+    assert continued == [2, 1], continued
+    assert 7 not in ids.raw_to_stable
+
+    # With raw IDs missing, overlap association still follows the person boxes.
+    no_tracker_ids = ids.update(reordered[::-1], [None, None])
+    assert no_tracker_ids == [1, 2], no_tracker_ids
+    reused_raw = ids.update(first, [7, 8])
+    assert reused_raw == [1, 2], reused_raw
+    print("stable person IDs OK:", initial, continued, no_tracker_ids)
 
 
 def test_all_labels_covered() -> None:
@@ -172,25 +393,30 @@ def test_scene() -> None:
     a2 = t2.update(standing_kpts(), box=(180, 80, 300, 500), frame_hw=(720, 1280))
     a3 = ActivityState("walking", 0.8, "forced")
     people = [
-        PersonView(1, a1, infer_role(a1, primary=True), (0, 0, 100, 80), 8000),
-        PersonView(2, a2, infer_role(a2, primary=False), (0, 0, 50, 120), 6000),
-        PersonView(3, a3, infer_role(a3, primary=False), (0, 0, 60, 140), 7000),
+        PersonView(1, a1, (0, 0, 100, 80), 8000),
+        PersonView(2, a2, (0, 0, 50, 120), 6000),
+        PersonView(3, a3, (0, 0, 60, 140), 7000),
     ]
     sc = summarize(people)
     assert sc.people_count == 3
-    assert sc.patients >= 1
+    assert sc.fall_alerts == 0
     assert any(p.activity.label == "walking" for p in sc.people)
     print(
         "scene OK:",
-        f"people={sc.people_count} patients={sc.patients}",
-        [(p.track_id, p.role, p.activity.label) for p in sc.people],
+        f"people={sc.people_count} falls={sc.fall_alerts}",
+        [(p.track_id, p.activity.label) for p in sc.people],
     )
 
 
 if __name__ == "__main__":
     test_all_labels_covered()
     test_classify()
+    test_posture_transition()
+    test_unknown_when_pose_is_insufficient()
+    test_activity_hysteresis_on_pose_dropout()
     test_walking()
     test_fall()
+    test_fall_rejects_posture_only_and_gaps()
+    test_stable_person_ids()
     test_scene()
     print("ALL_UNIT_OK")

@@ -33,7 +33,9 @@ def iter_rtsp(
     *,
     reconnect_s: float = 1.5,
     max_failures: int = 60,
-) -> Iterator[np.ndarray]:
+    open_timeout_ms: int = 15000,
+    read_timeout_ms: int = 15000,
+) -> Iterator[tuple[np.ndarray, float]]:
     """
     Pull RTSP frames with OpenCV over TCP (MediaMTX / cam_sense).
     Avoids Ultralytics 'Waiting for stream 0' stalls.
@@ -41,12 +43,27 @@ def iter_rtsp(
     os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
     failures = 0
     while True:
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        cap = cv2.VideoCapture()
+        try:
+            cap.open(
+                url,
+                cv2.CAP_FFMPEG,
+                [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                    open_timeout_ms,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                    read_timeout_ms,
+                ],
+            )
+        except (TypeError, cv2.error):
+            # Older OpenCV FFmpeg backends may not accept open-timeout params.
+            cap.open(url, cv2.CAP_FFMPEG)
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
         if not cap.isOpened():
+            cap.release()
             failures += 1
             print(f"rtsp: open failed ({failures}); retry in {reconnect_s}s…", flush=True)
             time.sleep(reconnect_s)
@@ -60,13 +77,13 @@ def iter_rtsp(
             ok, frame = cap.read()
             if not ok or frame is None:
                 empty += 1
-                if empty >= 30:
+                if empty >= 2:
                     print("rtsp: no frames, reconnecting…", flush=True)
                     break
                 time.sleep(0.05)
                 continue
             empty = 0
-            yield frame
+            yield frame, time.monotonic()
         cap.release()
         time.sleep(reconnect_s)
 
@@ -85,7 +102,7 @@ def iter_mjpeg(
     timeout: float = 8.0,
     reconnect_s: float = 1.5,
     max_reconnects: int = 0,
-) -> Iterator[np.ndarray]:
+) -> Iterator[tuple[np.ndarray, float]]:
     """
     Yield BGR frames from multipart/x-mixed-replace MJPEG.
     max_reconnects=0 means reconnect forever.
@@ -132,7 +149,7 @@ def iter_mjpeg(
                         buf = buf[eoi + 2 :]
                         frame = _decode_jpeg(jpeg)
                         if frame is not None:
-                            yield frame
+                            yield frame, time.monotonic()
             attempts += 1
             if max_reconnects and attempts >= max_reconnects:
                 raise ConnectionError(f"MJPEG ended after {attempts} reconnects: {url}")
