@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Sense ESP cam + CSI C5 boards (USB / TCP)."""
+"""Check Sense ESP cam + CSI C5 boards (collect / powered / connected)."""
 
 from __future__ import annotations
 
@@ -87,6 +87,20 @@ def tcp_peers(port: int) -> list[str]:
     return peers
 
 
+def collect_process_running() -> bool:
+    """True if a collect / csi-collect process looks active."""
+    try:
+        r = subprocess.run(
+            ["pgrep", "-fl", "csi-collect|collect_session"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
 def sniff_csi(port: str, baud: int = 115200, seconds: float = 2.0) -> tuple[int, str]:
     try:
         import serial
@@ -137,9 +151,9 @@ def main() -> int:
     usb_cfg = cfg.get("usb", {})
     baud = int(ports_cfg.get("serial", {}).get("baud", 115200))
     tcp_port = int(csi.get("tcp_port", 9055))
+    known_hosts = [str(h) for h in (csi.get("hosts") or [])]
 
     print("=== Lab ESP check (Sense cam + CSI C5) ===\n")
-    fails = 0
 
     # ----- Sense -----
     host = sense.get("host", "10.128.93.15")
@@ -150,29 +164,32 @@ def main() -> int:
     print("[1] Sense ESP cam (CV GT)")
     ok_ping = ping_ok(host)
     print(f"  {mark(ok_ping)} ping {host}")
-    if not ok_ping:
-        fails += 1
 
     ok81 = tcp_open(host, 81)
     print(f"  {mark(ok81)} tcp :81")
-    if not ok81:
-        fails += 1
 
     ok_mj, d_mj = http_ok(mjpeg)
-    print(f"  {mark(ok_mj)} mjpeg {mjpeg}  ({d_mj})")
-    if not ok_mj:
-        fails += 1
-        print("       power-cycle Sense / check LabPSK; or use MediaMTX RTSP for GT")
+    if ok_mj:
+        print(f"  OK  mjpeg {mjpeg}  ({d_mj})")
+    else:
+        print(f"  WARN mjpeg {mjpeg}  ({d_mj})")
+        print("       (normal if MediaMTX already holds :81/stream — use RTSP for GT)")
 
     ok_au, d_au = http_ok(audio, timeout=3.0)
-    print(f"  {mark(ok_au)} audio {audio}  ({d_au})")
-    if not ok_au:
-        print("       (optional for presence GT; required for Sense A/V MediaMTX)")
+    if ok_au:
+        print(f"  OK  audio {audio}  ({d_au})")
+    else:
+        print(f"  WARN audio {audio}  ({d_au})")
+        print("       (optional for presence GT)")
 
     ok_mtx = tcp_open("127.0.0.1", 8554, timeout=0.4)
     print(f"  {mark(ok_mtx)} MediaMTX :8554  ({rtsp})")
-    if ok_mtx and not ok_mj:
-        print("       tip: collect --camera rtsp://127.0.0.1:8554/cam_sense")
+    if ok_mtx:
+        print("       GT path: --camera rtsp://127.0.0.1:8554/cam_sense")
+
+    sense_ok = ok_ping and ok81 and (ok_mj or ok_mtx)
+    sense_status = "POWERED" if (ok_ping and ok81) else "OFF / unreachable"
+    gt_path = "MediaMTX RTSP" if (ok_mtx and not ok_mj) else ("MJPEG" if ok_mj else "none")
 
     print()
 
@@ -184,62 +201,126 @@ def main() -> int:
         "/dev/cu.wchusbserial*",
     ]
     usb_ports = list_usb(patterns)
-    csi_live = 0
+    listening = tcp_open("127.0.0.1", tcp_port, timeout=0.4)
+    proc = collect_process_running()
+    peers = tcp_peers(tcp_port) if listening else []
 
+    # Collect status
+    if listening or proc:
+        collect_status = "COLLECTING"
+        how = []
+        if listening:
+            how.append(f":{tcp_port} open")
+        if proc:
+            how.append("process running")
+        print(f"  OK  collect: {collect_status}  ({', '.join(how)})")
+    else:
+        collect_status = "NOT COLLECTING"
+        print(f"  FAIL collect: {collect_status}")
+        print(
+            "       start: ./scripts/collect_session.sh "
+            "--camera rtsp://127.0.0.1:8554/cam_sense --seconds 120"
+        )
+
+    # USB boards
+    usb_live: list[str] = []
+    usb_dead: list[str] = []
+    usb_plugged_only = False
     if usb_ports:
-        print(f"  OK  USB {len(usb_ports)} port(s): {', '.join(usb_ports)}")
-        if not args.no_sniff:
+        print(f"  OK  USB plugged: {len(usb_ports)}  ({', '.join(usb_ports)})")
+        if args.no_sniff:
+            usb_plugged_only = True
+            for p in usb_ports:
+                print(f"  —   {p}  POWERED (USB; CSI sniff skipped)")
+        else:
             for p in usb_ports:
                 n, note = sniff_csi(p, baud=baud, seconds=args.sniff_sec)
-                if n < 0:
+                if n > 0:
+                    print(f"  OK  {p}  POWERED + CSI_DATA≈{n}")
+                    usb_live.append(p)
+                elif n < 0:
                     print(f"  FAIL {p}  {note}")
-                    fails += 1
-                elif n == 0:
-                    print(f"  FAIL {p}  no CSI_DATA in {args.sniff_sec:.1f}s")
-                    fails += 1
+                    usb_dead.append(p)
                 else:
-                    print(f"  OK  {p}  CSI_DATA≈{n}  {note}…")
-                    csi_live += 1
+                    print(f"  FAIL {p}  plugged but no CSI_DATA ({args.sniff_sec:.1f}s)")
+                    usb_dead.append(p)
     else:
-        print("  —   no USB (normal if wall-powered)")
+        print("  —   USB: none (expected for wall power)")
 
-    if tcp_open("127.0.0.1", tcp_port, timeout=0.4):
-        print(f"  OK  Mini listen :{tcp_port}")
-        peers = tcp_peers(tcp_port)
+    # TCP clients = wall boards powered + forwarding
+    if listening:
         if peers:
-            print(f"  OK  TCP clients ({len(peers)}): {', '.join(peers)}")
-            csi_live += len(peers)
+            print(f"  OK  wall TCP clients: {len(peers)}")
+            for ip in peers:
+                print(f"  OK  C5 {ip}  POWERED + CONNECTED (sending CSI)")
         else:
-            print("  FAIL :9055 listening but 0 clients")
-            fails += 1
+            print("  WARN wall TCP clients: 0")
+            print("       collect is up — boards not connected yet")
     else:
-        print(f"  —   nothing on :{tcp_port} (start collect to accept wall boards)")
-        if not usb_ports:
-            fails += 1
-            print("  FAIL no USB and no TCP — no CSI path visible")
+        print("  —   wall TCP: unknown until collect opens :9055")
 
-    for h in csi.get("hosts") or []:
-        ok = ping_ok(str(h))
-        print(f"  {mark(ok)} ping C5 {h}")
-        if not ok:
-            fails += 1
+    # Optional known STA IPs
+    ping_up: list[str] = []
+    ping_down: list[str] = []
+    for h in known_hosts:
+        if h in peers:
+            continue  # already shown as CONNECTED
+        ok = ping_ok(h)
+        if ok:
+            ping_up.append(h)
+            if listening:
+                print(f"  WARN C5 {h}  POWERED (ping) but NOT CONNECTED to :{tcp_port}")
+            else:
+                print(f"  OK  C5 {h}  POWERED (ping) — start collect to confirm CSI")
         else:
-            csi_live += 1
+            ping_down.append(h)
+            print(f"  FAIL C5 {h}  OFF / not on LabPSK")
 
-    if csi_live == 0 and (usb_ports or tcp_open("127.0.0.1", tcp_port, timeout=0.2)):
-        # USB present but no CSI_DATA counted as fails already
-        pass
+    connected = len(peers) + len(usb_live)
+    powered_usb = len(usb_ports) if usb_plugged_only else 0
+    powered_extra = len(ping_up)
+    csi_ok = connected > 0
+    # USB with live CSI counts as ready even without TCP collect
+    csi_ready = csi_ok or (powered_usb > 0)
 
     print()
-    sense_ok = ok_ping and ok81 and ok_mj
-    csi_ok = csi_live > 0
-    print(f"Sense cam: {'UP' if sense_ok else 'DOWN'}")
-    print(f"CSI C5:    {'UP' if csi_ok else 'DOWN'}  (sources≈{csi_live})")
-    if sense_ok and csi_ok:
-        print("RESULT: both Sense + CSI look active")
+    print("--- status ---")
+    print(f"Sense cam:  {'UP' if sense_ok else 'DOWN'}  "
+          f"[{sense_status}; GT={gt_path}]")
+    print(f"Collect:    {collect_status}")
+    if connected:
+        board_line = f"POWERED + SENDING  ({connected} source(s)"
+        if peers:
+            board_line += f"; TCP {', '.join(peers)}"
+        if usb_live:
+            board_line += f"; USB {len(usb_live)}"
+        board_line += ")"
+    elif powered_usb:
+        board_line = f"POWERED (USB ×{powered_usb}; sniff skipped)"
+    elif powered_extra:
+        board_line = f"POWERED but NOT SENDING  (ping {', '.join(ping_up)})"
+    elif known_hosts and ping_down and not listening:
+        board_line = "OFF / unreachable  (known hosts down)"
+    elif not listening and not usb_ports:
+        board_line = "UNKNOWN  (start collect to see wall boards)"
+    else:
+        board_line = "OFF or not connected  (collect up, 0 TCP clients)"
+    print(f"CSI C5:     {board_line}")
+
+    if sense_ok and csi_ok and collect_status == "COLLECTING":
+        print("RESULT: Sense UP + collect COLLECTING + C5 sending")
         return 0
-    print("RESULT: fix DOWN side before collect")
-    return 1
+    if sense_ok and csi_ok and collect_status != "COLLECTING":
+        print("RESULT: Sense UP + C5 sending (USB) — optional: start collect for wall TCP")
+        return 0
+    if sense_ok and collect_status == "COLLECTING" and not csi_ok:
+        print("RESULT: Sense UP + collect COLLECTING — power / wait for wall C5s")
+        return 1
+    if sense_ok and collect_status != "COLLECTING":
+        print("RESULT: Sense UP — start collect, then power wall C5s")
+        return 1
+    print("RESULT: fix DOWN side")
+    return 1 if not (sense_ok and csi_ready) else 0
 
 
 if __name__ == "__main__":
