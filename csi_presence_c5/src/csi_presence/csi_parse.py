@@ -18,6 +18,7 @@ class CsiSample:
     rssi: Optional[float]
     iq: list[int]
     host_ts: float  # set by collector
+    source_id: str = ""  # TCP client IP, or serial port name
 
     @property
     def amplitude(self) -> list[float]:
@@ -28,7 +29,9 @@ class CsiSample:
         return out
 
 
-def parse_csi_line(line: str, host_ts: float) -> Optional[CsiSample]:
+def parse_csi_line(
+    line: str, host_ts: float, *, source_id: str = ""
+) -> Optional[CsiSample]:
     line = line.strip()
     if not line.startswith("CSI_DATA,"):
         return None
@@ -63,4 +66,6 @@ def parse_csi_line(line: str, host_ts: float) -> Optional[CsiSample]:
             except ValueError:
                 continue
 
-    return CsiSample(raw_line=line, rssi=rssi, iq=nums, host_ts=host_ts)
+    return CsiSample(
+        raw_line=line, rssi=rssi, iq=nums, host_ts=host_ts, source_id=source_id
+    )

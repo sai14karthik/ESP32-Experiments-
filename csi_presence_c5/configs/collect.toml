@@ -5,8 +5,10 @@ hop_sec = 0.5
 csi_baud = 115200
 
 [cv]
-# Webcam index for ground-truth (YOLO26-pose — same stack as healthcare_pose_activity)
-camera_index = 0
+# Default GT camera = ESP Sense at .15 (CameraWebServer MJPEG), not local webcam
+camera = "http://10.128.93.15:81/stream"
+# Alt via MediaMTX: "rtsp://10.128.93.13:8554/cam_sense"
+# Local webcam: "0"
 # Presets: fast | balanced | accurate | max  (default accurate = yolo26m-pose)
 quality = "accurate"
 # Optional hard override (same as POSE_MODEL env)

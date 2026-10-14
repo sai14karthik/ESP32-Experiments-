@@ -1,7 +1,7 @@
 """Collect CSI + CV labels into a session folder.
 
-CSI reads on a background thread; CV + preview run on the main thread (macOS
-requires cv2.imshow on main).
+Target: Mac Mini listens TCP :9055; wall-powered C5s forward CSI_DATA over LabPSK.
+USB serial (--rx) remains optional for laptop debug.
 """
 
 from __future__ import annotations
@@ -15,13 +15,16 @@ from collections import deque
 from datetime import datetime, timezone
 
 from csi_presence.csi_parse import CsiSample
+from csi_presence.cv_ground_truth.camera_source import DEFAULT_ESP_CAM
 from csi_presence.cv_ground_truth.person_labeler import PersonLabeler
 from csi_presence.cv_ground_truth.yolo_pipeline import DEFAULT_QUALITY, QUALITY
 from csi_presence.data_collector.serial_reader import CsiSerialReader
+from csi_presence.data_collector.tcp_reader import CsiTcpListener
 from csi_presence.features import window_features
 from csi_presence.ports_util import ROOT, resolve_device
 
 SESSIONS = ROOT / "data" / "sessions"
+DEFAULT_TCP_PORT = 9055
 
 
 def _label_to_int(label: str) -> int:
@@ -32,10 +35,31 @@ def _label_to_int(label: str) -> int:
     raise ValueError(label)
 
 
-def _csi_worker(port: str, baud: int, out: queue.Queue, stop: threading.Event) -> None:
+def _csi_serial_worker(
+    port: str, baud: int, out: queue.Queue, stop: threading.Event
+) -> None:
     try:
         with CsiSerialReader(port, baud) as reader:
             for sample in reader.iter_samples():
+                if stop.is_set():
+                    break
+                sample.source_id = port
+                try:
+                    out.put_nowait(sample)
+                except queue.Full:
+                    try:
+                        out.get_nowait()
+                    except queue.Empty:
+                        pass
+                    out.put_nowait(sample)
+    except Exception as exc:
+        out.put(("__error__", str(exc)))
+
+
+def _csi_tcp_worker(listen_port: int, out: queue.Queue, stop: threading.Event) -> None:
+    try:
+        with CsiTcpListener(port=listen_port) as listener:
+            for sample in listener.iter_samples():
                 if stop.is_set():
                     break
                 try:
@@ -51,10 +75,26 @@ def _csi_worker(port: str, baud: int, out: queue.Queue, stop: threading.Event) -
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Collect CSI + presence labels")
-    p.add_argument("--rx", default=None, help="RX serial port (default from configs/ports.toml)")
+    p = argparse.ArgumentParser(
+        description="Collect CSI + CV presence GT (Mini TCP default)"
+    )
+    p.add_argument(
+        "--listen-tcp",
+        type=int,
+        default=DEFAULT_TCP_PORT,
+        help=f"Mac Mini: listen for wall-powered C5 TCP CSI (default {DEFAULT_TCP_PORT})",
+    )
+    p.add_argument(
+        "--rx",
+        default=None,
+        help="USB serial RX (laptop debug). If set, TCP listen is disabled.",
+    )
     p.add_argument("--baud", type=int, default=115200)
-    p.add_argument("--camera", type=int, default=0)
+    p.add_argument(
+        "--camera",
+        default=DEFAULT_ESP_CAM,
+        help=f"CV GT source: ESP MJPEG/RTSP URL or webcam index (default {DEFAULT_ESP_CAM})",
+    )
     p.add_argument(
         "--seconds",
         type=float,
@@ -86,7 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--name", default=None, help="session folder name suffix")
     args = p.parse_args(argv)
 
-    rx = args.rx or resolve_device("rx")
+    # Default = TCP (Mini + wall power). --rx switches to USB serial debug.
+    use_tcp = args.rx is None
+    listen_port = args.listen_tcp if use_tcp else None
+    rx = None if use_tcp else args.rx
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     suffix = args.name or args.label
     sess = SESSIONS / f"{stamp}_{suffix}"
@@ -96,21 +140,24 @@ def main(argv: list[str] | None = None) -> int:
     meta_path = sess / "meta.json"
 
     meta: dict = {
+        "csi_transport": "tcp" if use_tcp else "serial",
+        "listen_tcp": listen_port,
         "rx_port": rx,
-        "baud": args.baud,
+        "baud": args.baud if not use_tcp else None,
         "camera": args.camera,
         "label_mode": args.label,
         "window_sec": args.window_sec,
         "hop_sec": args.hop_sec,
         "started_utc": stamp,
         "cv_pipeline": "healthcare_yolo26_pose",
+        "host_role": "mac_mini_collect",
     }
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
     labeler = None
     if args.label == "auto":
         labeler = PersonLabeler(
-            camera_index=args.camera,
+            camera=args.camera,
             quality=args.quality,
             model_name=args.model,
             conf=args.person_conf,
@@ -129,11 +176,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
-    csi_q: queue.Queue = queue.Queue(maxsize=2000)
+    csi_q: queue.Queue = queue.Queue(maxsize=4000)
     stop = threading.Event()
-    worker = threading.Thread(
-        target=_csi_worker, args=(rx, args.baud, csi_q, stop), daemon=True
-    )
+    if use_tcp:
+        assert listen_port is not None
+        worker = threading.Thread(
+            target=_csi_tcp_worker, args=(listen_port, csi_q, stop), daemon=True
+        )
+    else:
+        assert rx is not None
+        worker = threading.Thread(
+            target=_csi_serial_worker, args=(rx, args.baud, csi_q, stop), daemon=True
+        )
     worker.start()
 
     buf: deque[CsiSample] = deque()
@@ -141,18 +195,22 @@ def main(argv: list[str] | None = None) -> int:
     n_windows = 0
     n_empty = 0
     n_occupied = 0
+    sources: set[str] = set()
     t0 = time.time()
     next_hop = t0 + args.hop_sec
 
     print(f"session → {sess}")
-    if args.label == "auto":
+    if use_tcp:
         print(
-            f"RX={rx}  CV auto-labels for {args.seconds:.0f}s — "
-            "leave the frame (empty) and walk in (occupied) in the SAME run"
+            f"CSI=TCP :{listen_port} (C5s on wall power + LabPSK)  "
+            f"CV camera={args.camera}  {args.seconds:.0f}s"
         )
-        print("Preview on main thread; press q in window or Ctrl+C to stop")
     else:
-        print(f"RX={rx} forced label={args.label} for {args.seconds}s  (Ctrl+C to stop)")
+        print(f"CSI=USB {rx}  CV camera={args.camera}  {args.seconds:.0f}s")
+    if args.label == "auto":
+        print("leave/enter frame in the SAME run — CV flips empty↔occupied")
+    else:
+        print(f"forced label={args.label}")
 
     try:
         with raw_path.open("a") as raw_f, windows_path.open("a") as win_f:
@@ -166,11 +224,15 @@ def main(argv: list[str] | None = None) -> int:
                     except queue.Empty:
                         break
                     if isinstance(item, tuple) and item and item[0] == "__error__":
-                        print(f"[csi] serial error: {item[1]}")
+                        print(f"[csi] error: {item[1]}")
                         stop.set()
                         raise SystemExit(1)
                     sample: CsiSample = item  # type: ignore[assignment]
-                    raw_f.write(sample.raw_line + "\n")
+                    if sample.source_id:
+                        sources.add(sample.source_id)
+                        raw_f.write(f"{sample.source_id}\t{sample.raw_line}\n")
+                    else:
+                        raw_f.write(sample.raw_line + "\n")
                     n_lines += 1
                     buf.append(sample)
 
@@ -187,7 +249,13 @@ def main(argv: list[str] | None = None) -> int:
                 feats = window_features(win)
                 if feats is None:
                     if n_lines == 0 and now - t0 > 5:
-                        print("waiting for CSI_DATA on serial… (is RX flashed?)")
+                        if use_tcp:
+                            print(
+                                "waiting for CSI TCP… "
+                                "flash boards with CSI_TCP_HOST=<this Mini IP>"
+                            )
+                        else:
+                            print("waiting for CSI_DATA on serial…")
                     continue
 
                 if args.label == "auto":
@@ -208,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                     "label": occupied,
                     "label_src": label_src,
                     "n_csi": len(win),
+                    "sources": sorted({s.source_id for s in win if s.source_id}),
                     "feat": feats.tolist(),
                 }
                 win_f.write(json.dumps(rec) + "\n")
@@ -216,7 +285,8 @@ def main(argv: list[str] | None = None) -> int:
                     tag = "OCCUPIED" if occupied else "EMPTY"
                     print(
                         f"  t={now - t0:.0f}s  now={tag}  "
-                        f"empty={n_empty} occupied={n_occupied}  csi={n_lines}"
+                        f"empty={n_empty} occupied={n_occupied}  "
+                        f"csi={n_lines}  clients={sorted(sources) or ['—']}"
                     )
     except KeyboardInterrupt:
         print("\nstopped by user")
@@ -232,17 +302,18 @@ def main(argv: list[str] | None = None) -> int:
         "windows": n_windows,
         "windows_empty": n_empty,
         "windows_occupied": n_occupied,
+        "source_ids": sorted(sources),
         "duration_sec": time.time() - t0,
     }
     meta_path.write_text(json.dumps(summary, indent=2) + "\n")
     print(
         f"done: {n_lines} CSI lines, {n_windows} windows "
-        f"(empty={n_empty} occupied={n_occupied}) → {sess}"
+        f"(empty={n_empty} occupied={n_occupied}) sources={sorted(sources)} → {sess}"
     )
     if args.label == "auto" and (n_empty == 0 or n_occupied == 0):
         print(
-            "WARNING: need both empty and occupied in this session — "
-            "run again and spend time both in and out of the camera frame"
+            "WARNING: need both empty and occupied — "
+            "spend time both in and out of the camera frame"
         )
     return 0
 

@@ -1,7 +1,6 @@
-"""Presence GT from healthcare YOLO26-pose: someone in frame or not.
+"""Presence GT from healthcare YOLO26-pose + ESP cam (default .15 MJPEG).
 
-Only empty(0) / occupied(1). No activity / pose labels written to CSI sessions.
-macOS: call poll() on the main thread when show_preview=True.
+Only empty(0) / occupied(1). macOS: poll() on main thread when previewing.
 """
 
 from __future__ import annotations
@@ -13,6 +12,11 @@ from typing import Any
 
 import cv2
 
+from csi_presence.cv_ground_truth.camera_source import (
+    DEFAULT_ESP_CAM,
+    FrameSource,
+    resolve_camera_source,
+)
 from csi_presence.cv_ground_truth.yolo_pipeline import (
     DEFAULT_QUALITY,
     QUALITY,
@@ -26,7 +30,7 @@ from csi_presence.cv_ground_truth.yolo_pipeline import (
 class PersonLabeler:
     def __init__(
         self,
-        camera_index: int = 0,
+        camera: str | int | None = None,
         quality: str = DEFAULT_QUALITY,
         model_name: str | None = None,
         conf: float | None = None,
@@ -34,7 +38,7 @@ class PersonLabeler:
         device: str = "mps",
         show_preview: bool = True,
     ):
-        self.camera_index = camera_index
+        self.camera = resolve_camera_source(camera)
         self.profile = resolve_profile(
             quality=quality, model=model_name, imgsz=imgsz, conf=conf
         )
@@ -42,7 +46,7 @@ class PersonLabeler:
         self.show_preview = show_preview
         self._hits: deque[tuple[float, bool]] = deque(maxlen=300)
         self._model = None
-        self._cap = None
+        self._frames: FrameSource | None = None
         self._predict_kw: dict[str, Any] = {}
         self._preview_ok = show_preview
         self._warned_preview = False
@@ -85,14 +89,13 @@ class PersonLabeler:
             print(f"[cv] warmup skipped ({e})", flush=True)
             self._predict_kw.pop("nms", None)
 
-        self._cap = cv2.VideoCapture(self.camera_index)
-        if not self._cap.isOpened():
-            raise RuntimeError(f"camera {self.camera_index} failed to open")
+        self._frames = FrameSource(self.camera)
+        self._frames.start()
 
     def stop(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+        if self._frames is not None:
+            self._frames.stop()
+            self._frames = None
         if self._preview_ok:
             try:
                 cv2.destroyAllWindows()
@@ -106,9 +109,9 @@ class PersonLabeler:
 
     def poll(self) -> bool:
         """Grab one frame, update occupancy. Must run on main thread if previewing."""
-        assert self._model is not None and self._cap is not None
-        ok, frame = self._cap.read()
-        if not ok:
+        assert self._model is not None and self._frames is not None
+        frame = self._frames.read()
+        if frame is None:
             return self.last_occupied
 
         results = self._model.predict(frame, **self._predict_kw)
@@ -151,9 +154,13 @@ class PersonLabeler:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Preview YOLO26-pose occupied/empty GT (healthcare-aligned)"
+        description="Preview presence GT (default ESP cam .15 MJPEG)"
     )
-    p.add_argument("--camera", type=int, default=0)
+    p.add_argument(
+        "--camera",
+        default=DEFAULT_ESP_CAM,
+        help=f"ESP MJPEG/RTSP URL or webcam index (default {DEFAULT_ESP_CAM})",
+    )
     p.add_argument(
         "--quality",
         choices=tuple(QUALITY.keys()),
@@ -165,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seconds", type=float, default=30.0)
     args = p.parse_args(argv)
     lab = PersonLabeler(
-        camera_index=args.camera,
+        camera=args.camera,
         quality=args.quality,
         model_name=args.model,
         conf=args.conf,

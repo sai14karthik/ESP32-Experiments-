@@ -1,68 +1,71 @@
-# CSI presence data collection (2× ESP32-C5 + CV labels)
+# CSI presence data collection (Mac Mini + wall-powered ESP32-C5)
 
-**Collect only for now** — CSI serial + camera ground truth (empty vs occupied).  
-Training / live inference are out of scope until we bring them back.
+**Collect only** — CSI + CV ground truth (empty vs occupied).  
+**Target host:** Mac Mini. Boards run on **wall power**; USB is for flash only.
 
 ```
-C5 TX ──ESP-NOW──► C5 RX ──USB CSI_DATA──► Mac collector
-Webcam ──YOLO26-pose (same presets as healthcare_pose_activity)──► empty/occupied
+LabPSK AP
+   ↑ CSI (method 4.1 ping)
+C5 #1 (wall) ──TCP :9055──┐
+C5 #2 (wall) ──TCP :9055──┼──► Mac Mini collect + YOLO26-pose GT
+Webcam/camera on Mini ────┘
 ```
 
-**Ground truth = presence only** (someone there / not).  
-We load the **same YOLO26-pose model + presets** as `healthcare_pose_activity` (`live_infer.QUALITY`). Pose keypoints are used only to decide “person in frame”; we store `label=0|1`, not sitting/walking/etc.
+## Once: flash boards (USB), then unplug to wall power
 
-| `POSE_QUALITY` | Model (from pose pipeline) |
-|----------------|----------------------------|
-| fast | `yolo26n-pose.pt` |
-| balanced | `yolo26s-pose.pt` |
-| **accurate (default)** | **`yolo26m-pose.pt`** |
-| max | `yolo26l-pose.pt` |
+On a machine with ESP-IDF (this Mac or Mini):
 
-| Role | Serial |
-|------|--------|
-| TX | `/dev/cu.usbmodem101` |
-| RX | `/dev/cu.usbmodem1101` |
+```bash
+cd csi_presence_c5
+cp configs/wifi.env.example configs/wifi.env
+# edit WIFI_SSID / WIFI_PASSWORD / CSI_TCP_HOST=<Mini LabPSK IP, e.g. 10.128.93.13>
 
-Baud: **115200**.
+./scripts/flash_wall_tcp.sh /dev/cu.usbmodem101 /dev/cu.usbmodem1101
+```
+
+Then unplug USB → wall power. Boards join LabPSK and open TCP to Mini `:9055`.
+
+## Collect on Mac Mini
+
+```bash
+cd csi_presence_c5
+uv sync
+# Default CV GT = ESP cam http://10.128.93.15:81/stream (not local webcam)
+./scripts/collect_session.sh --seconds 120
+```
+
+Leave/enter the **ESP cam** frame in the same run. Sessions → `data/sessions/`.
+
+Optional:
+```bash
+# explicit ESP URL / MediaMTX / local webcam
+./scripts/collect_session.sh --camera http://10.128.93.15:81/stream --seconds 120
+./scripts/collect_session.sh --camera rtsp://10.128.93.13:8554/cam_sense --seconds 120
+./scripts/collect_session.sh --camera 0 --seconds 60   # local webcam only if needed
+
+POSE_QUALITY=fast ./scripts/collect_session.sh --seconds 120
+```
+
+## Laptop USB debug (optional)
+
+```bash
+./scripts/collect_session.sh --rx /dev/cu.usbmodem1101 --camera http://10.128.93.15:81/stream --seconds 60
+```
+
+## CV ground truth
+
+Same **YOLO26-pose** presets as `healthcare_pose_activity` (`accurate` → `yolo26m-pose`).  
+Labels are presence only: empty(0) / occupied(1).
 
 ## Folder map
 
 ```
 csi_presence_c5/
   configs/           ports, collect, wifi.env.example
-  data/sessions/     collected sessions (gitignored)
-  firmware/          flash TX/RX helpers
-  scripts/           list_ports, flash_*, collect, preview_cv
+  data/sessions/     collected sessions
+  firmware/scripts/  flash_wall_tcp, flash_pair (ESP-NOW USB debug)
+  scripts/           collect_session, flash_wall_tcp, list_ports
   src/csi_presence/
-    data_collector/      serial CSI + session writer
-    cv_ground_truth/     YOLO26-pose → empty/occupied
-    csi_parse.py
-    features.py          window features saved with each label
+    data_collector/  serial + TCP :9055 readers
+    cv_ground_truth/ YOLO26-pose presence GT
 ```
-
-## Collect
-
-```bash
-cd csi_presence_c5
-uv sync
-
-# Flash once (IDF ≥ 5.4)
-./scripts/flash_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem1101
-
-# One run: leave/enter frame — pose GT flips empty↔occupied automatically
-./scripts/collect_session.sh --rx /dev/cu.usbmodem1101 --camera 0 --seconds 120
-
-# Same quality knobs as healthcare pose live:
-# POSE_QUALITY=fast ./scripts/collect_session.sh ...
-# POSE_MODEL=yolo26l-pose.pt ./scripts/collect_session.sh ...
-```
-
-Each session lands in `data/sessions/<timestamp>_auto/`:
-
-- `csi_raw.txt` — raw `CSI_DATA` lines  
-- `windows.jsonl` — per-window features + `label` (0/1) + `label_src`  
-- `meta.json` — ports, YOLO model, counts  
-
-## Firmware
-
-See `firmware/README.md`. Default = ESP-NOW `csi_send` + `csi_recv`.
