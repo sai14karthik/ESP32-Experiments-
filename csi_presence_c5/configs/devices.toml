@@ -11,8 +11,8 @@ rtsp = "rtsp://127.0.0.1:8554/cam_sense"
 [csi]
 # Wall-powered C5s forward CSI_DATA here (Mini listens)
 tcp_port = 9055
-# Optional known board STA IPs (after DHCP). check_esp shows POWERED vs OFF per IP.
-# hosts = ["10.128.93.29", "10.128.93.30"]
+# Known board STA IPs (LabPSK DHCP — update if they change)
+hosts = ["10.128.93.20", "10.128.93.21"]
 
 [usb]
 # Present when boards are plugged for flash/debug

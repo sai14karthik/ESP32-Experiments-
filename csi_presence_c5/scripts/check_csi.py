@@ -29,10 +29,16 @@ def mark(ok: bool) -> str:
 
 
 def listening(port: int) -> bool:
+    """LISTENing check only — do not connect (would look like a CSI client)."""
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-            return True
-    except OSError:
+        r = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
         return False
 
 

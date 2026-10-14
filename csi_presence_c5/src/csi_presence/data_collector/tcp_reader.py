@@ -94,8 +94,15 @@ class CsiTcpListener:
                         conn, addr = self._sock.accept()
                     except OSError:
                         continue
-                    conn.setblocking(False)
                     ip = addr[0]
+                    # Health checks (check_esp) briefly connect to :9055 — ignore localhost
+                    if ip in ("127.0.0.1", "::1"):
+                        try:
+                            conn.close()
+                        except OSError:
+                            pass
+                        continue
+                    conn.setblocking(False)
                     with self._lock:
                         self._clients[conn] = (ip, "")
                     print(f"[csi] client connected {ip}:{addr[1]}  active={self.active_clients}")

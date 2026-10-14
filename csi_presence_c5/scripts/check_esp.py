@@ -51,6 +51,20 @@ def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def port_listening(port: int) -> bool:
+    """True if something is LISTENing on port — does not connect (avoids fake CSI clients)."""
+    try:
+        r = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
 def http_ok(url: str, timeout: float = 4.0, read_bytes: int = 128) -> tuple[bool, str]:
     try:
         req = urllib.request.Request(
@@ -201,9 +215,10 @@ def main() -> int:
         "/dev/cu.wchusbserial*",
     ]
     usb_ports = list_usb(patterns)
-    listening = tcp_open("127.0.0.1", tcp_port, timeout=0.4)
+    listening = port_listening(tcp_port)
     proc = collect_process_running()
-    peers = tcp_peers(tcp_port) if listening else []
+    # Drop localhost probes from peer list (legacy check_esp used to connect)
+    peers = [p for p in (tcp_peers(tcp_port) if listening else []) if p not in ("127.0.0.1", "::1")]
 
     # Collect status
     if listening or proc:
