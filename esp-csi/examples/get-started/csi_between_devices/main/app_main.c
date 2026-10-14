@@ -226,6 +226,46 @@ static esp_err_t wifi_ping_router_start(void)
     return ESP_OK;
 }
 
+/** §4.2 needs peer+sense on same band; LabPSK dual-band was splitting ch1 vs ch161. */
+static esp_err_t wifi_wait_ip(int tries)
+{
+    for (int i = 0; i < tries; i++) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip) == ESP_OK
+                && ip.ip.addr != 0) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static void wifi_lock_2g4_same_band(void)
+{
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
+    esp_err_t err = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "set_band_mode(2G_ONLY): %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "Wi-Fi locked to 2.4 GHz (peer+sense must share band for §4.2)");
+
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.primary > 14) {
+        ESP_LOGW(TAG, "was on 5 GHz ch %d — reconnecting on 2.4 GHz", ap.primary);
+        ESP_ERROR_CHECK(esp_wifi_disconnect());
+        vTaskDelay(pdMS_TO_TICKS(200));
+        ESP_ERROR_CHECK(esp_wifi_connect());
+        if (wifi_wait_ip(50) != ESP_OK) {
+            ESP_LOGW(TAG, "IP wait after 2.4 GHz reconnect timed out");
+        }
+    }
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        ESP_LOGI(TAG, "associated ch=%d bssid=" MACSTR, ap.primary, MAC2STR(ap.bssid));
+    }
+#endif
+}
+
 #if CONFIG_CSI_BETWEEN_ROLE_PEER
 static esp_err_t apply_peer_mac(void)
 {
@@ -234,18 +274,14 @@ static esp_err_t apply_peer_mac(void)
     ESP_ERROR_CHECK(esp_wifi_set_mac(WIFI_IF_STA, CONFIG_CSI_PEER_MAC));
     ESP_LOGI(TAG, "peer role: local MAC set to " MACSTR, MAC2STR(CONFIG_CSI_PEER_MAC));
     ESP_ERROR_CHECK(esp_wifi_start());
+#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
+    (void)esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+#endif
     ESP_ERROR_CHECK(esp_wifi_connect());
 
-    /* Wait until we have an IP again after MAC change. */
-    for (int i = 0; i < 50; i++) {
-        esp_netif_ip_info_t ip;
-        if (esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip) == ESP_OK
-                && ip.ip.addr != 0) {
-            return ESP_OK;
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
+    if (wifi_wait_ip(50) != ESP_OK) {
+        ESP_LOGW(TAG, "waiting for IP after MAC change timed out; continuing");
     }
-    ESP_LOGW(TAG, "waiting for IP after MAC change timed out; continuing");
     return ESP_OK;
 }
 #endif
@@ -257,6 +293,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     ESP_ERROR_CHECK(example_connect());
+    wifi_lock_2g4_same_band();
 
 #if CONFIG_CSI_BETWEEN_ROLE_PEER
     ESP_LOGI(TAG, "role=PEER (traffic source)");
