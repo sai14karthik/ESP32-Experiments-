@@ -1,7 +1,10 @@
 [session]
 # Sliding window for features / labels
+# Smaller hop = more labeled windows per second (same CSI stream, denser GT)
 window_sec = 1.0
-hop_sec = 0.5
+hop_sec = 0.25
+# Default run length (override with --seconds)
+seconds = 300
 csi_baud = 115200
 
 [cv]

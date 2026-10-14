@@ -25,6 +25,30 @@ from csi_presence.ports_util import ROOT, resolve_device
 
 SESSIONS = ROOT / "data" / "sessions"
 DEFAULT_TCP_PORT = 9055
+COLLECT_TOML = ROOT / "configs" / "collect.toml"
+
+
+def _load_collect_defaults() -> dict:
+    """Optional denser defaults from configs/collect.toml."""
+    out: dict = {
+        "window_sec": 1.0,
+        "hop_sec": 0.25,
+        "seconds": 300.0,
+    }
+    if not COLLECT_TOML.exists():
+        return out
+    try:
+        import tomllib
+
+        with COLLECT_TOML.open("rb") as f:
+            cfg = tomllib.load(f)
+        sess = cfg.get("session") or {}
+        for k in ("window_sec", "hop_sec", "seconds"):
+            if k in sess:
+                out[k] = float(sess[k])
+    except Exception:
+        pass
+    return out
 
 
 def _label_to_int(label: str) -> int:
@@ -75,6 +99,7 @@ def _csi_tcp_worker(listen_port: int, out: queue.Queue, stop: threading.Event) -
 
 
 def main(argv: list[str] | None = None) -> int:
+    dflt = _load_collect_defaults()
     p = argparse.ArgumentParser(
         description="Collect CSI + CV presence GT (Mini TCP default)"
     )
@@ -98,8 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--seconds",
         type=float,
-        default=120.0,
-        help="One session: walk in/out of camera; CV flips empty↔occupied automatically",
+        default=dflt["seconds"],
+        help="Session length (default from collect.toml, denser runs ≈300s)",
     )
     p.add_argument(
         "--label",
@@ -107,8 +132,18 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="auto (default)=camera labels each window; empty/occupied=force (debug only)",
     )
-    p.add_argument("--window-sec", type=float, default=1.0)
-    p.add_argument("--hop-sec", type=float, default=0.5)
+    p.add_argument(
+        "--window-sec",
+        type=float,
+        default=dflt["window_sec"],
+        help="Feature window length (default 1.0s)",
+    )
+    p.add_argument(
+        "--hop-sec",
+        type=float,
+        default=dflt["hop_sec"],
+        help="Label/write every hop (default 0.25s ≈4 windows/s; was 0.5)",
+    )
     p.add_argument(
         "--quality",
         choices=tuple(QUALITY.keys()),
@@ -200,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     next_hop = t0 + args.hop_sec
 
     print(f"session → {sess}")
+    win_rate = 1.0 / max(args.hop_sec, 1e-3)
     if use_tcp:
         print(
             f"CSI=TCP :{listen_port} (C5s on wall power + LabPSK)  "
@@ -207,6 +243,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print(f"CSI=USB {rx}  CV camera={args.camera}  {args.seconds:.0f}s")
+    print(
+        f"density: window={args.window_sec:.2f}s hop={args.hop_sec:.2f}s "
+        f"(≈{win_rate:.0f} labeled windows/s)"
+    )
     if args.label == "auto":
         print("leave/enter frame in the SAME run — CV flips empty↔occupied")
     else:
@@ -281,11 +321,15 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 win_f.write(json.dumps(rec) + "\n")
                 n_windows += 1
-                if n_windows % 10 == 0:
+                # Status ~ every 2.5s at hop=0.25 (was every 5s at hop=0.5)
+                status_every = max(1, int(round(2.5 / max(args.hop_sec, 1e-3))))
+                if n_windows % status_every == 0:
                     tag = "OCCUPIED" if occupied else "EMPTY"
+                    elapsed = max(now - t0, 1e-3)
                     print(
-                        f"  t={now - t0:.0f}s  now={tag}  "
+                        f"  t={elapsed:.0f}s  now={tag}  "
                         f"empty={n_empty} occupied={n_occupied}  "
+                        f"windows={n_windows} ({n_windows / elapsed:.1f}/s)  "
                         f"csi={n_lines}  clients={sorted(sources) or ['—']}"
                     )
     except KeyboardInterrupt:
