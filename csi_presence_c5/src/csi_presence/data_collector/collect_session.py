@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from csi_presence.csi_parse import CsiSample
 from csi_presence.cv_ground_truth.person_labeler import PersonLabeler
+from csi_presence.cv_ground_truth.yolo_pipeline import DEFAULT_QUALITY, QUALITY
 from csi_presence.data_collector.serial_reader import CsiSerialReader
 from csi_presence.features import window_features
 from csi_presence.ports_util import ROOT, resolve_device
@@ -68,7 +69,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--window-sec", type=float, default=1.0)
     p.add_argument("--hop-sec", type=float, default=0.5)
-    p.add_argument("--person-conf", type=float, default=0.45)
+    p.add_argument(
+        "--quality",
+        choices=tuple(QUALITY.keys()),
+        default=DEFAULT_QUALITY,
+        help="YOLO26-pose preset (same as healthcare_pose_activity; default accurate)",
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help="override pose weights (else from --quality / POSE_MODEL)",
+    )
+    p.add_argument("--person-conf", type=float, default=None, help="override pose conf")
+    p.add_argument("--imgsz", type=int, default=None, help="override pose imgsz")
     p.add_argument("--no-preview", action="store_true")
     p.add_argument("--name", default=None, help="session folder name suffix")
     args = p.parse_args(argv)
@@ -82,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     windows_path = sess / "windows.jsonl"
     meta_path = sess / "meta.json"
 
-    meta = {
+    meta: dict = {
         "rx_port": rx,
         "baud": args.baud,
         "camera": args.camera,
@@ -90,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         "window_sec": args.window_sec,
         "hop_sec": args.hop_sec,
         "started_utc": stamp,
+        "cv_pipeline": "healthcare_yolo26_pose",
     }
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -97,10 +111,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.label == "auto":
         labeler = PersonLabeler(
             camera_index=args.camera,
+            quality=args.quality,
+            model_name=args.model,
             conf=args.person_conf,
+            imgsz=args.imgsz,
             show_preview=not args.no_preview,
         )
         labeler.start()
+        meta.update(
+            {
+                "pose_quality": labeler.profile["quality"],
+                "pose_model": labeler.profile["model"],
+                "pose_imgsz": labeler.profile["imgsz"],
+                "pose_conf": labeler.profile["conf"],
+                "pose_map": labeler.profile["map"],
+            }
+        )
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
     csi_q: queue.Queue = queue.Queue(maxsize=2000)
     stop = threading.Event()

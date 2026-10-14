@@ -1,1 +1,1 @@
-"""Camera-based occupied / empty labels for training."""
+"""Camera GT via YOLO26-pose (aligned with healthcare_pose_activity)."""

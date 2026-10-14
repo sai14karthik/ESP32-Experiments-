@@ -12,9 +12,6 @@ configs/ports.local.toml
 
 data/sessions/
 data/raw/
-models/*.joblib
-models/*.pkl
-!models/.gitkeep
 
 .DS_Store
 *.log

@@ -5,15 +5,15 @@ hop_sec = 0.5
 csi_baud = 115200
 
 [cv]
-# Webcam index for ground-truth person detect
+# Webcam index for ground-truth (YOLO26-pose — same stack as healthcare_pose_activity)
 camera_index = 0
-# Min confidence for "person" → occupied
-person_conf = 0.45
+# Presets: fast | balanced | accurate | max  (default accurate = yolo26m-pose)
+quality = "accurate"
+# Optional hard override (same as POSE_MODEL env)
+# model = "yolo26l-pose.pt"
 # Frames with a person needed in a window to mark occupied
 min_person_frames = 2
-# YOLO model (downloads on first use)
-yolo_model = "yolo11n.pt"
 
 [labels]
-# empty | occupied | auto (from CV)
+# empty | occupied | auto (from YOLO26-pose)
 default = "auto"

@@ -1,76 +1,68 @@
-# CSI presence (2× ESP32-C5 + LabPSK + CV labels)
+# CSI presence data collection (2× ESP32-C5 + CV labels)
 
-**Binary presence only:** empty vs occupied.  
-**CV = ground truth during collection.** Live inference is CSI-only.
+**Collect only for now** — CSI serial + camera ground truth (empty vs occupied).  
+Training / live inference are out of scope until we bring them back.
 
 ```
-LabPSK AP
-   ↑ pings / traffic
-C5 TX (STA)          C5 RX (STA + CSI)
-   USB (optional)       USB CSI_DATA ──► this Mac (collector)
-Camera / webcam ───────────────────────► CV label (0/1)
+C5 TX ──ESP-NOW──► C5 RX ──USB CSI_DATA──► Mac collector
+Webcam ──YOLO26-pose (same presets as healthcare_pose_activity)──► empty/occupied
 ```
 
-Detected ports on this Mac (update if they change):
+**Ground truth = presence only** (someone there / not).  
+We load the **same YOLO26-pose model + presets** as `healthcare_pose_activity` (`live_infer.QUALITY`). Pose keypoints are used only to decide “person in frame”; we store `label=0|1`, not sitting/walking/etc.
 
-| Role | Serial device |
-|------|----------------|
-| TX (default) | `/dev/cu.usbmodem101` |
-| RX (default) | `/dev/cu.usbmodem1101` |
+| `POSE_QUALITY` | Model (from pose pipeline) |
+|----------------|----------------------------|
+| fast | `yolo26n-pose.pt` |
+| balanced | `yolo26s-pose.pt` |
+| **accurate (default)** | **`yolo26m-pose.pt`** |
+| max | `yolo26l-pose.pt` |
 
-Serial baud for esp-csi get-started: **115200**.
+| Role | Serial |
+|------|--------|
+| TX | `/dev/cu.usbmodem101` |
+| RX | `/dev/cu.usbmodem1101` |
+
+Baud: **115200**.
 
 ## Folder map
 
 ```
 csi_presence_c5/
-  README.md
-  pyproject.toml
-  configs/                 # room, ports, wifi (no secrets in git)
-  data/                    # sessions (gitignored)
-  models/                  # trained presence models (gitignored except .gitkeep)
-  firmware/                # ESP-IDF flash helpers + LabPSK overlays
-  scripts/                 # list_ports, flash_tx, flash_rx, collect, train, live
+  configs/           ports, collect, wifi.env.example
+  data/sessions/     collected sessions (gitignored)
+  firmware/          flash TX/RX helpers
+  scripts/           list_ports, flash_*, collect, preview_cv
   src/csi_presence/
-    csi_parse.py           # CSI_DATA line parser
-    features.py            # window → feature vector
-    data_collector/        # serial CSI + session writer
-    cv_ground_truth/       # webcam/person → occupied 0/1
-    train/                 # train binary classifier
-    live/                  # CSI-only live presence
+    data_collector/      serial CSI + session writer
+    cv_ground_truth/     YOLO26-pose → empty/occupied
+    csi_parse.py
+    features.py          window features saved with each label
 ```
 
-## Quick start
+## Collect
 
 ```bash
 cd csi_presence_c5
 uv sync
-./scripts/list_ports.sh
 
-# Flash both C5s (needs ESP-IDF ≥ 5.4 on PATH via export.sh)
+# Flash once (IDF ≥ 5.4)
 ./scripts/flash_pair.sh /dev/cu.usbmodem101 /dev/cu.usbmodem1101
 
-# One collect run: camera auto-labels empty↔occupied as you leave/enter the frame
+# One run: leave/enter frame — pose GT flips empty↔occupied automatically
 ./scripts/collect_session.sh --rx /dev/cu.usbmodem1101 --camera 0 --seconds 120
 
-./scripts/train_presence.sh
-./scripts/live_presence.sh --rx /dev/cu.usbmodem1101
+# Same quality knobs as healthcare pose live:
+# POSE_QUALITY=fast ./scripts/collect_session.sh ...
+# POSE_MODEL=yolo26l-pose.pt ./scripts/collect_session.sh ...
 ```
 
-During collect, spend ~half the time out of view (EMPTY) and half in view (OCCUPIED). The preview window flips the label automatically — no second command.
+Each session lands in `data/sessions/<timestamp>_auto/`:
+
+- `csi_raw.txt` — raw `CSI_DATA` lines  
+- `windows.jsonl` — per-window features + `label` (0/1) + `label_src`  
+- `meta.json` — ports, YOLO model, counts  
 
 ## Firmware
 
-Default path: **ESP-NOW TX/RX pair** (`csi_send` + `csi_recv`) — no router required for the CSI link; works in the LabPSK RF room.
-
-Optional LabPSK router-ping RX: `firmware/scripts/flash_rx_router.sh` + `configs/wifi.env`.
-
-Details: `firmware/README.md`.
-
-## Scope
-
-| In | Out |
-|----|-----|
-| empty / occupied | person count |
-| CV labels for training | bed / fall / breathing |
-| LabPSK + 2× C5 | hospital multi-room yet |
+See `firmware/README.md`. Default = ESP-NOW `csi_send` + `csi_recv`.
