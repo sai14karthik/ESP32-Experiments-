@@ -1,0 +1,16 @@
+# Serial ports for the two ESP32-C5 boards on this Mac.
+# Override with configs/ports.local.toml (gitignored) if USB remaps.
+
+[devices]
+# Assign roles after first flash / sniff: TX = traffic, RX = CSI_DATA lines.
+a = "/dev/cu.usbmodem101"
+b = "/dev/cu.usbmodem1101"
+
+[roles]
+# Edit after you confirm which board prints CSI_DATA.
+rx = "b"
+tx = "a"
+
+[serial]
+# Match esp-csi get-started sdkconfig.defaults (USB console)
+baud = 115200

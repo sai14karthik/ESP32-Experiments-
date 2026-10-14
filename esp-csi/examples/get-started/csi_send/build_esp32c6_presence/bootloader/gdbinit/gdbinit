@@ -1,0 +1,2 @@
+source /Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c6_presence/bootloader/gdbinit/symbols
+source /Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c6_presence/bootloader/gdbinit/connect

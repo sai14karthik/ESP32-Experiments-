@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/CMakeFiles/bootloader"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/CMakeFiles/bootloader.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/CMakeFiles/bootloader-complete.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+		},
+		{
+			"file" : "/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"bootloader"
+		],
+		"name" : "bootloader"
+	}
+}

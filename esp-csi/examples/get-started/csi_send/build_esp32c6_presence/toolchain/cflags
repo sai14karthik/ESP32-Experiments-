@@ -1,0 +1,2 @@
+-march=rv32imac_zicsr_zifencei_zaamo_zalrsc
+"-specs=/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c6_presence/specs/picolibc.specs"

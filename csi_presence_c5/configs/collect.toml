@@ -1,0 +1,19 @@
+[session]
+# Sliding window for features / labels
+window_sec = 1.0
+hop_sec = 0.5
+csi_baud = 115200
+
+[cv]
+# Webcam index for ground-truth person detect
+camera_index = 0
+# Min confidence for "person" → occupied
+person_conf = 0.45
+# Frames with a person needed in a window to mark occupied
+min_person_frames = 2
+# YOLO model (downloads on first use)
+yolo_model = "yolo11n.pt"
+
+[labels]
+# empty | occupied | auto (from CV)
+default = "auto"

@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/CMakeFiles/bootloader
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/CMakeFiles/bootloader.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/CMakeFiles/bootloader-complete.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/get-started/csi_send/build_esp32c5_presence/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule
