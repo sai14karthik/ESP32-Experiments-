@@ -11,9 +11,9 @@ rtsp = "rtsp://127.0.0.1:8554/cam_sense"
 [csi]
 # Wall-powered C5s forward CSI_DATA here (Mini listens)
 tcp_port = 9055
-# Optional known board STA IPs (fill in after DHCP settles)
+# Optional known board STA IPs (fill after DHCP — used by check_csi.sh ping)
 # hosts = ["10.128.93.29", "10.128.93.30"]
 
 [usb]
 # Present when boards are plugged for flash/debug
-patterns = ["/dev/cu.usbmodem*", "/dev/cu.usbserial*"]
+patterns = ["/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*"]

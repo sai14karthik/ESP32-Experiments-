@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quick health check: Sense cam .15 + CSI TCP/USB.
+# Check Sense ESP cam (.15) AND CSI C5 boards (USB / TCP :9055).
 #   ./scripts/check_esp.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

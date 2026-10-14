@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe Sense cam + CSI TCP / USB — are lab ESPs up?"""
+"""Check Sense ESP cam + CSI C5 boards (USB / TCP)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import glob
 import os
 import socket
 import subprocess
-import sys
 import time
 import tomllib
 import urllib.error
@@ -16,32 +15,32 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CFG = ROOT / "configs" / "devices.toml"
+DEVICES = ROOT / "configs" / "devices.toml"
+PORTS = ROOT / "configs" / "ports.toml"
 
 
-def load_cfg() -> dict:
-    with CFG.open("rb") as f:
+def load_toml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open("rb") as f:
         return tomllib.load(f)
 
 
-def ping_ok(host: str, timeout_s: float = 2.0) -> bool:
-    try:
-        r = subprocess.run(
-            ["ping", "-c", "1", "-W", "2000", host],
-            capture_output=True,
-            timeout=timeout_s + 1,
-        )
-        # macOS -W is ms; Linux -W is seconds — try both styles if needed
-        if r.returncode == 0:
-            return True
-        r = subprocess.run(
-            ["ping", "-c", "1", "-W", "2", host],
-            capture_output=True,
-            timeout=timeout_s + 2,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
+def mark(ok: bool) -> str:
+    return "OK  " if ok else "FAIL"
+
+
+def ping_ok(host: str) -> bool:
+    for args in (
+        ["ping", "-c", "1", "-W", "2000", host],
+        ["ping", "-c", "1", "-W", "2", host],
+    ):
+        try:
+            if subprocess.run(args, capture_output=True, timeout=3).returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -67,12 +66,7 @@ def http_ok(url: str, timeout: float = 4.0, read_bytes: int = 128) -> tuple[bool
         return False, str(e).split("\n")[0][:80]
 
 
-def listening_local(port: int) -> bool:
-    return tcp_open("127.0.0.1", port, timeout=0.5)
-
-
-def tcp_clients(port: int) -> list[str]:
-    """Peer IPs with ESTABLISHED connections to local :port (macOS/Linux)."""
+def tcp_peers(port: int) -> list[str]:
     peers: list[str] = []
     try:
         r = subprocess.run(
@@ -82,7 +76,6 @@ def tcp_clients(port: int) -> list[str]:
             timeout=3,
         )
         for line in r.stdout.splitlines()[1:]:
-            # ... TCP 10.128.93.13:9055->10.128.93.29:61289 (ESTABLISHED)
             if "->" not in line:
                 continue
             right = line.split("->", 1)[1].split()[0]
@@ -94,98 +87,159 @@ def tcp_clients(port: int) -> list[str]:
     return peers
 
 
-def mark(ok: bool) -> str:
-    return "OK " if ok else "FAIL"
+def sniff_csi(port: str, baud: int = 115200, seconds: float = 2.0) -> tuple[int, str]:
+    try:
+        import serial
+    except ImportError:
+        return -1, "pyserial missing"
+    try:
+        ser = serial.Serial(port, baud, timeout=0.2)
+    except Exception as e:
+        return -1, str(e)[:60]
+    t0 = time.time()
+    n = 0
+    buf = ""
+    sample = ""
+    try:
+        while time.time() - t0 < seconds:
+            chunk = ser.read(4096)
+            if not chunk:
+                continue
+            buf += chunk.decode("utf-8", errors="ignore")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                if line.startswith("CSI_DATA"):
+                    n += 1
+                    if not sample:
+                        sample = line[:72]
+    finally:
+        ser.close()
+    return n, sample or "(no CSI_DATA)"
+
+
+def list_usb(patterns: list[str]) -> list[str]:
+    found: list[str] = []
+    for pat in patterns:
+        found.extend(glob.glob(os.path.expanduser(pat)))
+    return sorted(set(found))
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Check if lab ESP devices are reachable")
-    p.add_argument("--config", type=Path, default=CFG)
-    args = p.parse_args()
-    cfg = tomllib.loads(args.config.read_text()) if args.config.exists() else load_cfg()
+    ap = argparse.ArgumentParser(description="Check Sense cam + CSI C5 boards")
+    ap.add_argument("--sniff-sec", type=float, default=2.0)
+    ap.add_argument("--no-sniff", action="store_true")
+    args = ap.parse_args()
 
-    print("=== ESP device check ===")
-    print(f"config: {args.config}")
-    print()
+    cfg = load_toml(DEVICES)
+    ports_cfg = load_toml(PORTS)
+    sense = cfg.get("sense", {})
+    csi = cfg.get("csi", {})
+    usb_cfg = cfg.get("usb", {})
+    baud = int(ports_cfg.get("serial", {}).get("baud", 115200))
+    tcp_port = int(csi.get("tcp_port", 9055))
 
+    print("=== Lab ESP check (Sense cam + CSI C5) ===\n")
     fails = 0
 
-    # --- Sense camera ---
-    sense = cfg.get("sense", {})
+    # ----- Sense -----
     host = sense.get("host", "10.128.93.15")
     mjpeg = sense.get("mjpeg", f"http://{host}:81/stream")
     audio = sense.get("audio", f"http://{host}/audio")
     rtsp = sense.get("rtsp", "rtsp://127.0.0.1:8554/cam_sense")
 
-    print("[Sense cam]")
+    print("[1] Sense ESP cam (CV GT)")
     ok_ping = ping_ok(host)
     print(f"  {mark(ok_ping)} ping {host}")
     if not ok_ping:
         fails += 1
 
     ok81 = tcp_open(host, 81)
-    print(f"  {mark(ok81)} tcp {host}:81")
+    print(f"  {mark(ok81)} tcp :81")
     if not ok81:
         fails += 1
 
-    ok_mj, detail_mj = http_ok(mjpeg)
-    print(f"  {mark(ok_mj)} mjpeg {mjpeg}  ({detail_mj})")
+    ok_mj, d_mj = http_ok(mjpeg)
+    print(f"  {mark(ok_mj)} mjpeg {mjpeg}  ({d_mj})")
     if not ok_mj:
         fails += 1
+        print("       power-cycle Sense / check LabPSK; or use MediaMTX RTSP for GT")
 
-    ok_au, detail_au = http_ok(audio, timeout=3.0)
-    print(f"  {mark(ok_au)} audio {audio}  ({detail_au})")
-    # audio optional for CSI GT — warn only
+    ok_au, d_au = http_ok(audio, timeout=3.0)
+    print(f"  {mark(ok_au)} audio {audio}  ({d_au})")
     if not ok_au:
-        print("       (audio optional for presence GT; needed for Sense A/V MediaMTX)")
+        print("       (optional for presence GT; required for Sense A/V MediaMTX)")
 
-    mtx_port = 8554
-    ok_mtx = listening_local(mtx_port)
-    print(f"  {mark(ok_mtx)} MediaMTX local :{mtx_port}  ({rtsp})")
+    ok_mtx = tcp_open("127.0.0.1", 8554, timeout=0.4)
+    print(f"  {mark(ok_mtx)} MediaMTX :8554  ({rtsp})")
     if ok_mtx and not ok_mj:
-        print("       tip: use --camera rtsp://127.0.0.1:8554/cam_sense for collect GT")
+        print("       tip: collect --camera rtsp://127.0.0.1:8554/cam_sense")
 
     print()
 
-    # --- CSI TCP / USB ---
-    csi = cfg.get("csi", {})
-    tcp_port = int(csi.get("tcp_port", 9055))
-    print("[CSI C5]")
-    ok_listen = listening_local(tcp_port)
-    print(f"  {mark(ok_listen)} Mini listen :{tcp_port} (collect / ingest)")
-    peers = tcp_clients(tcp_port) if ok_listen else []
-    if ok_listen:
+    # ----- CSI C5 -----
+    print("[2] CSI ESP32-C5")
+    patterns = usb_cfg.get("patterns") or [
+        "/dev/cu.usbmodem*",
+        "/dev/cu.usbserial*",
+        "/dev/cu.wchusbserial*",
+    ]
+    usb_ports = list_usb(patterns)
+    csi_live = 0
+
+    if usb_ports:
+        print(f"  OK  USB {len(usb_ports)} port(s): {', '.join(usb_ports)}")
+        if not args.no_sniff:
+            for p in usb_ports:
+                n, note = sniff_csi(p, baud=baud, seconds=args.sniff_sec)
+                if n < 0:
+                    print(f"  FAIL {p}  {note}")
+                    fails += 1
+                elif n == 0:
+                    print(f"  FAIL {p}  no CSI_DATA in {args.sniff_sec:.1f}s")
+                    fails += 1
+                else:
+                    print(f"  OK  {p}  CSI_DATA≈{n}  {note}…")
+                    csi_live += 1
+    else:
+        print("  —   no USB (normal if wall-powered)")
+
+    if tcp_open("127.0.0.1", tcp_port, timeout=0.4):
+        print(f"  OK  Mini listen :{tcp_port}")
+        peers = tcp_peers(tcp_port)
         if peers:
-            print(f"  OK  active TCP clients ({len(peers)}): {', '.join(peers)}")
+            print(f"  OK  TCP clients ({len(peers)}): {', '.join(peers)}")
+            csi_live += len(peers)
         else:
-            print("  FAIL no ESTABLISHED clients on :9055 (boards off / wrong CSI_TCP_HOST?)")
+            print("  FAIL :9055 listening but 0 clients")
             fails += 1
     else:
-        print("       (start ./scripts/collect_session.sh to listen, or leave boards USB)")
+        print(f"  —   nothing on :{tcp_port} (start collect to accept wall boards)")
+        if not usb_ports:
+            fails += 1
+            print("  FAIL no USB and no TCP — no CSI path visible")
 
-    for h in csi.get("hosts", []) or []:
+    for h in csi.get("hosts") or []:
         ok = ping_ok(str(h))
         print(f"  {mark(ok)} ping C5 {h}")
         if not ok:
             fails += 1
+        else:
+            csi_live += 1
 
-    usb = cfg.get("usb", {})
-    patterns = usb.get("patterns", ["/dev/cu.usbmodem*"])
-    found: list[str] = []
-    for pat in patterns:
-        found.extend(sorted(glob.glob(os.path.expanduser(pat))))
-    found = sorted(set(found))
-    if found:
-        print(f"  OK  USB serial ({len(found)}): {', '.join(found)}")
-    else:
-        print("  —   no USB serial (normal if wall-powered only)")
+    if csi_live == 0 and (usb_ports or tcp_open("127.0.0.1", tcp_port, timeout=0.2)):
+        # USB present but no CSI_DATA counted as fails already
+        pass
 
     print()
-    if fails:
-        print(f"RESULT: {fails} problem(s) — power-cycle Sense / check LabPSK / flash CSI_TCP_HOST")
-        return 1
-    print("RESULT: looks good")
-    return 0
+    sense_ok = ok_ping and ok81 and ok_mj
+    csi_ok = csi_live > 0
+    print(f"Sense cam: {'UP' if sense_ok else 'DOWN'}")
+    print(f"CSI C5:    {'UP' if csi_ok else 'DOWN'}  (sources≈{csi_live})")
+    if sense_ok and csi_ok:
+        print("RESULT: both Sense + CSI look active")
+        return 0
+    print("RESULT: fix DOWN side before collect")
+    return 1
 
 
 if __name__ == "__main__":
