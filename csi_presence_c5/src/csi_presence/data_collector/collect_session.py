@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -57,6 +58,13 @@ def _label_to_int(label: str) -> int:
     if label == "occupied":
         return 1
     raise ValueError(label)
+
+
+def _safe_session_tag(raw: str) -> str:
+    """Filesystem-safe session tag (e.g. session1, mock_hospital_runA)."""
+    tag = re.sub(r"[^\w.\-]+", "_", raw.strip())
+    tag = tag.strip("._-")
+    return tag or "auto"
 
 
 def _csi_serial_worker(
@@ -158,7 +166,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--person-conf", type=float, default=None, help="override pose conf")
     p.add_argument("--imgsz", type=int, default=None, help="override pose imgsz")
     p.add_argument("--no-preview", action="store_true")
-    p.add_argument("--name", default=None, help="session folder name suffix")
+    p.add_argument(
+        "--session",
+        "-s",
+        "--name",
+        dest="session",
+        default=None,
+        metavar="TAG",
+        help="run tag for folder name, e.g. --session session1 → …_session1",
+    )
     args = p.parse_args(argv)
 
     # Default = TCP (Mini + wall power). --rx switches to USB serial debug.
@@ -167,8 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     rx = None if use_tcp else args.rx
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    suffix = args.name or args.label
-    sess = SESSIONS / f"{stamp}_{suffix}"
+    session_tag = _safe_session_tag(args.session or args.label)
+    sess = SESSIONS / f"{stamp}_{session_tag}"
     sess.mkdir(parents=True, exist_ok=True)
     raw_path = sess / "csi_raw.txt"
     windows_path = sess / "windows.jsonl"
@@ -180,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         "rx_port": rx,
         "baud": args.baud if not use_tcp else None,
         "camera": args.camera,
+        "session_tag": session_tag,
         "label_mode": args.label,
         "window_sec": args.window_sec,
         "hop_sec": args.hop_sec,

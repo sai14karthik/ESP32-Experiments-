@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Mac Mini collect: CSI TCP :9055 + YOLO26-pose GT from ESP cam .15
-#   ./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense
+#   ./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session session1
 #   denser: hop 0.25s (~4 windows/s), default 300s — override with --seconds / --hop-sec
+#   --session / -s / --name = folder tag (not CV empty|occupied; that is still --label)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

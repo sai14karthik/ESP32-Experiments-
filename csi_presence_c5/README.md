@@ -34,8 +34,9 @@ uv sync
 # Sense cam (.15) + CSI C5s (USB / TCP :9055)
 ./scripts/check_esp.sh
 
-# denser defaults: hop 0.25s (~4 windows/s), 300s session (configs/collect.toml)
-./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense
+# denser defaults: hop 0.25s (~4 windows/s), 300s (configs/collect.toml)
+# --session TAG names the folder, e.g. 20261014T…_session1
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session session1
 ```
 
 Leave/enter the **ESP cam** frame in the same run. Sessions → `data/sessions/`.
