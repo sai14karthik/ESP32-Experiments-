@@ -20,8 +20,8 @@ static const char *TAG = "csi_tcp";
 #if CONFIG_CSI_TCP_ENABLE
 
 #define CSI_TCP_LINE_MAX    4096
-#define CSI_TCP_QUEUE_LEN   64
-#define CSI_TCP_RECONNECT_MS 2000
+#define CSI_TCP_QUEUE_LEN   128  /* denser peer ping (~50 Hz) */
+#define CSI_TCP_RECONNECT_MS 1500
 
 typedef struct {
     uint16_t len;

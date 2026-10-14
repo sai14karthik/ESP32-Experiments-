@@ -15,7 +15,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 
-from csi_presence.csi_parse import CsiSample
+from csi_presence.csi_parse import PEER_MAC_4_2, CsiSample
 from csi_presence.cv_ground_truth.camera_source import DEFAULT_ESP_CAM
 from csi_presence.cv_ground_truth.person_labeler import PersonLabeler
 from csi_presence.cv_ground_truth.yolo_pipeline import DEFAULT_QUALITY, QUALITY
@@ -175,6 +175,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="TAG",
         help="run tag for folder name, e.g. --session session1 → …_session1",
     )
+    p.add_argument(
+        "--method",
+        choices=("auto", "4.1", "4.2", "4.3"),
+        default="auto",
+        help="CSI method tag in meta (auto=detect from CSI MAC; 4.2 peer=1a:00:00:00:00:0a)",
+    )
     args = p.parse_args(argv)
 
     # Default = TCP (Mini + wall power). --rx switches to USB serial debug.
@@ -190,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     windows_path = sess / "windows.jsonl"
     meta_path = sess / "meta.json"
 
+    method = args.method
     meta: dict = {
         "csi_transport": "tcp" if use_tcp else "serial",
         "listen_tcp": listen_port,
@@ -197,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
         "baud": args.baud if not use_tcp else None,
         "camera": args.camera,
         "session_tag": session_tag,
+        "method": method,
+        "method_note": (
+            "4.2=CSI from peer STA; 4.1=CSI from AP; auto detects 4.2 via "
+            f"MAC {PEER_MAC_4_2}"
+        ),
         "label_mode": args.label,
         "window_sec": args.window_sec,
         "hop_sec": args.hop_sec,
@@ -248,21 +260,32 @@ def main(argv: list[str] | None = None) -> int:
     n_empty = 0
     n_occupied = 0
     sources: set[str] = set()
+    macs: set[str] = set()
     t0 = time.time()
     next_hop = t0 + args.hop_sec
+    last_csi_wall = 0.0
+    last_wait_print = 0.0
+    last_cv_poll = 0.0
+    # YOLO every loop (~100 Hz) starves CSI drain on Mini — ~6–8 Hz is enough for GT
+    cv_period = min(0.2, max(0.1, args.hop_sec))
+    method_locked = method != "auto"
 
     print(f"session → {sess}")
     win_rate = 1.0 / max(args.hop_sec, 1e-3)
     if use_tcp:
         print(
-            f"CSI=TCP :{listen_port} (C5s on wall power + LabPSK)  "
-            f"CV camera={args.camera}  {args.seconds:.0f}s"
+            f"CSI=TCP :{listen_port} (wall C5 → Mini)  "
+            f"method={method}  CV={args.camera}  {args.seconds:.0f}s"
+        )
+        print(
+            "  §4.2: expect 1 client (sense); CSI MAC "
+            f"{PEER_MAC_4_2}  |  §4.1: N clients, AP BSSID MAC"
         )
     else:
-        print(f"CSI=USB {rx}  CV camera={args.camera}  {args.seconds:.0f}s")
+        print(f"CSI=USB {rx}  method={method}  CV={args.camera}  {args.seconds:.0f}s")
     print(
         f"density: window={args.window_sec:.2f}s hop={args.hop_sec:.2f}s "
-        f"(≈{win_rate:.0f} labeled windows/s)"
+        f"(≈{win_rate:.0f} labeled windows/s; need ≥3 CSI/window)"
     )
     if args.label == "auto":
         print("leave/enter frame in the SAME run — CV flips empty↔occupied")
@@ -272,9 +295,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with raw_path.open("a") as raw_f, windows_path.open("a") as win_f:
             while time.time() - t0 < args.seconds:
-                if labeler is not None:
-                    labeler.poll()
-
+                now = time.time()
+                # Drain CSI first (don't block behind YOLO)
                 while True:
                     try:
                         item = csi_q.get_nowait()
@@ -290,33 +312,85 @@ def main(argv: list[str] | None = None) -> int:
                         raw_f.write(f"{sample.source_id}\t{sample.raw_line}\n")
                     else:
                         raw_f.write(sample.raw_line + "\n")
+                    if sample.mac:
+                        macs.add(sample.mac)
+                    if not method_locked:
+                        if sample.is_between_devices:
+                            method = "4.2"
+                            method_locked = True
+                            meta["method"] = method
+                            meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+                            print(
+                                f"[csi] detected method=4.2 (peer MAC {PEER_MAC_4_2})"
+                            )
+                        elif sample.mac:
+                            method = "4.1"
+                            method_locked = True
+                            meta["method"] = method
+                            meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+                            print(f"[csi] detected method=4.1 (MAC {sample.mac})")
                     n_lines += 1
+                    last_csi_wall = now
                     buf.append(sample)
 
-                now = time.time()
+                # CV at capped rate (fills PersonLabeler hit history)
+                if labeler is not None and (now - last_cv_poll) >= cv_period:
+                    labeler.poll()
+                    last_cv_poll = now
+
                 cutoff = now - max(args.window_sec * 2, 2.0)
                 while buf and buf[0].host_ts < cutoff:
                     buf.popleft()
 
+                # Stall: TCP client(s) but no CSI_DATA (common §4.2 band mismatch)
+                if (
+                    use_tcp
+                    and sources
+                    and n_lines == 0
+                    and now - t0 > 8
+                    and now - last_wait_print > 5
+                ):
+                    print(
+                        "[csi] TCP client(s) up but 0 CSI_DATA — "
+                        "power peer+sense; both must be 2.4 GHz same AP "
+                        f"(§4.2 peer MAC {PEER_MAC_4_2})"
+                    )
+                    last_wait_print = now
+                elif (
+                    n_lines > 0
+                    and last_csi_wall > 0
+                    and now - last_csi_wall > 8
+                    and now - last_wait_print > 5
+                ):
+                    print(
+                        f"[csi] CSI stalled {now - last_csi_wall:.0f}s "
+                        f"(last clients={sorted(sources)})"
+                    )
+                    last_wait_print = now
+
                 if now < next_hop:
-                    time.sleep(0.01)
+                    time.sleep(0.005)
                     continue
                 next_hop = now + args.hop_sec
                 win = [s for s in buf if s.host_ts >= now - args.window_sec]
                 feats = window_features(win)
                 if feats is None:
-                    if n_lines == 0 and now - t0 > 5:
+                    if n_lines == 0 and now - t0 > 5 and now - last_wait_print > 5:
                         if use_tcp:
                             print(
                                 "waiting for CSI TCP… "
-                                "flash boards with CSI_TCP_HOST=<this Mini IP>"
+                                "start boards (CSI_TCP_HOST=this Mini) / check LabPSK"
                             )
                         else:
                             print("waiting for CSI_DATA on serial…")
+                        last_wait_print = now
                     continue
 
                 if args.label == "auto":
                     assert labeler is not None
+                    # One fresh frame at hop boundary for label decision
+                    labeler.poll()
+                    last_cv_poll = time.time()
                     occupied = 1 if labeler.recent_occupied(args.window_sec) else 0
                     label_src = "cv"
                 else:
@@ -332,22 +406,27 @@ def main(argv: list[str] | None = None) -> int:
                     "t": now,
                     "label": occupied,
                     "label_src": label_src,
+                    "method": method,
                     "n_csi": len(win),
                     "sources": sorted({s.source_id for s in win if s.source_id}),
+                    "macs": sorted({s.mac for s in win if s.mac}),
                     "feat": feats.tolist(),
                 }
                 win_f.write(json.dumps(rec) + "\n")
                 n_windows += 1
-                # Status ~ every 2.5s at hop=0.25 (was every 5s at hop=0.5)
+                # Status ~ every 2.5s at hop=0.25
                 status_every = max(1, int(round(2.5 / max(args.hop_sec, 1e-3))))
                 if n_windows % status_every == 0:
+                    raw_f.flush()
+                    win_f.flush()
                     tag = "OCCUPIED" if occupied else "EMPTY"
                     elapsed = max(now - t0, 1e-3)
                     print(
-                        f"  t={elapsed:.0f}s  now={tag}  "
+                        f"  t={elapsed:.0f}s  now={tag}  method={method}  "
                         f"empty={n_empty} occupied={n_occupied}  "
                         f"windows={n_windows} ({n_windows / elapsed:.1f}/s)  "
-                        f"csi={n_lines}  clients={sorted(sources) or ['—']}"
+                        f"csi={n_lines} ({n_lines / elapsed:.1f}/s)  "
+                        f"clients={sorted(sources) or ['—']}"
                     )
     except KeyboardInterrupt:
         print("\nstopped by user")
@@ -356,27 +435,37 @@ def main(argv: list[str] | None = None) -> int:
         if labeler is not None:
             labeler.stop()
 
+    duration = time.time() - t0
     summary = {
         **meta,
+        "method": method,
         "ended_utc": datetime.now(timezone.utc).isoformat(),
         "csi_lines": n_lines,
+        "csi_hz": round(n_lines / duration, 2) if duration > 0 else 0,
         "windows": n_windows,
         "windows_empty": n_empty,
         "windows_occupied": n_occupied,
         "source_ids": sorted(sources),
-        "duration_sec": time.time() - t0,
+        "csi_macs": sorted(macs),
+        "duration_sec": duration,
     }
     meta_path.write_text(json.dumps(summary, indent=2) + "\n")
     print(
-        f"done: {n_lines} CSI lines, {n_windows} windows "
-        f"(empty={n_empty} occupied={n_occupied}) sources={sorted(sources)} → {sess}"
+        f"done: method={method}  {n_lines} CSI ({summary['csi_hz']}/s), "
+        f"{n_windows} windows (empty={n_empty} occupied={n_occupied})  "
+        f"sources={sorted(sources)} macs={sorted(macs)} → {sess}"
     )
-    if args.label == "auto" and (n_empty == 0 or n_occupied == 0):
+    if n_lines == 0:
+        print(
+            "WARNING: 0 CSI — for §4.2 power peer+sense on same 2.4 GHz AP; "
+            "Mini must listen :9055; CSI_TCP_HOST must be Mini IP"
+        )
+    if args.label == "auto" and n_windows > 0 and (n_empty == 0 or n_occupied == 0):
         print(
             "WARNING: need both empty and occupied — "
             "spend time both in and out of the camera frame"
         )
-    return 0
+    return 0 if n_lines > 0 else 1
 
 
 if __name__ == "__main__":

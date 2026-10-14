@@ -12,6 +12,10 @@ _CSI_RE = re.compile(
 )
 
 
+# Espressif §4.2 peer STA MAC (csi_between_devices)
+PEER_MAC_4_2 = "1a:00:00:00:00:0a"
+
+
 @dataclass
 class CsiSample:
     raw_line: str
@@ -19,6 +23,7 @@ class CsiSample:
     iq: list[int]
     host_ts: float  # set by collector
     source_id: str = ""  # TCP client IP, or serial port name
+    mac: str = ""  # transmitter MAC from CSI_DATA line
 
     @property
     def amplitude(self) -> list[float]:
@@ -27,6 +32,10 @@ class CsiSample:
         for i in range(0, len(iq) - 1, 2):
             out.append((iq[i] ** 2 + iq[i + 1] ** 2) ** 0.5)
         return out
+
+    @property
+    def is_between_devices(self) -> bool:
+        return self.mac.lower() == PEER_MAC_4_2
 
 
 def parse_csi_line(
@@ -56,16 +65,30 @@ def parse_csi_line(
         return None
 
     rssi: Optional[float] = None
+    mac = ""
     parts = meta.split(",")
-    # Common layouts put rssi early; try a few slots safely
-    for idx in (2, 3, 1):
-        if idx < len(parts):
+    # esp-csi C5: seq,mac,rssi,rate,...  | classic: more fields before rssi
+    if len(parts) >= 2 and ":" in parts[1]:
+        mac = parts[1].strip().lower()
+        if len(parts) >= 3:
             try:
-                rssi = float(parts[idx])
-                break
+                rssi = float(parts[2])
             except ValueError:
-                continue
+                pass
+    if rssi is None:
+        for idx in (2, 3, 1):
+            if idx < len(parts):
+                try:
+                    rssi = float(parts[idx])
+                    break
+                except ValueError:
+                    continue
 
     return CsiSample(
-        raw_line=line, rssi=rssi, iq=nums, host_ts=host_ts, source_id=source_id
+        raw_line=line,
+        rssi=rssi,
+        iq=nums,
+        host_ts=host_ts,
+        source_id=source_id,
+        mac=mac,
     )

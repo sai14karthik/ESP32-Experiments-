@@ -33,8 +33,11 @@
 #include "esp_csi_gain_ctrl.h"
 #include "csi_tcp_forward.h"
 
-#define CONFIG_SEND_FREQUENCY 20
+/* Peer ping rate: denser traffic → more CSI for Mini windows (hop 0.25s). */
+#define CONFIG_SEND_FREQUENCY 50
 #define CSI_LINE_MAX 4096
+/* USB print every Nth CSI line when TCP is on (keeps callback lighter at ~50 Hz). */
+#define CSI_USB_PRINT_EVERY 5
 
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
 #define CSI_FORCE_LLTF 0
@@ -98,7 +101,8 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     esp_csi_gain_ctrl_get_gain_compensation(&compensate_gain, agc_gain, fft_gain);
 #endif
 
-    char line[CSI_LINE_MAX];
+    /* Static: Wi-Fi CSI callback stack is small; avoid 4KB locals. */
+    static char line[CSI_LINE_MAX];
     int off = 0;
 
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C61
@@ -143,8 +147,11 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     csi_line_append(line, sizeof(line), &off, "]\"\n");
 
     if (off > 0) {
-        ets_printf("%s", line);
+        /* Always enqueue TCP first; USB at reduced rate under TCP load. */
         csi_tcp_forward_enqueue(line, (size_t)off);
+        if (!csi_tcp_forward_enabled() || (s_count % CSI_USB_PRINT_EVERY) == 0) {
+            ets_printf("%s", line);
+        }
     } else {
         ESP_LOGW(TAG, "CSI line truncated (>%d); skipped TCP", CSI_LINE_MAX);
     }
@@ -240,6 +247,16 @@ static esp_err_t wifi_wait_ip(int tries)
     return ESP_ERR_TIMEOUT;
 }
 
+static void wifi_ps_none(void)
+{
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WIFI_PS_NONE failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi power save OFF (stable CSI TX/RX)");
+    }
+}
+
 static void wifi_lock_2g4_same_band(void)
 {
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
@@ -252,17 +269,32 @@ static void wifi_lock_2g4_same_band(void)
 
     wifi_ap_record_t ap = {0};
     if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.primary > 14) {
+        /* Only bounce when first join was 5 GHz — always-bounce can stall assoc. */
         ESP_LOGW(TAG, "was on 5 GHz ch %d — reconnecting on 2.4 GHz", ap.primary);
         ESP_ERROR_CHECK(esp_wifi_disconnect());
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(300));
         ESP_ERROR_CHECK(esp_wifi_connect());
         if (wifi_wait_ip(50) != ESP_OK) {
             ESP_LOGW(TAG, "IP wait after 2.4 GHz reconnect timed out");
         }
     }
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-        ESP_LOGI(TAG, "associated ch=%d bssid=" MACSTR, ap.primary, MAC2STR(ap.bssid));
+    wifi_ps_none();
+    /* Association can lag set_band_mode; wait for a real 2.4 GHz BSS. */
+    for (int i = 0; i < 40; i++) {
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.primary >= 1 && ap.primary <= 14) {
+            ESP_LOGI(TAG, "associated ch=%d bssid=" MACSTR, ap.primary, MAC2STR(ap.bssid));
+            break;
+        }
+        if (i == 0) {
+            ESP_LOGW(TAG, "waiting for 2.4 GHz association…");
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+        if (i == 39) {
+            ESP_LOGW(TAG, "not associated on 2.4 GHz after band lock");
+        }
     }
+#else
+    wifi_ps_none();
 #endif
 }
 
@@ -281,6 +313,11 @@ static esp_err_t apply_peer_mac(void)
 
     if (wifi_wait_ip(50) != ESP_OK) {
         ESP_LOGW(TAG, "waiting for IP after MAC change timed out; continuing");
+    }
+    wifi_ps_none();
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        ESP_LOGI(TAG, "peer associated ch=%d bssid=" MACSTR, ap.primary, MAC2STR(ap.bssid));
     }
     return ESP_OK;
 }
@@ -306,6 +343,13 @@ void app_main(void)
     uint8_t local_mac[6];
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, local_mac));
     ESP_LOGI(TAG, "local MAC " MACSTR, MAC2STR(local_mac));
+    /* Wait until STA is associated before CSI/promiscuous (avoids empty early RX). */
+    if (wifi_wait_ip(30) != ESP_OK) {
+        ESP_LOGW(TAG, "sense IP not ready; continuing anyway");
+    }
+    /* Brief settle so peer can finish MAC change + start pinging (~3–5s typical). */
+    ESP_LOGI(TAG, "waiting 4s for peer traffic…");
+    vTaskDelay(pdMS_TO_TICKS(4000));
     csi_tcp_forward_start();
     wifi_csi_init_from_peer();
     wifi_ping_router_start();
