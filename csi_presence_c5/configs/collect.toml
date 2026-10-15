@@ -24,3 +24,9 @@ person_conf = 0.45
 [labels]
 # empty | occupied | auto (from YOLO26-pose)
 default = "auto"
+
+[postgres]
+# Dual-write CSI packets + labeled windows to Mini Postgres (csi DB).
+# Override URL with DATABASE_URL or --database-url. Disable with --no-postgres.
+enable = true
+# url = "postgresql:///csi"

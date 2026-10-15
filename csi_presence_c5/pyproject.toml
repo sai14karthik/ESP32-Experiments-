@@ -8,11 +8,13 @@ dependencies = [
   "pyserial>=3.5",
   "opencv-python>=4.8,<5",
   "ultralytics>=8.4.175",
+  "psycopg[binary]>=3.1",
 ]
 
 [project.scripts]
 csi-collect = "csi_presence.data_collector.collect_session:main"
 csi-cv-label = "csi_presence.cv_ground_truth.person_labeler:main"
+csi-db-dist = "csi_presence.db_dist:main"
 
 [build-system]
 requires = ["hatchling"]

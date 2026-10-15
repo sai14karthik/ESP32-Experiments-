@@ -4,9 +4,12 @@
 #   Live: OpenCV GT window + console status (use --no-preview / --quiet to tone down)
 #   denser: hop 0.125s (~8 windows/s), default 300s — override with --seconds / --hop-sec
 #   --session / -s / --name = folder tag (not CV empty|occupied; that is still --label)
+#   Postgres ON by default (csi DB) — --no-postgres for file-only; ./scripts/db_dist.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+export PATH="/opt/homebrew/opt/postgresql@16/bin:${PATH:-}"
+export DATABASE_URL="${DATABASE_URL:-postgresql:///csi}"
 if [[ ! -d .venv ]]; then
   uv sync
 fi

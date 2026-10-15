@@ -21,6 +21,7 @@ from csi_presence.cv_ground_truth.person_labeler import PersonLabeler
 from csi_presence.cv_ground_truth.yolo_pipeline import DEFAULT_QUALITY, QUALITY
 from csi_presence.data_collector.serial_reader import CsiSerialReader
 from csi_presence.data_collector.tcp_reader import CsiTcpListener
+from csi_presence.db import PresenceDb, database_url
 from csi_presence.features import window_features
 from csi_presence.ports_util import ROOT, resolve_device
 
@@ -35,6 +36,7 @@ def _load_collect_defaults() -> dict:
         "window_sec": 1.0,
         "hop_sec": 0.125,
         "seconds": 300.0,
+        "postgres": True,
     }
     if not COLLECT_TOML.exists():
         return out
@@ -47,6 +49,9 @@ def _load_collect_defaults() -> dict:
         for k in ("window_sec", "hop_sec", "seconds"):
             if k in sess:
                 out[k] = float(sess[k])
+        pg = cfg.get("postgres") or {}
+        if "enable" in pg:
+            out["postgres"] = bool(pg["enable"])
     except Exception:
         pass
     return out
@@ -196,6 +201,25 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="CSI method tag in meta (auto=detect from CSI MAC; 4.2 peer=1a:00:00:00:00:0a)",
     )
+    pg_grp = p.add_mutually_exclusive_group()
+    pg_grp.add_argument(
+        "--postgres",
+        dest="postgres",
+        action="store_true",
+        default=dflt["postgres"],
+        help="store CSI + labeled windows in PostgreSQL (default on)",
+    )
+    pg_grp.add_argument(
+        "--no-postgres",
+        dest="postgres",
+        action="store_false",
+        help="file-only session (skip PostgreSQL)",
+    )
+    p.add_argument(
+        "--database-url",
+        default=None,
+        help="Postgres URL (default $DATABASE_URL or postgresql:///csi)",
+    )
     args = p.parse_args(argv)
 
     # Default = TCP (Mini + wall power). --rx switches to USB serial debug.
@@ -220,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
         "camera": args.camera,
         "session_tag": session_tag,
         "method": method,
+        "postgres": bool(args.postgres),
+        "database_url": database_url(args.database_url) if args.postgres else None,
         "method_note": (
             "4.2=CSI from peer STA; 4.1=CSI from AP; auto detects 4.2 via "
             f"MAC {PEER_MAC_4_2}"
@@ -311,6 +337,34 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"forced label={args.label}")
 
+    db: PresenceDb | None = None
+    if args.postgres:
+        try:
+            db = PresenceDb(args.database_url)
+            db.ensure_schema()
+            db_id = db.start_session(
+                method=method if method != "auto" else "auto",
+                label=session_tag,
+                recv_port=(
+                    f"tcp:{listen_port}" if use_tcp else (rx or "usb")
+                ),
+                baud=None if use_tcp else args.baud,
+                session_tag=session_tag,
+            )
+            meta["db_session_id"] = str(db_id)
+            meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+            print(f"postgres → {database_url(args.database_url)}  session_id={db_id}")
+        except Exception as exc:
+            if db is not None:
+                db.close()
+                db = None
+            print(f"ERROR: postgres connect/schema failed: {exc}")
+            print("  fix DB or re-run with --no-postgres (file-only)")
+            stop.set()
+            if labeler is not None:
+                labeler.stop()
+            return 1
+
     live_period = 1.0 / max(args.live_hz, 0.2)
     last_live_print = 0.0
     last_full_print = 0.0
@@ -346,15 +400,31 @@ def main(argv: list[str] | None = None) -> int:
                             print(
                                 f"[csi] detected method=4.2 (peer MAC {PEER_MAC_4_2})"
                             )
+                            if db is not None and db.session_id is not None:
+                                with db.conn.cursor() as cur:
+                                    cur.execute(
+                                        "UPDATE csi_sessions SET method = %s WHERE id = %s",
+                                        (method, db.session_id),
+                                    )
+                                db.conn.commit()
                         elif sample.mac:
                             method = "4.1"
                             method_locked = True
                             meta["method"] = method
                             meta_path.write_text(json.dumps(meta, indent=2) + "\n")
                             print(f"[csi] detected method=4.1 (MAC {sample.mac})")
+                            if db is not None and db.session_id is not None:
+                                with db.conn.cursor() as cur:
+                                    cur.execute(
+                                        "UPDATE csi_sessions SET method = %s WHERE id = %s",
+                                        (method, db.session_id),
+                                    )
+                                db.conn.commit()
                     n_lines += 1
                     last_csi_wall = now
                     buf.append(sample)
+                    if db is not None:
+                        db.enqueue_sample(sample)
 
                 # CV at capped rate (fills PersonLabeler hit history)
                 if labeler is not None and (now - last_cv_poll) >= cv_period:
@@ -425,17 +495,30 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     n_empty += 1
 
+                win_sources = sorted({s.source_id for s in win if s.source_id})
+                win_macs = sorted({s.mac for s in win if s.mac})
                 rec = {
                     "t": now,
                     "label": occupied,
                     "label_src": label_src,
                     "method": method,
                     "n_csi": len(win),
-                    "sources": sorted({s.source_id for s in win if s.source_id}),
-                    "macs": sorted({s.mac for s in win if s.mac}),
+                    "sources": win_sources,
+                    "macs": win_macs,
                     "feat": feats.tolist(),
                 }
                 win_f.write(json.dumps(rec) + "\n")
+                if db is not None:
+                    db.insert_window(
+                        host_ts=now,
+                        label=occupied,
+                        label_src=label_src,
+                        method=method,
+                        n_csi=len(win),
+                        sources=win_sources,
+                        macs=win_macs,
+                        feat=feats.tolist(),
+                    )
                 n_windows += 1
                 elapsed = max(now - t0, 1e-3)
                 tag = "OCCUPIED" if occupied else "EMPTY"
@@ -461,6 +544,19 @@ def main(argv: list[str] | None = None) -> int:
         stop.set()
         if labeler is not None:
             labeler.stop()
+        if db is not None:
+            try:
+                db.end_session()
+            except Exception as exc:
+                print(f"[postgres] end_session warning: {exc}")
+
+    db_samples = db.n_samples if db is not None else 0
+    db_windows = db.n_windows if db is not None else 0
+    if db is not None:
+        try:
+            db.close()
+        except Exception:
+            pass
 
     duration = time.time() - t0
     summary = {
@@ -475,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
         "source_ids": sorted(sources),
         "csi_macs": sorted(macs),
         "duration_sec": duration,
+        "db_samples": db_samples,
+        "db_windows": db_windows,
     }
     meta_path.write_text(json.dumps(summary, indent=2) + "\n")
     print(
@@ -482,6 +580,12 @@ def main(argv: list[str] | None = None) -> int:
         f"{n_windows} windows (empty={n_empty} occupied={n_occupied})  "
         f"sources={sorted(sources)} macs={sorted(macs)} → {sess}"
     )
+    if db is not None and summary.get("db_session_id"):
+        print(
+            f"postgres: session_id={summary['db_session_id']}  "
+            f"samples={summary['db_samples']} windows={summary['db_windows']}  "
+            f"(./scripts/db_dist.sh)"
+        )
     if n_lines == 0:
         print(
             "WARNING: 0 CSI — for §4.2 power peer+sense on same 2.4 GHz AP; "

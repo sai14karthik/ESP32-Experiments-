@@ -64,7 +64,30 @@ uv sync
 ./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session session1
 ```
 
-Leave/enter the **ESP cam** frame in the same run. Sessions → `data/sessions/`.
+Leave/enter the **ESP cam** frame in the same run.
+
+**Storage:** dual-write — files under `data/sessions/` **and** PostgreSQL (`postgresql:///csi`):
+
+| Table | Contents |
+|--------|----------|
+| `csi_sessions` | one row per collect run |
+| `csi_samples` | raw CSI packets (I/Q) |
+| `presence_windows` | labeled windows (`label` 0=empty, 1=occupied) |
+
+```bash
+# one-time schema (also auto-applied on collect connect)
+psql postgresql:///csi -f schema.sql
+uv sync   # pulls psycopg
+
+./scripts/collect_session.sh --camera rtsp://127.0.0.1:8554/cam_sense --session mockhosp_01
+./scripts/db_dist.sh                    # empty vs occupied counts
+./scripts/db_dist.sh --session mockhosp_01
+
+# file-only if needed:
+./scripts/collect_session.sh --no-postgres --camera rtsp://127.0.0.1:8554/cam_sense
+```
+
+Sessions → `data/sessions/` (backup) + Postgres (training source).
 
 ESP `/stream` is usually **one client only**. If MediaMTX already holds `.15`, direct MJPEG times out — use RTSP instead (or stop MediaMTX):
 
