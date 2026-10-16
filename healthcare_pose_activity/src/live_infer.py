@@ -114,6 +114,45 @@ def view_layout(
     }
 
 
+def _draw_nemotron_line(frame: np.ndarray, text: str, lay: dict) -> None:
+    """Bottom strip so the vision-model read sits apart from the pose HUD."""
+    fh, fw = frame.shape[:2]
+    bar_h = lay["hud_h"]
+    y0 = max(0, fh - bar_h)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, y0), (fw, fh), (15, 15, 15), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    shown = "Nemotron: " + " ".join(text.split())
+    font = lay["font"]
+    while font > 0.2:
+        (width, _height), _ = cv2.getTextSize(
+            shown, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
+        )
+        if width <= fw - 16:
+            break
+        font = max(0.2, font * 0.9)
+        if font <= 0.2:
+            while width > fw - 16 and len(shown) > 16:
+                shown = shown[:-4] + "..."
+                (width, _height), _ = cv2.getTextSize(
+                    shown, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
+                )
+            break
+    baseline = y0 + max(14, int(bar_h * 0.72))
+    if baseline > fh - 2:
+        baseline = fh - 2
+    cv2.putText(
+        frame,
+        shown,
+        (8, baseline),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font,
+        (240, 240, 240),
+        lay["thick"],
+        cv2.LINE_AA,
+    )
+
+
 def to_display(frame: np.ndarray, scale: float) -> np.ndarray:
     if abs(scale - 1.0) < 0.02:
         return frame
@@ -239,6 +278,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--canvas",
         default=os.environ.get("POSE_CANVAS", "1280x720"),
         help="display canvas WxH; video is centered (fullscreen-friendly). 0x0=off",
+    )
+    ap.add_argument(
+        "--nemotron",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("POSE_NEMOTRON", "0") == "1",
+        help=(
+            "ask Nemotron to read the room when a fall is suspected, "
+            "and when you press n (NEMOTRON_ENDPOINT / NEMOTRON_MODEL)"
+        ),
     )
     return ap.parse_args(argv)
 
@@ -462,7 +510,28 @@ def main() -> None:
                 print(f"track unavailable ({e2}); predict only", flush=True)
                 results_iter, use_ids = _start_stream(predict_kw, False)
 
-    win = "Patient pose + activity (q quit)"
+    scene_asker = None
+    if args.nemotron:
+        from nemotron_scene import SceneAsker, endpoint_open
+
+        think = os.environ.get("NEMOTRON_THINK", "0") == "1"
+
+        scene_asker = SceneAsker(think=think)
+        print(
+            f"nemotron: {scene_asker.endpoint} model={scene_asker.model} "
+            f"think={think} (new fall, or press n)",
+            flush=True,
+        )
+        if not endpoint_open(scene_asker.endpoint):
+            print(
+                "nemotron: tunnel is not open, so fall reads will fail until it is. "
+                "Pose labels still run. Leave this SSH session up:\n"
+                "  ssh -N -L 18554:10.128.93.13:8554 "
+                "-L 18000:10.43.41.152:8000 ojl1977@10.128.81.10",
+                flush=True,
+            )
+
+    win = "Patient pose + activity (q quit, n ask)" if args.nemotron else "Patient pose + activity (q quit)"
     canvas_w, canvas_h = parse_canvas(args.canvas)
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     if canvas_w > 0 and canvas_h > 0:
@@ -613,6 +682,16 @@ def main() -> None:
             lay["thick"],
             cv2.LINE_AA,
         )
+        if scene_asker is not None:
+            # Every frame, including an empty list, so a recovered track can re-arm.
+            scene_asker.on_falls(
+                r.orig_img,
+                [
+                    person.track_id
+                    for person in people
+                    if person.activity.label == "fall_suspected"
+                ],
+            )
         if scene.fall_alerts:
             cv2.putText(
                 frame,
@@ -624,6 +703,9 @@ def main() -> None:
                 max(lay["thick"], 2),
                 cv2.LINE_AA,
             )
+        nemotron_line = scene_asker.status_line() if scene_asker is not None else ""
+        if nemotron_line:
+            _draw_nemotron_line(frame, nemotron_line, lay)
         view = to_display(frame, lay["scale"])
         if canvas_w > 0 and canvas_h > 0:
             cw, ch = window_canvas_size(
@@ -634,6 +716,11 @@ def main() -> None:
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             return False
+        if key == ord("n") and scene_asker is not None:
+            if scene_asker.ask_now(r.orig_img):
+                print("nemotron: asking about this frame", flush=True)
+            else:
+                print("nemotron: busy", flush=True)
         if n % 30 == 0:
             acts = {lab: counts[lab] for lab in ALL_ACTIVITIES if counts[lab]}
             print(

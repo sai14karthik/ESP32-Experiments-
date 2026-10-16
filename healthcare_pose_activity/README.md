@@ -31,18 +31,25 @@ POSE_QUALITY=balanced ./run_live.sh 0   # yolo26s
 POSE_QUALITY=accurate ./run_live.sh 0   # yolo26m (default)
 POSE_QUALITY=max ./run_live.sh 0        # yolo26l — highest mAP, slower
 
-# ESP via MediaMTX
+# ESP via MediaMTX. Nemotron is included (falls, and the n key).
 ./run_live.sh rtsp://127.0.0.1:18554/cam_sense --audio
 # omit --audio for silent video
+# ./run_live.sh rtsp://127.0.0.1:18554/cam_sense --no-nemotron
 ```
 
-For a laptop that cannot directly reach the Mac Mini, start the SSH local forward on the laptop in another terminal and leave it running:
+On the Mac Mini, in the repo that has the camera scripts:
 
 ```bash
-ssh -N -L 18554:10.128.93.13:8554 ojl1977@10.128.81.10
+SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh
 ```
 
-Then run the app against `rtsp://127.0.0.1:18554/cam_sense --audio`. This forwards laptop localhost → GPU SSH host → Mac Mini MediaMTX; video and the optional `ffplay` audio subscriber use the tunnel.
+On the laptop, start the SSH local forward and leave it running. One session carries both the Mini video and Nemotron, which lives on the cluster:
+
+```bash
+ssh -N -L 18554:10.128.93.13:8554 -L 18000:10.43.41.152:8000 ojl1977@10.128.81.10
+```
+
+Then run `./run_live.sh rtsp://127.0.0.1:18554/cam_sense`. Video comes from `127.0.0.1:18554`. Nemotron is asked at `http://127.0.0.1:18000/v1` (`NEMOTRON_ENDPOINT`). `--audio` uses the same video tunnel for `ffplay`.
 
 Press **`q`** to quit. The app reports activity for every detected person. Prefer **Terminal.app** for camera permission.
 

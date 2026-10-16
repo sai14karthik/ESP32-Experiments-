@@ -1,0 +1,324 @@
+"""Ask Nemotron to read a patient-room frame.
+
+The live pose loop stays in charge of tracking and the on-screen activity
+labels. This module sends a single JPEG to the same vLLM client as
+``_nocommit.py`` when a fall is suspected, or when the operator asks.
+A person lying in bed is not reported as a fall.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import time
+import urllib.error
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import _nocommit as nemotron_client  # noqa: E402
+
+SCENE_SYSTEM = (
+    "You assist a lab patient-room camera monitor. "
+    "Describe only what is visible in the frame. "
+    "Do not diagnose, assess injury, or give medical advice."
+)
+
+SCENE_PROMPT = (
+    "How many people are visible, and what is each person doing? "
+    "Each posture must be one of: standing, sitting, walking, lying, "
+    "fall_suspected, unknown. "
+    "Use fall_suspected only when a person appears to be on the floor after a fall. "
+    "A person lying in a bed or on a couch is lying, not fall_suspected. "
+    "If the posture is unclear, use unknown. "
+    "note is one short sentence."
+)
+
+SCENE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "people": {"type": "integer"},
+        "postures": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "standing",
+                    "sitting",
+                    "walking",
+                    "lying",
+                    "fall_suspected",
+                    "unknown",
+                ],
+            },
+        },
+        "fall_on_floor": {"type": "boolean"},
+        "note": {"type": "string"},
+    },
+    "required": ["people", "postures", "fall_on_floor", "note"],
+}
+
+
+def endpoint_open(endpoint: str, timeout: float = 1.5) -> bool:
+    """True when the Nemotron host:port accepts a TCP connection."""
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint)
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port is not None:
+        port = parsed.port
+    elif parsed.scheme == "https":
+        port = 443
+    else:
+        port = 80
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def frame_data_url(frame: np.ndarray, max_px: int = 1024) -> str:
+    """JPEG data URL. The long side is capped here because data URLs skip Pillow."""
+    import base64
+
+    img = frame
+    height, width = img.shape[:2]
+    long_side = max(height, width)
+    if max_px > 0 and long_side > max_px:
+        scale = max_px / float(long_side)
+        img = cv2.resize(
+            img,
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        raise RuntimeError("could not encode the frame as JPEG")
+    payload = base64.b64encode(buf.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{payload}"
+
+
+def format_reply(response: dict) -> str:
+    """Turn a chat-completions body into one HUD line."""
+    try:
+        message = response["choices"][0]["message"]
+        content = message.get("content") or ""
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError("nemotron reply had no message") from exc
+    content = nemotron_client._THINK.sub("", content).strip()
+    if not content:
+        raise ValueError("nemotron reply was empty")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return content.replace("\n", " ")[:180]
+    if not isinstance(data, dict):
+        return content.replace("\n", " ")[:180]
+    postures = [str(item) for item in data.get("postures") or []]
+    posture_text = ", ".join(postures) if postures else "none"
+    fall_text = "fall on floor" if data.get("fall_on_floor") else "no floor fall"
+    note = str(data.get("note") or "").strip()
+    count = data.get("people", "?")
+    if not isinstance(count, int):
+        count = "?"
+    people_word = "person" if count == 1 else "people"
+    line = f"{count} {people_word}: {posture_text}; {fall_text}"
+    if note:
+        line = f"{line}. {note}"
+    return line
+
+
+def ask_image_url(
+    image_url: str,
+    *,
+    endpoint: str | None = None,
+    model: str | None = None,
+    think: bool = False,
+    timeout: float = 45.0,
+) -> str:
+    """Send one already-encoded frame. Raises ConnectionError or ValueError."""
+    endpoint = endpoint or nemotron_client.DEFAULT_ENDPOINT
+    model = model or nemotron_client.DEFAULT_MODEL
+    body = nemotron_client.build_request(
+        [image_url],
+        SCENE_PROMPT,
+        model,
+        max_tokens=1024 if think else 256,
+        temperature=0.2,
+        enable_thinking=think,
+        max_px=0,
+        system_prompt=SCENE_SYSTEM,
+        schema=SCENE_SCHEMA,
+        captions=False,
+    )
+    try:
+        response = nemotron_client.post(endpoint, body, timeout)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:300]
+        raise ConnectionError(f"HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ConnectionError(f"{type(exc).__name__}: {exc}") from exc
+    return format_reply(response)
+
+
+def ask_room(
+    frame: np.ndarray,
+    *,
+    endpoint: str | None = None,
+    model: str | None = None,
+    think: bool = False,
+    max_px: int = 1024,
+    timeout: float = 45.0,
+) -> str:
+    """Encode a camera frame and send it."""
+    return ask_image_url(
+        frame_data_url(frame, max_px),
+        endpoint=endpoint,
+        model=model,
+        think=think,
+        timeout=timeout,
+    )
+
+
+class SceneAsker:
+    """One Nemotron request at a time, off the video thread.
+
+    A fall track is asked once. It can be asked again only after that track
+    has stayed out of ``fall_suspected`` for ``rearm_after`` seconds, so a
+    one-frame pose dropout does not send a second request. A failed fall
+    request waits ``retry_s`` before trying the server again. Pressing ``n``
+    is not blocked by that wait.
+    """
+
+    def __init__(
+        self,
+        *,
+        endpoint: str | None = None,
+        model: str | None = None,
+        think: bool = False,
+        max_px: int = 1024,
+        timeout: float = 45.0,
+        rearm_after: float = 1.0,
+        retry_s: float = 10.0,
+        clock=None,
+    ):
+        import os
+
+        self.endpoint = endpoint or os.environ.get(
+            "NEMOTRON_ENDPOINT", nemotron_client.DEFAULT_ENDPOINT
+        )
+        self.model = model or os.environ.get(
+            "NEMOTRON_MODEL", nemotron_client.DEFAULT_MODEL
+        )
+        self.think = think
+        self.max_px = max_px
+        self.timeout = timeout
+        self.rearm_after = rearm_after
+        self.retry_s = retry_s
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._inflight = False
+        self._asked_falls: set[int] = set()
+        self._fall_seen: dict[int, float] = {}
+        self._retry_after = 0.0
+        self._line = ""
+        self._error = ""
+        self._worker: threading.Thread | None = None
+
+    def status_line(self) -> str:
+        with self._lock:
+            if self._inflight:
+                return (self._line or "reading the frame") + " …"
+            if self._error:
+                return self._error
+            return self._line
+
+    def on_falls(self, frame: np.ndarray, fall_ids: list[int]) -> None:
+        """Call every frame, including when nobody is down, so recovery can re-arm."""
+        now = self._clock()
+        with self._lock:
+            current = set(fall_ids)
+            for tid in current:
+                self._fall_seen[tid] = now
+            for tid in list(self._asked_falls):
+                if tid in current:
+                    continue
+                if now - self._fall_seen.get(tid, now) >= self.rearm_after:
+                    self._asked_falls.discard(tid)
+            if now < self._retry_after or self._inflight:
+                return
+            fresh = [tid for tid in fall_ids if tid not in self._asked_falls]
+            if not fresh:
+                return
+            self._inflight = True
+            self._asked_falls.update(fresh)
+        self._start(frame, "fall")
+
+    def ask_now(self, frame: np.ndarray) -> bool:
+        """Operator request (the n key). False when a request is already running."""
+        with self._lock:
+            if self._inflight:
+                return False
+            self._inflight = True
+        return self._start(frame, "key")
+
+    def wait(self, timeout: float = 5.0) -> None:
+        worker = self._worker
+        if worker is not None:
+            worker.join(timeout)
+
+    def _start(self, frame: np.ndarray, reason: str) -> bool:
+        """Encode on the caller thread so the worker only does HTTP."""
+        try:
+            image_url = frame_data_url(np.ascontiguousarray(frame), self.max_px)
+            worker = threading.Thread(
+                target=self._run,
+                args=(image_url, reason),
+                daemon=True,
+                name="nemotron-scene",
+            )
+            self._worker = worker
+            worker.start()
+        except Exception as exc:
+            with self._lock:
+                self._inflight = False
+                if reason == "fall":
+                    self._asked_falls.clear()
+                    self._retry_after = self._clock() + self.retry_s
+                self._error = f"could not send frame: {exc}"
+            print(f"nemotron ({reason}) failed: {self._error}", flush=True)
+            return False
+        return True
+
+    def _run(self, image_url: str, reason: str) -> None:
+        try:
+            text = ask_image_url(
+                image_url,
+                endpoint=self.endpoint,
+                model=self.model,
+                think=self.think,
+                timeout=self.timeout,
+            )
+            with self._lock:
+                self._line = text
+                self._error = ""
+            print(f"nemotron ({reason}): {text}", flush=True)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._error = message
+                if reason == "fall":
+                    self._asked_falls.clear()
+                    self._retry_after = self._clock() + self.retry_s
+            print(f"nemotron ({reason}) failed: {message}", flush=True)
+        finally:
+            with self._lock:
+                self._inflight = False
