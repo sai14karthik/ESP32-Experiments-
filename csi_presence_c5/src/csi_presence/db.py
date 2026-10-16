@@ -11,6 +11,7 @@ from typing import Any, Sequence
 from uuid import UUID
 
 from csi_presence.csi_parse import CsiSample
+from csi_presence.features import FEATURE_VERSION
 
 DEFAULT_DATABASE_URL = "postgresql:///csi"
 ROOT = Path(__file__).resolve().parents[2]
@@ -184,17 +185,19 @@ class PresenceDb:
         sources: Sequence[str],
         macs: Sequence[str],
         feat: Sequence[float],
+        feature_version: int | None = None,
     ) -> None:
         if self.session_id is None:
             raise RuntimeError("start_session() first")
+        ver = int(feature_version if feature_version is not None else FEATURE_VERSION)
         with self.conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO presence_windows (
                     session_id, host_ts, label, label_src, method, n_csi,
-                    sources, macs, feat, session_tag
+                    sources, macs, feat, session_tag, feature_version
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -208,6 +211,7 @@ class PresenceDb:
                     list(macs) or None,
                     list(feat),
                     self.session_tag or None,
+                    ver,
                 ),
             )
         self.conn.commit()

@@ -9,12 +9,20 @@ dependencies = [
   "opencv-python>=4.8,<5",
   "ultralytics>=8.4.175",
   "psycopg[binary]>=3.1",
+  "scikit-learn>=1.4",
+  "joblib>=1.3",
+  "pytest>=8.0",
 ]
 
 [project.scripts]
 csi-collect = "csi_presence.data_collector.collect_session:main"
 csi-cv-label = "csi_presence.cv_ground_truth.person_labeler:main"
 csi-db-dist = "csi_presence.db_dist:main"
+csi-train-presence = "csi_presence.train.train_presence:main"
+csi-calibrate-presence = "csi_presence.live.calibrate:main"
+csi-live-presence = "csi_presence.live.live_presence:main"
+csi-rebuild-features = "csi_presence.rebuild_features:main"
+csi-doctor = "csi_presence.doctor:main"
 
 [build-system]
 requires = ["hatchling"]

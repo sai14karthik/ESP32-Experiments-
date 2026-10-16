@@ -89,6 +89,39 @@ uv sync   # pulls psycopg
 
 Sessions → `data/sessions/` (backup) + Postgres (training source).
 
+## Train → calibrate → live (no YOLO)
+
+`:9055` is exclusive — stop `collect_session` before calibrate/live.
+
+**Features v3** (gain-norm, dead-bin mask, Hampel, no RSSI — AGC-safe).
+New collects write `feature_version=3`. After pull, rebuild older windows:
+
+```bash
+psql postgresql:///csi -f schema.sql
+./scripts/rebuild_features.sh                # UPDATE feat from csi_samples; keeps labels
+./scripts/doctor.sh                          # DB / versions / model / :9055 health
+```
+
+### Full loop (best practice)
+
+```bash
+./scripts/db_dist.sh                         # empty vs occupied balance (~40–60%)
+./scripts/train_presence.sh                  # → models/presence.joblib
+# Trust: group_cv_bal_acc + evaluation_trustworthy
+# Watch: negative_control_bal_acc (~0.5; ≥0.7 = confounded sessions)
+
+# Stop collect (:9055). Leave room EMPTY:
+./scripts/calibrate_presence.sh              # P95×1.1 + hysteresis + debounce
+# Refuses if empty mean P too high
+
+./scripts/live_presence.sh                   # EMA + hysteresis + debounce; STALE on stall
+```
+
+Live decisioning: EMA → enter `thr+hyst` / exit `thr−hyst` → debounce N hops.
+Collect continuity gates skip thin/stall windows. Prefer **≥3 interleaved sessions**.
+
+Loop: wrong live → collect miss → `db_dist` → retrain → recalibrate → live.
+
 ESP `/stream` is usually **one client only**. If MediaMTX already holds `.15`, direct MJPEG times out — use RTSP instead (or stop MediaMTX):
 
 ```bash
@@ -118,10 +151,13 @@ Labels are presence only: empty(0) / occupied(1).
 ```
 csi_presence_c5/
   configs/           ports, collect, wifi.env.example
-  data/sessions/     collected sessions
+  data/sessions/     collected sessions (backup)
+  models/            presence.joblib, site_calibration.joblib
   firmware/scripts/  flash_wall_tcp, flash_pair (ESP-NOW USB debug)
-  scripts/           collect_session, flash_wall_tcp, list_ports
+  scripts/           collect, db_dist, train, calibrate, live
   src/csi_presence/
     data_collector/  serial + TCP :9055 readers
-    cv_ground_truth/ YOLO26-pose presence GT
+    cv_ground_truth/ YOLO26-pose presence GT (collect only)
+    train/           Postgres → sklearn presence model
+    live/            calibrate + TCP live inference
 ```

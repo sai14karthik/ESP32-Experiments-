@@ -22,8 +22,9 @@ from csi_presence.cv_ground_truth.yolo_pipeline import DEFAULT_QUALITY, QUALITY
 from csi_presence.data_collector.serial_reader import CsiSerialReader
 from csi_presence.data_collector.tcp_reader import CsiTcpListener
 from csi_presence.db import PresenceDb, database_url
-from csi_presence.features import window_features
+from csi_presence.features import FEATURE_VERSION, window_features
 from csi_presence.ports_util import ROOT, resolve_device
+from csi_presence.quality import DEFAULT_MIN_CSI, window_ok
 
 SESSIONS = ROOT / "data" / "sessions"
 DEFAULT_TCP_PORT = 9055
@@ -466,7 +467,10 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 next_hop = now + args.hop_sec
                 win = [s for s in buf if s.host_ts >= now - args.window_sec]
-                feats = window_features(win)
+                ok, _why = window_ok(
+                    win, window_sec=args.window_sec, min_csi=DEFAULT_MIN_CSI
+                )
+                feats = window_features(win) if ok else None
                 if feats is None:
                     if n_lines == 0 and now - t0 > 5 and now - last_wait_print > 5:
                         if use_tcp:
@@ -506,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
                     "sources": win_sources,
                     "macs": win_macs,
                     "feat": feats.tolist(),
+                    "feature_version": FEATURE_VERSION,
                 }
                 win_f.write(json.dumps(rec) + "\n")
                 if db is not None:

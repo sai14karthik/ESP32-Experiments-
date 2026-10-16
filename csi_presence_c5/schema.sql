@@ -64,8 +64,13 @@ CREATE TABLE IF NOT EXISTS presence_windows (
     sources       TEXT[],
     macs          TEXT[],
     feat          DOUBLE PRECISION[] NOT NULL,
-    session_tag   TEXT
+    session_tag   TEXT,
+    feature_version INTEGER NOT NULL DEFAULT 3
 );
+
+ALTER TABLE presence_windows ADD COLUMN IF NOT EXISTS feature_version INTEGER;
+UPDATE presence_windows SET feature_version = 1 WHERE feature_version IS NULL;
+-- New collects / rebuild write FEATURE_VERSION from features.py (currently 3)
 
 CREATE INDEX IF NOT EXISTS presence_windows_session_ts_idx
     ON presence_windows (session_id, host_ts);
