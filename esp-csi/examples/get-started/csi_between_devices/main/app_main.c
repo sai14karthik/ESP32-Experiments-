@@ -33,11 +33,11 @@
 #include "esp_csi_gain_ctrl.h"
 #include "csi_tcp_forward.h"
 
-/* Peer ping rate: denser traffic → more CSI for Mini windows (hop 0.25s). */
-#define CONFIG_SEND_FREQUENCY 50
+/* Peer ping rate: denser traffic → more CSI for Mini windows (hop 0.125s). */
+#define CONFIG_SEND_FREQUENCY 100
 #define CSI_LINE_MAX 4096
-/* USB print every Nth CSI line when TCP is on (keeps callback lighter at ~50 Hz). */
-#define CSI_USB_PRINT_EVERY 5
+/* USB print every Nth CSI line when TCP is on (keeps callback light at ~100 Hz). */
+#define CSI_USB_PRINT_EVERY 20
 
 #if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C61
 #define CSI_FORCE_LLTF 0

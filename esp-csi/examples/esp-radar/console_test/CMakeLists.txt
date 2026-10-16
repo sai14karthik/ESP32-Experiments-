@@ -2,6 +2,8 @@
 # in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.5)
 add_compile_options(-fdiagnostics-color=always)
+# IDF 6.x: esp-radar type-punning is treated as -Werror=strict-aliasing
+add_compile_options(-Wno-error=strict-aliasing -Wno-strict-aliasing)
 
 set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/examples/system/console/advanced/components)
 
