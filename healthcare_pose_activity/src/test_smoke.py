@@ -29,7 +29,7 @@ from live_infer import (  # noqa: E402
     to_display,
     view_layout,
 )
-from mjpeg import is_mjpeg_url, is_rtsp_url  # noqa: E402
+from mjpeg import is_mjpeg_url, is_rtsp_url, is_video_file, iter_video_loop  # noqa: E402
 from patients import PersonView, summarize  # noqa: E402
 from test_activity import (  # noqa: E402
     lying_kpts,
@@ -55,7 +55,32 @@ def test_url_detect() -> None:
     assert not is_mjpeg_url("0")
     assert is_rtsp_url("rtsp://127.0.0.1:18554/cam_sense")
     assert not is_rtsp_url("http://x:81/stream")
+    assert not is_video_file("rtsp://127.0.0.1:18554/cam_sense")
+    assert not is_video_file("0")
+    assert not is_video_file("http://10.128.93.17:81/stream")
     print("url_detect OK")
+
+
+def test_video_file_loops() -> None:
+    """A short file plays past the end and returns to the first frame."""
+    folder = Path(tempfile.mkdtemp(prefix="pose_loop_"))
+    path = folder / "clip.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, (32, 24))
+    marks = (20, 80, 140, 200)
+    for value in marks:
+        frame = np.full((24, 32, 3), value, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+    assert is_video_file(str(path)), path
+
+    seen: list[int] = []
+    for index, (frame, _ts) in enumerate(iter_video_loop(str(path), pace=False)):
+        seen.append(int(frame[0, 0, 0]))
+        if index >= 6:
+            break
+    assert seen[:4] == list(marks), seen
+    assert seen[4] == marks[0] and seen[5] == marks[1], seen
+    print("video loop OK", seen)
 
 
 def test_rtsp_audio_command() -> None:
@@ -576,6 +601,7 @@ def main() -> None:
     test_stable_person_ids()
     test_scene()
     test_url_detect()
+    test_video_file_loops()
     test_rtsp_audio_command()
     test_view_layout_matrix()
     test_to_display()

@@ -53,6 +53,14 @@ Then run `./run_live.sh rtsp://127.0.0.1:18554/cam_sense`. Video comes from `127
 
 Press **`q`** to quit. The app reports activity for every detected person. Prefer **Terminal.app** for camera permission.
 
+A saved clip is a separate loop. It uses the same pose labels and Nemotron reads, and it does not replace the live MediaMTX path:
+
+```bash
+./run_live.sh /path/to/clip.mp4
+```
+
+The file rewinds when it ends. Keep the laptop SSH forward up if you want Nemotron answers on that loop.
+
 ## Models (Ultralytics YOLO26-pose, COCO Keypoints)
 
 | Preset | Weights | mAP50-95 | Use when |

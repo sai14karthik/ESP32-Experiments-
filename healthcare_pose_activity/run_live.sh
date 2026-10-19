@@ -7,6 +7,7 @@
 #   POSE_QUALITY=balanced ./run_live.sh 0    # YOLO26s
 #   POSE_QUALITY=max ./run_live.sh 0         # YOLO26l — highest mAP, slower
 #   ./run_live.sh rtsp://127.0.0.1:18554/cam_sense
+#   ./run_live.sh /path/to/clip.mp4          # loop a file; live RTSP path is unchanged
 #
 # Lab laptop path (Nemotron is on by default through the same SSH session):
 #   Mini:  SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh
