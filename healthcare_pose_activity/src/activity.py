@@ -354,6 +354,7 @@ class ActivityTracker:
         ] = deque(maxlen=64)
         self._last_update_time: Optional[float] = None
         self.walk_hits = 0
+        self._move_times: Deque[float] = deque(maxlen=16)
         self._ema: dict[str, float] = {}
         self._last = ActivityState()
 
@@ -488,6 +489,7 @@ class ActivityTracker:
         self.ankle_times.clear()
         self.fall_observations.clear()
         self.walk_hits = 0
+        self._move_times.clear()
         self._ema.clear()
         self._upright_since = None
 
@@ -574,11 +576,19 @@ class ActivityTracker:
             or (hip_rate > self.walk_speed * 7.0 and hip_straight >= 0.6)
             or (ankle_rate > self.walk_speed * 8.0 and ankle_straight >= 0.6)
         )
-        if moving:
-            self.walk_hits += 1
-        else:
-            self.walk_hits = max(0, self.walk_hits - 1)
+        return self._walk_recent(moving)
 
+    def _walk_recent(self, moving: bool) -> bool:
+        """Walking follows motion from the last fraction of a second.
+
+        A long walk must not keep the label after the person has stopped.
+        """
+        now = self._last_update_time if self._last_update_time is not None else 0.0
+        if moving:
+            self._move_times.append(now)
+        while self._move_times and now - self._move_times[0] > 0.35:
+            self._move_times.popleft()
+        self.walk_hits = len(self._move_times)
         return self.walk_hits >= self.walk_confirm
 
     def _fall_suspected(self, now: float) -> str:

@@ -326,6 +326,28 @@ def test_walking() -> None:
     assert stand_state is not None and stand_state.label == "standing", stand_state
     print("still bed/stand not walking OK", bed_state.label, stand_state.label)
 
+    # A stop is standing again. An earlier walk does not keep the label.
+    paused = ActivityTracker()
+    paused_state = None
+    for i in range(12):
+        dx = i * 30.0
+        paused_state = paused.update(
+            standing_kpts(dx=dx),
+            box=(180 + dx, 80, 300 + dx, 500),
+            frame_hw=(720, 1280),
+            timestamp=i / 10,
+        )
+    assert paused_state is not None and paused_state.label == "walking", paused_state
+    for i in range(8):
+        paused_state = paused.update(
+            standing_kpts(dx=11 * 30.0),
+            box=(180 + 11 * 30.0, 80, 300 + 11 * 30.0, 500),
+            frame_hw=(720, 1280),
+            timestamp=1.2 + i / 10,
+        )
+    assert paused_state is not None and paused_state.label == "standing", paused_state
+    print("walk then stop OK", paused_state.label)
+
 
 def test_fall() -> None:
     t = ActivityTracker(window=18)
