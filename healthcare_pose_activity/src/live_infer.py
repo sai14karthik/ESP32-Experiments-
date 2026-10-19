@@ -27,12 +27,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from activity import ALL_ACTIVITIES, ActivityTracker  # noqa: E402
 from filters import StablePersonIds, draw_person, filter_person_indices  # noqa: E402
 from mjpeg import (  # noqa: E402
-    is_mjpeg_url,
+    VIDEO_SUFFIXES,
     is_rtsp_url,
-    is_video_file,
     iter_mjpeg,
     iter_rtsp,
     iter_video_loop,
+    source_mode,
 )
 from patients import PersonView, summarize  # noqa: E402
 
@@ -428,14 +428,11 @@ def _infer_kwargs(profile: dict, device: str, half: bool) -> dict:
 def main() -> None:
     args = parse_args()
     source = resolve_source(args.source)
-    if isinstance(source, str) and Path(source).suffix.lower() in {
-        ".mp4",
-        ".mov",
-        ".mkv",
-        ".avi",
-        ".m4v",
-        ".webm",
-    } and not Path(source).is_file():
+    if (
+        isinstance(source, str)
+        and Path(source).suffix.lower() in VIDEO_SUFFIXES
+        and not Path(source).is_file()
+    ):
         raise SystemExit(f"video file not found: {source}")
     profile = resolve_profile(args)
     model_name = profile["model"]
@@ -490,10 +487,10 @@ def main() -> None:
 
     # Frame pullers for ESP MJPEG / MediaMTX RTSP (Ultralytics stream often stalls).
     # A local video file is a separate loop and does not replace those sources.
-    mjpeg_mode = is_mjpeg_url(source)
-    rtsp_mode = is_rtsp_url(source)
-    video_mode = is_video_file(source)
-    frame_mode = mjpeg_mode or rtsp_mode or video_mode
+    mode = source_mode(source)
+    mjpeg_mode = mode == "mjpeg"
+    rtsp_mode = mode == "rtsp"
+    frame_mode = mode != "live"
     audio_player = None
     audio_exit_reported = False
     audio_retry_at: float | None = None

@@ -41,6 +41,17 @@ def is_video_file(source) -> bool:
     return path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
 
 
+def source_mode(source) -> str:
+    """Which reader to use. Live camera, RTSP, and a looping file stay separate."""
+    if is_mjpeg_url(source):
+        return "mjpeg"
+    if is_rtsp_url(source):
+        return "rtsp"
+    if is_video_file(source):
+        return "video"
+    return "live"
+
+
 def iter_video_loop(path: str, *, pace: bool = True) -> Iterator[tuple[np.ndarray, float]]:
     """
     Yield frames from a file, then rewind and repeat.

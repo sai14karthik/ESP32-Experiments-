@@ -29,7 +29,7 @@ from live_infer import (  # noqa: E402
     to_display,
     view_layout,
 )
-from mjpeg import is_mjpeg_url, is_rtsp_url, is_video_file, iter_video_loop  # noqa: E402
+from mjpeg import is_mjpeg_url, is_rtsp_url, is_video_file, iter_video_loop, source_mode  # noqa: E402
 from patients import PersonView, summarize  # noqa: E402
 from test_activity import (  # noqa: E402
     lying_kpts,
@@ -62,6 +62,10 @@ def test_url_detect() -> None:
 
     assert resolve_source("\u00a0\u00a0/tmp/clip.mp4") == "/tmp/clip.mp4"
     assert resolve_source("  0") == 0
+    assert source_mode("rtsp://127.0.0.1:18554/cam_sense") == "rtsp"
+    assert source_mode("http://10.128.93.17:81/stream") == "mjpeg"
+    assert source_mode(0) == "live"
+    assert source_mode("0") == "live"
     print("url_detect OK")
 
 
@@ -76,6 +80,8 @@ def test_video_file_loops() -> None:
         writer.write(frame)
     writer.release()
     assert is_video_file(str(path)), path
+    assert source_mode(str(path)) == "video"
+    assert source_mode("rtsp://127.0.0.1:8554/cam_sense") == "rtsp"
 
     seen: list[int] = []
     for index, (frame, _ts) in enumerate(iter_video_loop(str(path), pace=False)):
@@ -212,6 +218,19 @@ def test_filters_and_draw() -> None:
     duplicate_poses = np.stack([k_person, k_person, k_person], axis=0)
     keep_deduped = filter_person_indices(duplicate_poses, duplicate, (720, 1280))
     assert keep_deduped == [0, 2], keep_deduped
+
+    # People standing side by side still both count. Only a box on the same body is dropped.
+    side_by_side = np.array(
+        [
+            [100, 50, 220, 460],
+            [200, 50, 330, 460],
+        ],
+        dtype=float,
+    )
+    keep_side = filter_person_indices(
+        np.stack([k_person, k_person], axis=0), side_by_side, (720, 1280)
+    )
+    assert keep_side == [0, 1], keep_side
 
     frame = np.zeros((fh, fw, 3), dtype=np.uint8)
     draw_person(frame, boxes[0], k_person, ACTIVITY_COLOR["standing"])
