@@ -184,6 +184,33 @@ def classify_frame(
                 "lying", 0.78, f"prone_compact sho/torso={sho_w / torso_len:.2f}"
             )
 
+    # A torso that is short relative to the shoulders, with no extended or
+    # bent legs, is foreshortened along the camera axis (lying). A tall box
+    # is a standing silhouette, so this cue does not apply there.
+    box_h = float("nan")
+    box_w = float("nan")
+    if box is not None:
+        box_w = max(1.0, box[2] - box[0])
+        box_h = max(1.0, box[3] - box[1])
+    box_tall = not np.isnan(box_h) and box_h / box_w >= 1.65
+    if not np.isnan(sho_w) and sho_w > 1 and torso_len > 1 and not box_tall:
+        legs_extended = (
+            ankle is not None
+            and float(np.linalg.norm(ankle - hip)) >= torso_len * 1.15
+        )
+        knees_bent = False
+        if l_knee is not None or r_knee is not None:
+            early_knee = []
+            for hi, kn, an in ((l_hip, l_knee, l_ank), (r_hip, r_knee, r_ank)):
+                if hi is not None and kn is not None and an is not None:
+                    early_knee.append(_angle_deg(hi, kn, an))
+            knee_now = _mean_angle(early_knee)
+            knees_bent = not np.isnan(knee_now) and knee_now < 140
+        if torso_len / sho_w <= 1.4 and not legs_extended and not knees_bent:
+            return ActivityState(
+                "lying", 0.76, f"short_torso torso/sho={torso_len / sho_w:.2f}"
+            )
+
     # --- Angles ---
     knee_angles = []
     for hi, kn, an in ((l_hip, l_knee, l_ank), (r_hip, r_knee, r_ank)):
@@ -211,6 +238,28 @@ def classify_frame(
         sit_compact = float(np.linalg.norm(ankle - hip)) / torso_len
     elif knee is not None and torso_len > 1:
         sit_compact = float(np.linalg.norm(knee - hip)) / torso_len
+
+    # A tall full-body box with the head at the top and the feet at the bottom
+    # is upright. An elevated camera can bend the projected knee angle.
+    if (
+        box_tall
+        and ankle is not None
+        and hip is not None
+        and shoulder is not None
+        and (np.isnan(tilt) or tilt < 40)
+    ):
+        y1 = float(box[1])
+        head_y = float(nose[1]) if nose is not None else float(shoulder[1])
+        if (
+            head_y <= y1 + 0.42 * box_h
+            and float(ankle[1]) >= y1 + 0.78 * box_h
+            and float(ankle[1] - hip[1]) >= 0.22 * box_h
+        ):
+            return ActivityState(
+                "standing",
+                0.72,
+                f"tall_body h/w={box_h / box_w:.2f} tilt={tilt:.0f}",
+            )
 
     # --- Sitting ---
     # Angle: bent knees/hips. Geom: ankles close to hips (overhead sit); stand ~1.4+
@@ -414,12 +463,14 @@ class ActivityTracker:
             self._last = st
             return st
 
-        if (not upper_only) and frame.label not in ("lying",) and self._is_walking():
+        if frame.label == "standing" and (not upper_only) and self._is_walking():
             st = ActivityState("walking", 0.78, "centroid_velocity")
             self.labels[-1] = "walking"
             self._ema["walking"] = self._ema.get("walking", 0.0) + 0.4
             self._last = st
             return st
+        if frame.label != "standing":
+            self.walk_hits = max(0, self.walk_hits - 1)
 
         st = self._smooth(frame)
         self._last = st
@@ -466,11 +517,9 @@ class ActivityTracker:
             self.walk_hits = max(0, self.walk_hits - 1)
             return False
 
-        mobile = sum(
-            1 for x in self.labels if x in ("standing", "walking", "unknown")
-        )
+        mobile = sum(1 for x in self.labels if x in ("standing", "walking"))
         lyingish = sum(1 for x in self.labels if x in ("lying", "fall_suspected", "sitting"))
-        if lyingish >= 4 or mobile < max(3, len(self.labels) // 3):
+        if lyingish >= 3 or mobile < max(3, len(self.labels) // 3):
             self.walk_hits = max(0, self.walk_hits - 1)
             return False
 
@@ -479,9 +528,10 @@ class ActivityTracker:
         bhs = list(self.box_hs)
         hs = max(1.0, float(np.median(bhs)))
 
-        def normalized_rate(points: list[np.ndarray], times: list[float], lookback: float) -> float:
+        def motion(points: list[np.ndarray], times: list[float], lookback: float) -> tuple[float, float]:
+            """Return (net speed in body-heights/s, straightness). Jitter is not straight."""
             if len(points) < 2 or len(points) != len(times):
-                return 0.0
+                return 0.0, 0.0
             now = times[-1]
             candidates = [
                 j
@@ -489,13 +539,18 @@ class ActivityTracker:
                 if lookback * 0.65 <= now - times[j] <= lookback * 1.8
             ]
             if not candidates:
-                return 0.0
+                return 0.0, 0.0
             j = min(candidates, key=lambda index: abs((now - times[index]) - lookback))
             elapsed = max(1e-3, now - times[j])
-            return float(np.linalg.norm(points[-1] - points[j])) / hs / elapsed
+            net = float(np.linalg.norm(points[-1] - points[j]))
+            path = 0.0
+            for a, b in zip(points[j:-1], points[j + 1 :]):
+                path += float(np.linalg.norm(b - a))
+            straight = net / path if path > 1.0 else 1.0
+            return net / hs / elapsed, straight
 
-        short_rate = normalized_rate(cs, ts, 0.35)
-        medium_rate = normalized_rate(cs, ts, 0.7)
+        short_rate, short_straight = motion(cs, ts, 0.35)
+        medium_rate, medium_straight = motion(cs, ts, 0.7)
 
         scale_ok = False
         prior = [
@@ -507,17 +562,17 @@ class ActivityTracker:
             j = min(prior, key=lambda index: abs((ts[-1] - ts[index]) - 0.65))
             elapsed = max(1e-3, ts[-1] - ts[j])
             rel = abs(bhs[-1] - bhs[j]) / max(1.0, (bhs[-1] + bhs[j]) * 0.5)
-            scale_ok = rel / elapsed > 0.14
+            scale_ok = rel / elapsed > 0.22
 
-        hip_rate = normalized_rate(list(self.hips), list(self.hip_times), 0.45)
-        ankle_rate = normalized_rate(list(self.ankles), list(self.ankle_times), 0.45)
+        hip_rate, hip_straight = motion(list(self.hips), list(self.hip_times), 0.45)
+        ankle_rate, ankle_straight = motion(list(self.ankles), list(self.ankle_times), 0.45)
 
         moving = (
-            short_rate > self.walk_speed * 8.0
-            or medium_rate > self.walk_speed * 7.0
+            (short_rate > self.walk_speed * 8.0 and short_straight >= 0.6)
+            or (medium_rate > self.walk_speed * 7.0 and medium_straight >= 0.6)
             or scale_ok
-            or hip_rate > self.walk_speed * 7.0
-            or ankle_rate > self.walk_speed * 8.0
+            or (hip_rate > self.walk_speed * 7.0 and hip_straight >= 0.6)
+            or (ankle_rate > self.walk_speed * 8.0 and ankle_straight >= 0.6)
         )
         if moving:
             self.walk_hits += 1

@@ -64,6 +64,36 @@ def lying_kpts() -> np.ndarray:
     return k
 
 
+def bed_supine_kpts() -> np.ndarray:
+    """Person lying on a bed, seen from the foot. Legs are under the blanket."""
+    k = _blank()
+    k[0] = [320, 180, 0.9]
+    k[5], k[6] = [250, 240, 0.9], [390, 240, 0.9]
+    k[11], k[12] = [270, 360, 0.9], [370, 360, 0.9]
+    return k
+
+
+def along_camera_lying_kpts() -> np.ndarray:
+    """Lying along the camera axis. Torso is a bit longer than the shoulders; no legs."""
+    k = _blank()
+    k[0] = [320, 150, 0.9]
+    k[5], k[6] = [250, 200, 0.9], [390, 200, 0.9]
+    k[7], k[8] = [230, 280, 0.9], [410, 280, 0.9]
+    k[11], k[12] = [290, 370, 0.9], [350, 370, 0.9]
+    return k
+
+
+def tall_silhouette_standing_kpts() -> np.ndarray:
+    """Upright person filling a tall box. Elevated view bends one knee in image."""
+    k = _blank()
+    k[0] = [240, 70, 0.9]
+    k[5], k[6] = [160, 140, 0.9], [320, 130, 0.9]
+    k[11], k[12] = [200, 310, 0.9], [280, 300, 0.9]
+    k[13], k[14] = [120, 450, 0.9], [300, 460, 0.9]
+    k[15], k[16] = [210, 660, 0.9], [270, 670, 0.9]
+    return k
+
+
 def upper_only_kpts() -> np.ndarray:
     k = _blank()
     k[0] = [240, 80, 0.9]
@@ -126,6 +156,20 @@ def test_classify() -> None:
         overhead_lying_kpts(), box=(240, 190, 400, 360), frame_hw=(480, 640)
     )
     assert oh_lie.label == "lying", oh_lie
+    bed = classify_frame(
+        bed_supine_kpts(), box=(220, 150, 430, 420), frame_hw=(1080, 1920)
+    )
+    assert bed.label == "lying", bed
+    along = classify_frame(
+        along_camera_lying_kpts(), box=(220, 120, 460, 400), frame_hw=(1080, 1920)
+    )
+    assert along.label == "lying", along
+    tall_stand = classify_frame(
+        tall_silhouette_standing_kpts(),
+        box=(100, 40, 380, 720),
+        frame_hw=(1080, 1920),
+    )
+    assert tall_stand.label == "standing", tall_stand
     print(
         "classify_frame OK:",
         s.label,
@@ -137,6 +181,7 @@ def test_classify() -> None:
         up.label,
         oh_sit.label,
         oh_lie.label,
+        bed.label,
     )
 
 
@@ -254,6 +299,32 @@ def test_walking() -> None:
             )
         assert state is not None and state.label == "walking", (fps, state)
     print("walking frame-rate invariance OK")
+
+    # A person lying still, and a standing person who only jitters, are not walking.
+    still_bed = ActivityTracker()
+    bed_state = None
+    for i in range(16):
+        jitter = 6.0 if i % 2 == 0 else -6.0
+        bed_state = still_bed.update(
+            bed_supine_kpts(),
+            box=(220 + jitter, 150, 430 + jitter, 420),
+            frame_hw=(1080, 1920),
+            timestamp=i / 24,
+        )
+    assert bed_state is not None and bed_state.label == "lying", bed_state
+
+    still_stand = ActivityTracker()
+    stand_state = None
+    for i in range(16):
+        jitter = 8.0 if i % 2 == 0 else -8.0
+        stand_state = still_stand.update(
+            standing_kpts(dx=jitter),
+            box=(180 + jitter, 80, 300 + jitter, 500),
+            frame_hw=(720, 1280),
+            timestamp=i / 24,
+        )
+    assert stand_state is not None and stand_state.label == "standing", stand_state
+    print("still bed/stand not walking OK", bed_state.label, stand_state.label)
 
 
 def test_fall() -> None:
