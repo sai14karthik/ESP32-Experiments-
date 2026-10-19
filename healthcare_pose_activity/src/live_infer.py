@@ -313,6 +313,8 @@ def parse_canvas(spec: str) -> tuple[int, int]:
 
 
 def resolve_source(raw: str):
+    """Webcam index, URL, or file path. A pasted path may include odd spaces."""
+    raw = raw.strip()
     return int(raw) if raw.isdigit() else raw
 
 
@@ -426,6 +428,15 @@ def _infer_kwargs(profile: dict, device: str, half: bool) -> dict:
 def main() -> None:
     args = parse_args()
     source = resolve_source(args.source)
+    if isinstance(source, str) and Path(source).suffix.lower() in {
+        ".mp4",
+        ".mov",
+        ".mkv",
+        ".avi",
+        ".m4v",
+        ".webm",
+    } and not Path(source).is_file():
+        raise SystemExit(f"video file not found: {source}")
     profile = resolve_profile(args)
     model_name = profile["model"]
     device = pick_device(args.device)

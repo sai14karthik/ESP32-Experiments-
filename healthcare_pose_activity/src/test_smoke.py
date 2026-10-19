@@ -58,6 +58,10 @@ def test_url_detect() -> None:
     assert not is_video_file("rtsp://127.0.0.1:18554/cam_sense")
     assert not is_video_file("0")
     assert not is_video_file("http://10.128.93.17:81/stream")
+    from live_infer import resolve_source
+
+    assert resolve_source("\u00a0\u00a0/tmp/clip.mp4") == "/tmp/clip.mp4"
+    assert resolve_source("  0") == 0
     print("url_detect OK")
 
 
