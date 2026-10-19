@@ -200,6 +200,19 @@ def test_filters_and_draw() -> None:
     keep_two = filter_person_indices(valid_poses, two_people, (fh, fw))
     assert keep_two == [0, 1, 2], keep_two
 
+    # Two boxes on one standing person, plus a separate person, count as two.
+    duplicate = np.array(
+        [
+            [200, 40, 340, 520],
+            [215, 60, 330, 480],
+            [500, 80, 640, 520],
+        ],
+        dtype=float,
+    )
+    duplicate_poses = np.stack([k_person, k_person, k_person], axis=0)
+    keep_deduped = filter_person_indices(duplicate_poses, duplicate, (720, 1280))
+    assert keep_deduped == [0, 2], keep_deduped
+
     frame = np.zeros((fh, fw, 3), dtype=np.uint8)
     draw_person(frame, boxes[0], k_person, ACTIVITY_COLOR["standing"])
     assert frame.sum() > 0

@@ -213,7 +213,51 @@ def filter_person_indices(
         if not has_hip and a < 0.12 * frame_area:
             continue
         keep.append(i)
-    return keep
+    return _drop_duplicate_people(kdata, boxes, keep)
+
+
+def _box_overlap(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Return (IoU, intersection / smaller area)."""
+    x1 = max(float(a[0]), float(b[0]))
+    y1 = max(float(a[1]), float(b[1]))
+    x2 = min(float(a[2]), float(b[2]))
+    y2 = min(float(a[3]), float(b[3]))
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = max(0.0, float(a[2] - a[0])) * max(0.0, float(a[3] - a[1]))
+    area_b = max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1]))
+    union = area_a + area_b - intersection
+    iou = intersection / union if union > 0 else 0.0
+    smaller = min(area_a, area_b)
+    contained = intersection / smaller if smaller > 0 else 0.0
+    return iou, contained
+
+
+def _drop_duplicate_people(
+    kdata: np.ndarray,
+    boxes: np.ndarray,
+    indices: list[int],
+    *,
+    iou_thr: float = 0.4,
+    contain_thr: float = 0.6,
+) -> list[int]:
+    """One person, one box. A second box on the same body is what made the count flicker."""
+    def rank(index: int) -> tuple[int, float]:
+        n_kpt, _face = keypoint_score(kdata[index], thr=0.3)
+        box = boxes[index]
+        area = max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+        return n_kpt, area
+
+    chosen: list[int] = []
+    for index in sorted(indices, key=rank, reverse=True):
+        if any(
+            _box_overlap(boxes[index], boxes[other])[0] >= iou_thr
+            or _box_overlap(boxes[index], boxes[other])[1] >= contain_thr
+            for other in chosen
+        ):
+            continue
+        chosen.append(index)
+    chosen_set = set(chosen)
+    return [index for index in indices if index in chosen_set]
 
 
 def draw_person(
