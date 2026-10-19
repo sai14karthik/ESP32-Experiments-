@@ -1,0 +1,2 @@
+source /Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader/gdbinit/symbols
+source /Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader/gdbinit/connect

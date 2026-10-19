@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/CMakeFiles/bootloader
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/CMakeFiles/bootloader.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/CMakeFiles/bootloader-complete.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

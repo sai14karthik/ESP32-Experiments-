@@ -1,45 +1,61 @@
-# Follow limengdu / Hackster / Reddit (procedure + lab deltas)
+# Follow limengdu / Hackster / Reddit (deep audit)
 
 Sources (same commit we imported):
 - https://www.hackster.io/limengdu0117/esp-csi-diy-wifi-human-presence-detection-f80508
 - https://github.com/limengdu/XIAO_esp-csi → `examples/room_presence_detection` @ `6b40b015`
 
-## Their procedure (unchanged)
+Re-audited against upstream `6b40b015` (Oct 2026).
 
-1. Flash **4 boards**: `send_TX` + `recv_master_RX1` + `recv_slave`×2 (`node_id` 1 and 2)
-2. Place: TX corner, RX1 diagonal, RX2/RX3 other walls
-3. Power all (wall USB) — Mac not required after flash
-4. Phone Wi‑Fi **`RoomSensor`** / **`12345678`** → **`http://192.168.4.1`**
-5. Empty room → **Start Calibration (30s)** → walk test
+## Architecture — matches Reddit
 
-## Detection logic vs upstream — identical
+```
+TX (soft MAC 1a:00…) ──CSI──► RX1 master (SoftAP RoomSensor + fuse + web)
+                     ──CSI──► RX2 slave node_id=1 ──ESP-NOW report──► RX1
+                     ──CSI──► RX3 slave node_id=2 ──ESP-NOW report──► RX1
+Phone ──Wi‑Fi RoomSensor──► http://192.168.4.1
+```
 
-Verified by function diff against limengdu `6b40b015`:
-
-| Piece | Status |
-|-------|--------|
-| Soft TX MAC `1a:00:00:00:00:00`, ch **11**, 100 Hz (`csi_recv_interval=10`) | Same |
+| Piece | vs limengdu |
+|-------|-------------|
+| Soft MAC `1a:00:00:00:00:00`, ch **11**, 100 Hz | Same |
 | AP `RoomSensor` / `12345678` | Same |
-| `trimmean` / `median` / `recalculate_link_status` / `fuse_detection_results` | Same |
-| Vote: `min_detection = (active_count >= 2) ? 2 : 1` | Same |
-| 30 s calibration, NVS thresholds/sensitivity, slave ESP-NOW reports | Same |
-| Slave `node_id` 1→Link2, 2→Link3 | Same |
+| `slave_report_t` / `link_status_t` layouts | Same |
+| ESP-NOW cmds `0x10` cal start / `0x11` stop / `0x13` sens | Same |
+| `trimmean` / `median` | Same |
+| Slave wander/jitter detection math (local) | Same |
+| 30 s empty cal + NVS thresholds/sensitivity | Same |
+| Link map: master=0, slave1→Link2, slave2→Link3 | Same |
 
-We did **not** change presence/motion math or multi-link fusion.
+## Port fixes (required — all-C6 + IDF 6 + esp-radar 0.3.4)
 
-## Lab deltas (all-C6 + IDF 6 + esp-radar 0.3.4)
-
-Upstream README targets mixed XIAO (C3 TX, S3 master, C5/C6 slaves) with **HT40**. Our four boards are **ESP32-C6** on **ESP-IDF 6.0.2** + **esp-radar 0.3.4**. Stock limengdu firmware stayed Offline until these port fixes:
+Upstream targets mixed XIAO + **HT40**. Stock limengdu on our four C6s stayed Offline / cal no-op until:
 
 | Change | Why |
 |--------|-----|
-| Soft MAC **before** `wifi_start` on TX | After `wifi_start`, IDF6/C6 ignores soft MAC; RX filter never matches |
-| RF **HT20** + `WIFI_SECOND_CHAN_NONE` (TX / SoftAP / slaves) | All-C6 SoftAP+CSI; HT40 left empty LLTF / no radar path |
-| `ltf_type = RADAR_LTF_TYPE_HTLTF` | Default LLTF has no data on HT ESP-NOW frames (silent drop) |
-| `esp_radar_new_peer(TX_MAC)` + `wifi_radar_cb_ex` | 0.3.4: legacy `wifi_radar_cb` only for `default_peer`; peer path needs `_ex` |
-| Master: STA netif + APSTA HT20 bandwidths; re-arm CSI after `esp_now_init` | C6 APSTA bring-up |
-| WS / `/api/status` buffer 1024 + always poll | Truncated JSON left UI on Initializing |
-| IDF6: `WIFI_IF_STA`, `WIFI_BW20` aliases | Compile fixes |
+| Soft MAC **before** `wifi_start` on TX | IDF6/C6 ignores post-start soft MAC |
+| RF **HT20** + `SECOND_CHAN_NONE` | All-C6 SoftAP+CSI |
+| `RADAR_LTF_TYPE_HTLTF` | LLTF empty on HT ESP-NOW |
+| `esp_radar_new_peer` + `wifi_radar_cb_ex` | 0.3.4 peer path |
+| `train_start/stop_ex` on peer handle | Legacy `train_*` needs `default_peer` (never set) → cal left defaults |
+| WS/`/api/status` 1024 + always poll | Truncated UI |
+| IDF6 `WIFI_IF_STA` / BW aliases | Compile |
+
+## Intentional fusion drift (lab tuning — not 1:1 with upstream fuse)
+
+Upstream fuse:
+- Link 0: master threshold × sens
+- Links 1–2: **trust slave boolean flags**
+- Vote: `min = (active>=2)?2:1` (can fall back to **1**)
+- No debounce
+
+Ours (after empty false-Motion / blink / walk-miss on C6):
+- **All 3 links** scored from raw wander/jitter with **master** cal × sens × scale  
+  (`WANDER_TH_SCALE=0.30`, `JITTER_TH_SCALE=0.12`)
+- Slave flags still computed/sent but **not used for fuse**
+- Always need **≥2** links (never fall back to 1)
+- Debounce enter 1 s / exit 2.5 s
+
+Same *idea* (multi-link vote, empty cal, sensitivity). Different *fuse details* tuned so empty stays Empty and walks still register on this hardware.
 
 ## Flash map (this lab)
 
@@ -50,8 +66,8 @@ Upstream README targets mixed XIAO (C3 TX, S3 master, C5/C6 slaves) with **HT40*
 | RX2 | `…:db:b0` | `recv_slave` **node_id=1** |
 | RX3 | `…:59:28` | `recv_slave` **node_id=2** |
 
-Slave `node_id` is compile-time + NVS. After flashing RX2/RX3, erase NVS if an old id sticks (`idf.py erase-flash` then flash).
+Edit `CONFIG_SLAVE_NODE_ID` in source before each slave flash (`-D` does not reach the C compiler).
 
 ## Not this path
 
-`csi_presence_c5` Mini TCP `:9055` / Postgres stays separate — this tree is the limengdu SoftAP phone UI only.
+`csi_presence_c5` Mini TCP `:9055` / LabPSK — separate. This tree is SoftAP phone UI only.

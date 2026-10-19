@@ -1,0 +1,18 @@
+diff --git a/main/audio/engines/afe_audio_engine.cc b/main/audio/engines/afe_audio_engine.cc
+index 3823d10..ca197de 100644
+--- a/main/audio/engines/afe_audio_engine.cc
++++ b/main/audio/engines/afe_audio_engine.cc
+@@ -382,8 +382,11 @@ void AfeAudioEngine::ApplyAfeControls() {
+         }
+     }
+     if (codec_->input_reference()) {
+-        const bool enable_aec = (bits & kWakeWordEnabled) ||
+-                                (device_aec_enabled_.load() && (bits & kVoiceProcessingEnabled));
++        // Keep AEC off while only the wake word is listening. On this board the
++        // second channel is not a clean speaker loopback, and very aggressive
++        // AEC was cancelling the spoken wake phrase.
++        const bool enable_aec =
++            device_aec_enabled_.load() && (bits & kVoiceProcessingEnabled);
+         if (enable_aec) {
+             afe_iface_->enable_aec(afe_data_);
+         } else {

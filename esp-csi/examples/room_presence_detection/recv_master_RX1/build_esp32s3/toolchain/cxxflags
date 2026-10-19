@@ -1,0 +1,6 @@
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+"-specs=/Users/saikarthik/Desktop/camera_module/esp-csi/examples/room_presence_detection/recv_master_RX1/build_esp32s3/specs/picolibc.specs"
+-fno-rtti
