@@ -58,10 +58,13 @@ def iter_video_loop(
     pace: bool = True,
     on_media_time=None,
     on_loop=None,
+    sync_to=None,
 ) -> Iterator[tuple[np.ndarray, float]]:
     """
     Yield frames from a file, then rewind and repeat.
     Playback follows the file frame rate when inference keeps up.
+    ``sync_to`` returns how many seconds of the sound have played; frames
+    already behind that clock are dropped, and early frames wait.
     """
     loop = 0
     while True:
@@ -88,15 +91,22 @@ def iter_video_loop(
                 if not ok or frame is None:
                     break
                 frames += 1
-                if on_media_time is not None:
-                    on_media_time(frames / fps)
-                if pace:
+                media_t = frames / fps
+                if sync_to is not None:
+                    target = sync_to()
+                    if target is not None and media_t + 0.04 < target:
+                        continue
+                    if target is not None and media_t > target:
+                        time.sleep(min(media_t - target, 0.5))
+                elif pace:
                     delay = deadline - time.monotonic()
                     if delay > 0:
                         time.sleep(delay)
                     deadline += period
                     if time.monotonic() - deadline > period:
                         deadline = time.monotonic()
+                if on_media_time is not None:
+                    on_media_time(media_t)
                 yield frame, time.monotonic()
         finally:
             cap.release()

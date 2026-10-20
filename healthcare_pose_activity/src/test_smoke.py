@@ -90,6 +90,16 @@ def test_video_file_loops() -> None:
             break
     assert seen[:4] == list(marks), seen
     assert seen[4] == marks[0] and seen[5] == marks[1], seen
+
+    # Sound is ahead: frames already behind that clock are not shown.
+    dropped: list[int] = []
+    for _index, (frame, _ts) in enumerate(
+        iter_video_loop(str(path), pace=False, sync_to=lambda: 0.25)
+    ):
+        dropped.append(int(frame[0, 0, 0]))
+        if len(dropped) >= 2:
+            break
+    assert dropped[0] == marks[2], dropped
     print("video loop OK", seen)
 
 

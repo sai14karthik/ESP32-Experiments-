@@ -332,6 +332,8 @@ def audio_playback_command(ffplay: str, source: str) -> list[str]:
     ]
     if is_rtsp_url(source):
         command[1:1] = ["-rtsp_transport", "tcp"]
+    else:
+        command[1:1] = ["-probesize", "32", "-analyzeduration", "0"]
     command.append(source)
     return command
 
@@ -777,12 +779,21 @@ def main() -> None:
                 )
             return model.predict(frame, **infer_kw)
 
+    audio_started: float | None = None
+
     def restart_file_audio() -> None:
-        nonlocal audio_player
+        nonlocal audio_player, audio_started
         if not is_video_file(source):
             return
         stop_audio_player(audio_player)
         audio_player = start_rtsp_audio(str(source), enabled=args.audio)
+        audio_started = time.monotonic() if audio_player is not None else None
+
+    def file_audio_clock() -> float | None:
+        """Seconds of file audio already heard. ffplay needs a short startup."""
+        if audio_started is None:
+            return None
+        return max(0.0, time.monotonic() - audio_started - 0.12)
 
     audio_player = None if is_video_file(source) else start_rtsp_audio(source, enabled=args.audio)
     try:
@@ -798,6 +809,7 @@ def main() -> None:
                     str(source),
                     on_media_time=scene_asker.note_time if scene_asker is not None else None,
                     on_loop=restart_file_audio if args.audio else None,
+                    sync_to=file_audio_clock if args.audio else None,
                 )
                 print("video file loops until q; Nemotron still uses n or a new fall", flush=True)
             for frame, capture_timestamp in frames:
