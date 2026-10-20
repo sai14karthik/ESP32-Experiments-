@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -66,39 +67,36 @@ def has_audio_track(source: str, *, timeout: float = 8.0) -> bool:
     return run.returncode == 0 and b"matches no streams" not in run.stderr
 
 
-def _flac_from_pcm(pcm: bytes, rate: int = RATE) -> bytes | None:
+def _encode_flac(args: list[str], pcm: bytes | None = None) -> bytes | None:
+    """Write FLAC to a real file. A pipe has no duration, and the server rejects that."""
     ffmpeg = _ffmpeg()
-    if not ffmpeg or len(pcm) < rate:  # under half a second
+    if not ffmpeg:
         return None
     try:
-        run = subprocess.run(
-            [
-                ffmpeg,
-                "-nostdin",
-                "-v",
-                "error",
-                "-f",
-                "s16le",
-                "-ar",
-                str(rate),
-                "-ac",
-                "1",
-                "-i",
-                "pipe:0",
-                "-f",
-                "flac",
-                "pipe:1",
-            ],
-            input=pcm,
-            capture_output=True,
-            timeout=8,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "clip.flac")
+            run = subprocess.run(
+                [ffmpeg, "-nostdin", "-v", "error", *args, out],
+                input=pcm,
+                capture_output=True,
+                timeout=8,
+                check=False,
+            )
+            if run.returncode != 0 or not Path(out).is_file():
+                return None
+            data = Path(out).read_bytes()
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if run.returncode != 0 or not run.stdout:
+    return data or None
+
+
+def _flac_from_pcm(pcm: bytes, rate: int = RATE) -> bytes | None:
+    if len(pcm) < rate:  # under half a second
         return None
-    return run.stdout
+    return _encode_flac(
+        ["-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0"],
+        pcm,
+    )
 
 
 def _data_url(payload: bytes, mime: str = "audio/flac") -> str:
@@ -244,36 +242,20 @@ def _file_clip(path: str, end_s: float, seconds: float = CLIP_S) -> bytes | None
         return None
     end = max(0.0, end_s)
     start = max(0.0, end - seconds)
-    length = max(0.3, end - start)
-    try:
-        run = subprocess.run(
-            [
-                ffmpeg,
-                "-nostdin",
-                "-v",
-                "error",
-                "-ss",
-                f"{start:.3f}",
-                "-t",
-                f"{length:.3f}",
-                "-i",
-                path,
-                "-map",
-                "0:a:0",
-                "-ac",
-                "1",
-                "-ar",
-                str(RATE),
-                "-f",
-                "flac",
-                "pipe:1",
-            ],
-            capture_output=True,
-            timeout=8,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if run.returncode != 0 or not run.stdout:
-        return None
-    return run.stdout
+    length = min(seconds, max(0.3, end - start))
+    return _encode_flac(
+        [
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{length:.3f}",
+            "-i",
+            path,
+            "-map",
+            "0:a:0",
+            "-ac",
+            "1",
+            "-ar",
+            str(RATE),
+        ]
+    )
