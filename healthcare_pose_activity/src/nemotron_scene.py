@@ -23,10 +23,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import _nocommit as nemotron_client  # noqa: E402
+from source_audio import CLIP_S as SCENE_AUDIO_S  # noqa: E402
+
+_AUDIO_S = int(SCENE_AUDIO_S) if SCENE_AUDIO_S == int(SCENE_AUDIO_S) else SCENE_AUDIO_S
 
 SCENE_SYSTEM = (
-    "You assist a lab patient-room camera monitor. "
-    "Describe only what is visible in the frame, and what is audible when a sound clip is attached. "
+    "You assist a hospital room monitor. "
+    "Report only what the camera shows now and, when a sound clip is attached, "
+    "what was heard in the seconds just before this frame. "
+    "Write for a nurse station: plain, specific, and calm. "
     "Do not diagnose, assess injury, or give medical advice."
 )
 
@@ -41,10 +46,20 @@ SCENE_PROMPT = (
 )
 
 SCENE_PROMPT_AV = (
-    SCENE_PROMPT
-    + " A sound clip from the same camera is attached. "
-    "heard is one short sentence about only what you hear, including any words spoken. "
-    "Fill heard every time. If the clip is quiet, say that it is quiet."
+    "The image is the current camera frame. "
+    f"The sound clip is the previous {_AUDIO_S} seconds from the same camera, ending at this frame. "
+    "It can be shorter only at the very start of the source. "
+    "How many people are visible, and what is each person doing? "
+    "Each posture must be one of: standing, sitting, walking, lying, "
+    "fall_suspected, unknown. "
+    "Use fall_suspected only when a person appears to be on the floor after a fall. "
+    "A person lying in a bed or on a couch is lying, not fall_suspected. "
+    "If the posture is unclear, use unknown. "
+    "situation is one or two short sentences a nurse station can read. "
+    "Explain the room right now using the picture and that sound together: "
+    "who is present, what each person is doing, and what was said or heard, including any words spoken. "
+    "If the clip is quiet, say that the room was quiet. "
+    "Do not diagnose or give advice."
 )
 
 SCENE_SCHEMA = {
@@ -73,12 +88,15 @@ SCENE_SCHEMA = {
 }
 
 SCENE_SCHEMA_AV = {
-    **SCENE_SCHEMA,
+    "type": "object",
+    "additionalProperties": False,
     "properties": {
-        **SCENE_SCHEMA["properties"],
-        "heard": {"type": "string"},
+        "people": SCENE_SCHEMA["properties"]["people"],
+        "postures": SCENE_SCHEMA["properties"]["postures"],
+        "fall_on_floor": SCENE_SCHEMA["properties"]["fall_on_floor"],
+        "situation": {"type": "string"},
     },
-    "required": ["people", "postures", "fall_on_floor", "note", "heard"],
+    "required": ["people", "postures", "fall_on_floor", "situation"],
 }
 
 
@@ -144,11 +162,14 @@ def format_reply(response: dict) -> str:
     fall_text = "fall on floor" if data.get("fall_on_floor") else "no floor fall"
     note = str(data.get("note") or "").strip()
     heard = str(data.get("heard") or "").strip()
+    situation = str(data.get("situation") or "").strip()
     count = data.get("people", "?")
     if not isinstance(count, int):
         count = "?"
     people_word = "person" if count == 1 else "people"
     line = f"{count} {people_word}: {posture_text}; {fall_text}"
+    if situation:
+        return f"{line}. Situation: {situation}"
     if note:
         line = f"{line}. {note}"
     if heard:
@@ -175,7 +196,7 @@ def ask_image_url(
         inputs,
         SCENE_PROMPT_AV if audio_url else SCENE_PROMPT,
         model,
-        max_tokens=1024 if think else (320 if audio_url else 256),
+        max_tokens=1024 if think else (480 if audio_url else 256),
         temperature=0.2,
         enable_thinking=think,
         max_px=0,
@@ -322,7 +343,10 @@ class SceneAsker:
             image_url = frame_data_url(np.ascontiguousarray(frame), self.max_px)
             audio_url = self._current_audio()
             if audio_url:
-                print(f"nemotron ({reason}): sending the frame and the source audio", flush=True)
+                print(
+                    f"nemotron ({reason}): sending the current frame and the previous {_AUDIO_S} seconds of source audio",
+                    flush=True,
+                )
             worker = threading.Thread(
                 target=self._run,
                 args=(image_url, audio_url, reason),

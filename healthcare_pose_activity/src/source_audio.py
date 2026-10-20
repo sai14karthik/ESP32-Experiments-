@@ -16,7 +16,8 @@ from pathlib import Path
 from mjpeg import is_mjpeg_url, is_rtsp_url, is_video_file
 
 RATE = 16000
-CLIP_S = 5.0
+# Recent sound sent with the current frame: inside the 5–10 s window.
+CLIP_S = 8.0
 
 
 def _ffmpeg() -> str | None:

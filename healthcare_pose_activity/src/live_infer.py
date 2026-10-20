@@ -122,14 +122,40 @@ def view_layout(
     }
 
 
+def _fit_hud_lines(text: str, max_width: int, font: float, thick: int, max_lines: int) -> list[str]:
+    """Break a HUD sentence into lines that fit the frame width."""
+    words = text.split()
+    if not words or max_lines < 1:
+        return [text]
+    lines: list[str] = []
+    current: list[str] = []
+    for word in words:
+        trial = " ".join([*current, word])
+        (width, _height), _ = cv2.getTextSize(trial, cv2.FONT_HERSHEY_SIMPLEX, font, thick)
+        if current and width > max_width and len(lines) < max_lines - 1:
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current and len(lines) < max_lines:
+        lines.append(" ".join(current))
+    return lines or [text]
+
+
 def _draw_nemotron_line(frame: np.ndarray, text: str, lay: dict) -> None:
     """Bottom strip so the vision-model read sits apart from the pose HUD."""
     fh, fw = frame.shape[:2]
     shown = "Nemotron: " + " ".join(text.split())
-    lines = [shown]
-    if " Heard: " in shown:
+    font = lay["font"]
+    max_w = fw - 16
+    if " Situation: " in shown:
+        head, body = shown.split(" Situation: ", 1)
+        lines = [head, *_fit_hud_lines("Situation: " + body, max_w, font, lay["thick"], 2)]
+    elif " Heard: " in shown:
         seen, heard = shown.split(" Heard: ", 1)
         lines = [seen, "Heard: " + heard]
+    else:
+        lines = [shown]
     bar_h = lay["hud_h"] * len(lines)
     y0 = max(0, fh - bar_h)
     overlay = frame.copy()

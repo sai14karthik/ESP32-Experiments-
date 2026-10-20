@@ -433,6 +433,13 @@ def test_nemotron_scene_on_fall() -> None:
     assert format_reply(_nemotron_reply(json.dumps(heard))).endswith(
         "Heard: A nurse asks how she feels."
     )
+    situation = json.loads(bed)
+    situation["situation"] = (
+        "A patient is lying in bed while a nurse asks how she feels. The room is otherwise quiet."
+    )
+    assert format_reply(_nemotron_reply(json.dumps(situation))).endswith(
+        "Situation: A patient is lying in bed while a nurse asks how she feels. The room is otherwise quiet."
+    )
     assert format_reply(_nemotron_reply("not json")) == "not json"
     try:
         format_reply({"choices": []})
@@ -637,14 +644,15 @@ def test_nemotron_sends_source_audio() -> None:
         parts = bodies[-1]["messages"][1]["content"]
         assert parts[1]["type"] == "image_url"
         assert parts[2] == {"type": "audio_url", "audio_url": {"url": clip}}
-        assert "Fill heard every time" in parts[0]["text"]
+        assert "previous 8 seconds" in parts[0]["text"]
+        assert "situation is one or two short sentences" in parts[0]["text"]
         assert bodies[-1]["response_format"]["json_schema"]["schema"]["required"] == [
             "people",
             "postures",
             "fall_on_floor",
-            "note",
-            "heard",
+            "situation",
         ]
+        assert bodies[-1]["max_tokens"] == 480
 
         quiet = SceneAsker(
             endpoint="http://nemotron.test/v1",
@@ -721,6 +729,14 @@ def test_nemotron_hud_and_flag() -> None:
     assert int(rows.max()) <= bar_h - 1
     long = np.full((240, 320, 3), 180, dtype=np.uint8)
     _draw_nemotron_line(long, "word " * 80, view_layout(320, 240))
+    situation_frame = np.full((320, 480, 3), 200, dtype=np.uint8)
+    _draw_nemotron_line(
+        situation_frame,
+        "1 person: lying; no floor fall. Situation: A patient is lying in bed while a nurse asks how she feels.",
+        lay,
+    )
+    situation_top = 320 - lay["hud_h"] * 2
+    assert int(situation_frame[situation_top + 2, 10].sum()) < 600
     out = ROOT / "tmp_smoke_nemotron_hud.png"
     cv2.imwrite(str(out), frame)
     assert out.exists() and out.stat().st_size > 1000
