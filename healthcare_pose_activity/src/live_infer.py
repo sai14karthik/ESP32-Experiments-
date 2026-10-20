@@ -29,6 +29,7 @@ from filters import StablePersonIds, draw_person, filter_person_indices  # noqa:
 from mjpeg import (  # noqa: E402
     VIDEO_SUFFIXES,
     is_rtsp_url,
+    is_video_file,
     iter_mjpeg,
     iter_rtsp,
     iter_video_loop,
@@ -267,7 +268,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--audio",
         action="store_true",
-        help="play audio from an RTSP source via ffplay (default: silent)",
+        help="play the source sound track via ffplay (live RTSP or a video file)",
     )
     ap.add_argument(
         "--view-width",
@@ -319,23 +320,25 @@ def resolve_source(raw: str):
 
 
 def audio_playback_command(ffplay: str, source: str) -> list[str]:
-    """Build an audio-only FFmpeg player command for an RTSP source."""
-    return [
+    """Build an audio-only ffplay command. RTSP is forced over TCP."""
+    command = [
         ffplay,
         "-hide_banner",
         "-loglevel",
         "warning",
-        "-rtsp_transport",
-        "tcp",
         "-nodisp",
         "-vn",
-        source,
+        "-autoexit",
     ]
+    if is_rtsp_url(source):
+        command[1:1] = ["-rtsp_transport", "tcp"]
+    command.append(source)
+    return command
 
 
 def start_rtsp_audio(source: str, *, enabled: bool = False) -> subprocess.Popen | None:
-    """Play a stream's audio independently so OpenCV remains the video renderer."""
-    if not enabled or not is_rtsp_url(source):
+    """Play a live stream or video file's sound while OpenCV shows the picture."""
+    if not enabled or not (is_rtsp_url(source) or is_video_file(source)):
         return None
     ffplay = shutil.which("ffplay")
     if ffplay is None:
@@ -351,7 +354,8 @@ def start_rtsp_audio(source: str, *, enabled: bool = False) -> subprocess.Popen 
     except OSError as exc:
         print(f"audio: could not start ffplay ({exc})", flush=True)
         return None
-    print(f"audio: playing RTSP audio via {ffplay}", flush=True)
+    kind = "RTSP" if is_rtsp_url(source) else "file"
+    print(f"audio: playing {kind} audio via {ffplay}", flush=True)
     return player
 
 
@@ -564,7 +568,7 @@ def main() -> None:
         """Annotate one YOLO result; return False if user quit."""
         nonlocal n, audio_exit_reported, audio_player, audio_retry_at
         n += 1
-        if (
+        if is_rtsp_url(source) and (
             audio_player is not None
             and audio_player.poll() is not None
             and not audio_exit_reported
@@ -573,7 +577,12 @@ def main() -> None:
             audio_player = None
             audio_retry_at = time.monotonic() + 3.0
             audio_exit_reported = True
-        if audio_player is None and audio_retry_at is not None and time.monotonic() >= audio_retry_at:
+        if (
+            is_rtsp_url(source)
+            and audio_player is None
+            and audio_retry_at is not None
+            and time.monotonic() >= audio_retry_at
+        ):
             audio_player = start_rtsp_audio(source, enabled=args.audio)
             audio_retry_at = None
             audio_exit_reported = False
@@ -768,7 +777,14 @@ def main() -> None:
                 )
             return model.predict(frame, **infer_kw)
 
-    audio_player = start_rtsp_audio(source, enabled=args.audio)
+    def restart_file_audio() -> None:
+        nonlocal audio_player
+        if not is_video_file(source):
+            return
+        stop_audio_player(audio_player)
+        audio_player = start_rtsp_audio(str(source), enabled=args.audio)
+
+    audio_player = None if is_video_file(source) else start_rtsp_audio(source, enabled=args.audio)
     try:
         if frame_mode:
             if mjpeg_mode:
@@ -781,6 +797,7 @@ def main() -> None:
                 frames = iter_video_loop(
                     str(source),
                     on_media_time=scene_asker.note_time if scene_asker is not None else None,
+                    on_loop=restart_file_audio if args.audio else None,
                 )
                 print("video file loops until q; Nemotron still uses n or a new fall", flush=True)
             for frame, capture_timestamp in frames:

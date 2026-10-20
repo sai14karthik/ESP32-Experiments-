@@ -101,6 +101,10 @@ def test_rtsp_audio_command() -> None:
     assert "-rtsp_transport" in command and "tcp" in command
     assert "-nodisp" in command and "-vn" in command
     assert command[-1] == "rtsp://127.0.0.1:18554/cam_sense"
+    file_command = audio_playback_command("/opt/homebrew/bin/ffplay", "/tmp/clip.mp4")
+    assert "-rtsp_transport" not in file_command
+    assert file_command[-1] == "/tmp/clip.mp4"
+    assert "-nodisp" in file_command and "-vn" in file_command
     assert parse_args(["rtsp://127.0.0.1:18554/cam_sense"]).audio is False
     assert parse_args(["rtsp://127.0.0.1:18554/cam_sense", "--audio"]).audio is True
     with patch("live_infer.shutil.which", return_value="/fake/ffplay"), patch(
@@ -116,6 +120,11 @@ def test_rtsp_audio_command() -> None:
         assert player is popen.return_value
         assert popen.call_args.args[0][-1] == "rtsp://127.0.0.1:18554/cam_sense"
         popen.assert_called_once()
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as clip:
+            played = start_rtsp_audio(clip.name, enabled=True)
+        assert played is popen.return_value
+        assert popen.call_args.args[0][-1].endswith(".mp4")
+        assert "-rtsp_transport" not in popen.call_args.args[0]
     print("RTSP audio playback command OK")
 
 

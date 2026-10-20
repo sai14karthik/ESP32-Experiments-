@@ -57,6 +57,7 @@ def iter_video_loop(
     *,
     pace: bool = True,
     on_media_time=None,
+    on_loop=None,
 ) -> Iterator[tuple[np.ndarray, float]]:
     """
     Yield frames from a file, then rewind and repeat.
@@ -77,6 +78,8 @@ def iter_video_loop(
             f"video: loop {loop} {path} fps={fps:.1f} frames={counted or '?'}",
             flush=True,
         )
+        if on_loop is not None:
+            on_loop()
         frames = 0
         deadline = time.monotonic()
         try:
