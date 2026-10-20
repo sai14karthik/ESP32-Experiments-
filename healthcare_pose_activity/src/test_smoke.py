@@ -428,6 +428,11 @@ def test_nemotron_scene_on_fall() -> None:
         )
     )
     assert format_reply(thought) == "2 people: sitting, standing; fall on floor. One is down."
+    heard = json.loads(bed)
+    heard["heard"] = "A nurse asks how she feels."
+    assert format_reply(_nemotron_reply(json.dumps(heard))).endswith(
+        "Heard: A nurse asks how she feels."
+    )
     assert format_reply(_nemotron_reply("not json")) == "not json"
     try:
         format_reply({"choices": []})
@@ -632,6 +637,14 @@ def test_nemotron_sends_source_audio() -> None:
         parts = bodies[-1]["messages"][1]["content"]
         assert parts[1]["type"] == "image_url"
         assert parts[2] == {"type": "audio_url", "audio_url": {"url": clip}}
+        assert "Fill heard every time" in parts[0]["text"]
+        assert bodies[-1]["response_format"]["json_schema"]["schema"]["required"] == [
+            "people",
+            "postures",
+            "fall_on_floor",
+            "note",
+            "heard",
+        ]
 
         quiet = SceneAsker(
             endpoint="http://nemotron.test/v1",

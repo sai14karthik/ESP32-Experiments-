@@ -125,40 +125,48 @@ def view_layout(
 def _draw_nemotron_line(frame: np.ndarray, text: str, lay: dict) -> None:
     """Bottom strip so the vision-model read sits apart from the pose HUD."""
     fh, fw = frame.shape[:2]
-    bar_h = lay["hud_h"]
+    shown = "Nemotron: " + " ".join(text.split())
+    lines = [shown]
+    if " Heard: " in shown:
+        seen, heard = shown.split(" Heard: ", 1)
+        lines = [seen, "Heard: " + heard]
+    bar_h = lay["hud_h"] * len(lines)
     y0 = max(0, fh - bar_h)
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, y0), (fw, fh), (15, 15, 15), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-    shown = "Nemotron: " + " ".join(text.split())
     font = lay["font"]
-    while font > 0.2:
+    for line in lines:
+        while font > 0.2:
+            (width, _height), _ = cv2.getTextSize(
+                line, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
+            )
+            if width <= fw - 16:
+                break
+            font = max(0.2, font * 0.9)
+    for index, line in enumerate(lines):
+        draw = line
         (width, _height), _ = cv2.getTextSize(
-            shown, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
+            draw, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
         )
-        if width <= fw - 16:
-            break
-        font = max(0.2, font * 0.9)
-        if font <= 0.2:
-            while width > fw - 16 and len(shown) > 16:
-                shown = shown[:-4] + "..."
-                (width, _height), _ = cv2.getTextSize(
-                    shown, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
-                )
-            break
-    baseline = y0 + max(14, int(bar_h * 0.72))
-    if baseline > fh - 2:
-        baseline = fh - 2
-    cv2.putText(
-        frame,
-        shown,
-        (8, baseline),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        font,
-        (240, 240, 240),
-        lay["thick"],
-        cv2.LINE_AA,
-    )
+        while width > fw - 16 and len(draw) > 16:
+            draw = draw[:-4] + "..."
+            (width, _height), _ = cv2.getTextSize(
+                draw, cv2.FONT_HERSHEY_SIMPLEX, font, lay["thick"]
+            )
+        baseline = y0 + int((index + 0.72) * lay["hud_h"])
+        if baseline > fh - 2:
+            baseline = fh - 2
+        cv2.putText(
+            frame,
+            draw,
+            (8, baseline),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font,
+            (240, 240, 240),
+            lay["thick"],
+            cv2.LINE_AA,
+        )
 
 
 def to_display(frame: np.ndarray, scale: float) -> np.ndarray:

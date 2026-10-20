@@ -37,8 +37,14 @@ SCENE_PROMPT = (
     "Use fall_suspected only when a person appears to be on the floor after a fall. "
     "A person lying in a bed or on a couch is lying, not fall_suspected. "
     "If the posture is unclear, use unknown. "
-    "When a sound clip from the same camera is attached, the note may mention what you hear. "
-    "note is one short sentence."
+    "note is one short sentence about only what you see."
+)
+
+SCENE_PROMPT_AV = (
+    SCENE_PROMPT
+    + " A sound clip from the same camera is attached. "
+    "heard is one short sentence about only what you hear, including any words spoken. "
+    "Fill heard every time. If the clip is quiet, say that it is quiet."
 )
 
 SCENE_SCHEMA = {
@@ -64,6 +70,15 @@ SCENE_SCHEMA = {
         "note": {"type": "string"},
     },
     "required": ["people", "postures", "fall_on_floor", "note"],
+}
+
+SCENE_SCHEMA_AV = {
+    **SCENE_SCHEMA,
+    "properties": {
+        **SCENE_SCHEMA["properties"],
+        "heard": {"type": "string"},
+    },
+    "required": ["people", "postures", "fall_on_floor", "note", "heard"],
 }
 
 
@@ -128,6 +143,7 @@ def format_reply(response: dict) -> str:
     posture_text = ", ".join(postures) if postures else "none"
     fall_text = "fall on floor" if data.get("fall_on_floor") else "no floor fall"
     note = str(data.get("note") or "").strip()
+    heard = str(data.get("heard") or "").strip()
     count = data.get("people", "?")
     if not isinstance(count, int):
         count = "?"
@@ -135,6 +151,8 @@ def format_reply(response: dict) -> str:
     line = f"{count} {people_word}: {posture_text}; {fall_text}"
     if note:
         line = f"{line}. {note}"
+    if heard:
+        line = f"{line}. Heard: {heard}"
     return line
 
 
@@ -155,14 +173,14 @@ def ask_image_url(
         inputs.append(audio_url)
     body = nemotron_client.build_request(
         inputs,
-        SCENE_PROMPT,
+        SCENE_PROMPT_AV if audio_url else SCENE_PROMPT,
         model,
-        max_tokens=1024 if think else 256,
+        max_tokens=1024 if think else (320 if audio_url else 256),
         temperature=0.2,
         enable_thinking=think,
         max_px=0,
         system_prompt=SCENE_SYSTEM,
-        schema=SCENE_SCHEMA,
+        schema=SCENE_SCHEMA_AV if audio_url else SCENE_SCHEMA,
         captions=False,
     )
     try:
