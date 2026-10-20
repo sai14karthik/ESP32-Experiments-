@@ -52,7 +52,12 @@ def source_mode(source) -> str:
     return "live"
 
 
-def iter_video_loop(path: str, *, pace: bool = True) -> Iterator[tuple[np.ndarray, float]]:
+def iter_video_loop(
+    path: str,
+    *,
+    pace: bool = True,
+    on_media_time=None,
+) -> Iterator[tuple[np.ndarray, float]]:
     """
     Yield frames from a file, then rewind and repeat.
     Playback follows the file frame rate when inference keeps up.
@@ -80,6 +85,8 @@ def iter_video_loop(path: str, *, pace: bool = True) -> Iterator[tuple[np.ndarra
                 if not ok or frame is None:
                     break
                 frames += 1
+                if on_media_time is not None:
+                    on_media_time(frames / fps)
                 if pace:
                     delay = deadline - time.monotonic()
                     if delay > 0:

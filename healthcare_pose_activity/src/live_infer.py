@@ -533,10 +533,14 @@ def main() -> None:
 
         think = os.environ.get("NEMOTRON_THINK", "0") == "1"
 
-        scene_asker = SceneAsker(think=think)
+        scene_asker = SceneAsker(
+            think=think,
+            source=source if isinstance(source, str) else None,
+        )
         print(
             f"nemotron: {scene_asker.endpoint} model={scene_asker.model} "
-            f"think={think} (new fall, or press n)",
+            f"think={think} (new fall, or press n; source audio when the "
+            f"stream or file has a sound track)",
             flush=True,
         )
         if not endpoint_open(scene_asker.endpoint):
@@ -774,7 +778,10 @@ def main() -> None:
                 frames = iter_rtsp(str(source))
                 print("opening stream (first frame can take a few seconds)…", flush=True)
             else:
-                frames = iter_video_loop(str(source))
+                frames = iter_video_loop(
+                    str(source),
+                    on_media_time=scene_asker.note_time if scene_asker is not None else None,
+                )
                 print("video file loops until q; Nemotron still uses n or a new fall", flush=True)
             for frame, capture_timestamp in frames:
                 out = _infer_frame(frame)
@@ -788,6 +795,8 @@ def main() -> None:
                 if not handle_result(r, time.monotonic()):
                     break
     finally:
+        if scene_asker is not None:
+            scene_asker.close()
         stop_audio_player(audio_player)
         cv2.destroyAllWindows()
         print(f"stopped after {n} frames", flush=True)

@@ -577,6 +577,102 @@ def test_nemotron_scene_on_fall() -> None:
     print("nemotron scene OK")
 
 
+def test_nemotron_sends_source_audio() -> None:
+    """A sound clip from the source is attached beside the frame. No clip stays picture-only."""
+    import json
+    from unittest.mock import patch
+
+    from nemotron_scene import SceneAsker
+
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+    bed = json.dumps(
+        {
+            "people": 1,
+            "postures": ["standing"],
+            "fall_on_floor": False,
+            "note": "A door closed.",
+        }
+    )
+    reply = _nemotron_reply(bed)
+    bodies: list[dict] = []
+
+    def fake_post(endpoint, body, timeout):
+        bodies.append(body)
+        return reply
+
+    clip = "data:audio/flac;base64,AAAA"
+    with patch("_nocommit.post", fake_post):
+        asker = SceneAsker(
+            endpoint="http://nemotron.test/v1",
+            model="nemotron",
+            timeout=5,
+            audio_clip=lambda: clip,
+        )
+        assert asker.ask_now(frame) is True
+        asker.wait(3)
+        parts = bodies[-1]["messages"][1]["content"]
+        assert parts[1]["type"] == "image_url"
+        assert parts[2] == {"type": "audio_url", "audio_url": {"url": clip}}
+
+        quiet = SceneAsker(
+            endpoint="http://nemotron.test/v1",
+            model="nemotron",
+            timeout=5,
+            audio_clip=lambda: None,
+        )
+        assert quiet.ask_now(frame) is True
+        quiet.wait(3)
+        quiet_parts = bodies[-1]["messages"][1]["content"]
+        assert len(quiet_parts) == 2
+        assert quiet_parts[1]["type"] == "image_url"
+    import shutil
+    import struct
+    import tempfile
+    from pathlib import Path
+
+    from source_audio import SourceAudio, _file_clip, has_audio_track
+
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        rate, n = 16000, 16000
+        pcm = b"\x00\x02" * n
+        wav_bytes = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            36 + len(pcm),
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            1,
+            rate,
+            rate * 2,
+            2,
+            16,
+            b"data",
+            len(pcm),
+        ) + pcm
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "tone.wav"
+            wav.write_bytes(wav_bytes)
+            assert has_audio_track(str(wav))
+            payload = _file_clip(str(wav), 0.8)
+            assert payload and payload.startswith(b"fLaC"), payload[:4] if payload else None
+            silent = Path(tmp) / "silent.avi"
+            writer = cv2.VideoWriter(
+                str(silent), cv2.VideoWriter_fourcc(*"MJPG"), 8, (16, 16)
+            )
+            assert writer.isOpened()
+            for _ in range(4):
+                writer.write(np.zeros((16, 16, 3), dtype=np.uint8))
+            writer.release()
+            tapped = SourceAudio(str(silent))
+            if tapped._thread is not None:
+                tapped._thread.join(8)
+            assert tapped.data_url() is None
+            tapped.close()
+    print("nemotron source audio OK")
+
+
 def test_nemotron_hud_and_flag() -> None:
     from live_infer import _draw_nemotron_line, parse_args, view_layout
 
@@ -647,6 +743,7 @@ def main() -> None:
     test_activity_tracker_burst()
     test_activity_hysteresis_on_pose_dropout()
     test_nemotron_scene_on_fall()
+    test_nemotron_sends_source_audio()
     test_nemotron_hud_and_flag()
     test_colors_cover_activities()
     test_yolo_offline_video()

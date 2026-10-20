@@ -1,9 +1,10 @@
-"""Ask Nemotron to read a patient-room frame.
+"""Ask Nemotron to read a patient-room frame and, when the source has one, its sound.
 
 The live pose loop stays in charge of tracking and the on-screen activity
-labels. This module sends a single JPEG to the same vLLM client as
-``_nocommit.py`` when a fall is suspected, or when the operator asks.
-A person lying in bed is not reported as a fall.
+labels. This module sends one JPEG, plus a short clip of that same source's
+audio track, to the vLLM client in ``_nocommit.py`` when a fall is suspected
+or when the operator asks. A source with no sound track sends the picture
+alone. A person lying in bed is not reported as a fall.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ import _nocommit as nemotron_client  # noqa: E402
 
 SCENE_SYSTEM = (
     "You assist a lab patient-room camera monitor. "
-    "Describe only what is visible in the frame. "
+    "Describe only what is visible in the frame, and what is audible when a sound clip is attached. "
     "Do not diagnose, assess injury, or give medical advice."
 )
 
@@ -36,6 +37,7 @@ SCENE_PROMPT = (
     "Use fall_suspected only when a person appears to be on the floor after a fall. "
     "A person lying in a bed or on a couch is lying, not fall_suspected. "
     "If the posture is unclear, use unknown. "
+    "When a sound clip from the same camera is attached, the note may mention what you hear. "
     "note is one short sentence."
 )
 
@@ -139,16 +141,20 @@ def format_reply(response: dict) -> str:
 def ask_image_url(
     image_url: str,
     *,
+    audio_url: str | None = None,
     endpoint: str | None = None,
     model: str | None = None,
     think: bool = False,
     timeout: float = 45.0,
 ) -> str:
-    """Send one already-encoded frame. Raises ConnectionError or ValueError."""
+    """Send one frame and, when present, that source's sound clip."""
     endpoint = endpoint or nemotron_client.DEFAULT_ENDPOINT
     model = model or nemotron_client.DEFAULT_MODEL
+    inputs = [image_url]
+    if audio_url:
+        inputs.append(audio_url)
     body = nemotron_client.build_request(
-        [image_url],
+        inputs,
         SCENE_PROMPT,
         model,
         max_tokens=1024 if think else 256,
@@ -209,6 +215,8 @@ class SceneAsker:
         rearm_after: float = 1.0,
         retry_s: float = 10.0,
         clock=None,
+        source: str | None = None,
+        audio_clip=None,
     ):
         import os
 
@@ -232,6 +240,21 @@ class SceneAsker:
         self._line = ""
         self._error = ""
         self._worker: threading.Thread | None = None
+        self._audio_clip = audio_clip
+        self._audio = None
+        if audio_clip is None and source:
+            from source_audio import SourceAudio
+
+            self._audio = SourceAudio(source)
+
+    def note_time(self, seconds: float) -> None:
+        """Where the file playback is, so the sound clip matches the frame."""
+        if self._audio is not None:
+            self._audio.note_time(seconds)
+
+    def close(self) -> None:
+        if self._audio is not None:
+            self._audio.close()
 
     def status_line(self) -> str:
         with self._lock:
@@ -279,9 +302,12 @@ class SceneAsker:
         """Encode on the caller thread so the worker only does HTTP."""
         try:
             image_url = frame_data_url(np.ascontiguousarray(frame), self.max_px)
+            audio_url = self._current_audio()
+            if audio_url:
+                print(f"nemotron ({reason}): sending the frame and the source audio", flush=True)
             worker = threading.Thread(
                 target=self._run,
-                args=(image_url, reason),
+                args=(image_url, audio_url, reason),
                 daemon=True,
                 name="nemotron-scene",
             )
@@ -298,10 +324,26 @@ class SceneAsker:
             return False
         return True
 
-    def _run(self, image_url: str, reason: str) -> None:
+    def _current_audio(self) -> str | None:
+        if self._audio_clip is not None:
+            try:
+                return self._audio_clip() or None
+            except Exception as exc:
+                print(f"nemotron audio: {exc}", flush=True)
+                return None
+        if self._audio is None:
+            return None
+        try:
+            return self._audio.data_url()
+        except Exception as exc:
+            print(f"nemotron audio: {exc}", flush=True)
+            return None
+
+    def _run(self, image_url: str, audio_url: str | None, reason: str) -> None:
         try:
             text = ask_image_url(
                 image_url,
+                audio_url=audio_url,
                 endpoint=self.endpoint,
                 model=self.model,
                 think=self.think,
