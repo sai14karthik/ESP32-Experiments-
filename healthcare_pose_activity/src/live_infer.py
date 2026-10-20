@@ -91,9 +91,9 @@ def view_layout(
     (Sense 480×320, webcam 720p/1080p, RTSP, etc.).
     """
     # Status strip ~5% of frame height (never dominate the picture)
-    hud_h = int(np.clip(round(fh * 0.055), 20, 52))
-    font = float(np.clip(fh / 720.0, 0.32, 0.75))
-    tag_font = float(np.clip(fh / 800.0, 0.35, 0.65))
+    hud_h = int(np.clip(round(fh * 0.062), 22, 60))
+    font = float(np.clip(fh / 640.0, 0.38, 0.88))
+    tag_font = float(np.clip(fh / 700.0, 0.40, 0.76))
     thick = 2 if fh >= 720 else 1
     status_y = max(14, int(hud_h * 0.72))
 

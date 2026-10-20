@@ -149,7 +149,7 @@ def test_view_layout_matrix() -> None:
     ]
     for fw, fh in cases:
         lay = view_layout(fw, fh)
-        assert 20 <= lay["hud_h"] <= 52, lay
+        assert 22 <= lay["hud_h"] <= 60, lay
         assert lay["hud_h"] / fh <= 0.12, f"HUD too tall for {fw}x{fh}: {lay}"
         assert lay["scale"] > 0
         out_w = int(fw * lay["scale"])
