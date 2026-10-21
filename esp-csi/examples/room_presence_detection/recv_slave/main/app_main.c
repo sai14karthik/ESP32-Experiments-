@@ -397,13 +397,15 @@ static void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *
 {
     if (len < 1) return;
     
-    /* Only process messages that start with our command prefix (0x10-0x1F reserved for commands) */
-    /* This filters out CSI data packets from the TX sender */
+    /* TX broadcasts a packet counter. Its low byte cycles through 0x10–0x1F and
+     * was starting/stopping calibration, so wander templates never stuck (presence=0). */
+    if (recv_info && memcmp(recv_info->src_addr, CONFIG_CSI_SEND_MAC, 6) == 0) {
+        return;
+    }
+
     uint8_t cmd = data[0];
-    
-    /* Skip if not a command (commands are 0x10-0x1F) */
     if (cmd < 0x10 || cmd > 0x1F) {
-        return;  /* Silently ignore non-command packets (likely CSI data) */
+        return;
     }
     
     /* Log who sent this command */

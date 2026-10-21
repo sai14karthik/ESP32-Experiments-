@@ -40,22 +40,22 @@ Upstream targets mixed XIAO + **HT40**. Stock limengdu on our four C6s stayed Of
 | WS/`/api/status` 1024 + always poll | Truncated UI |
 | IDF6 `WIFI_IF_STA` / BW aliases | Compile |
 
-## Intentional fusion drift (lab tuning — not 1:1 with upstream fuse)
+## Detection formula — matches limengdu again
 
-Upstream fuse:
-- Link 0: master threshold × sens
-- Links 1–2: **trust slave boolean flags**
-- Vote: `min = (active>=2)?2:1` (can fall back to **1**)
-- No debounce
+Per-link rule is theirs: `value × sensitivity > threshold`.
 
-Ours (after empty false-Motion / blink / walk-miss on C6):
-- **All 3 links** scored from raw wander/jitter with **master** cal × sens × scale  
-  (`WANDER_TH_SCALE=0.30`, `JITTER_TH_SCALE=0.12`)
-- Slave flags still computed/sent but **not used for fuse**
-- Always need **≥2** links (never fall back to 1)
-- Debounce enter 1 s / exit 2.5 s
+- Link 1 (master): master calibration × its sliders
+- Links 2 and 3: each slave's own calibration and its own yes/no (ESP-NOW report)
+- Slave wander/jitter math is the same function as upstream
 
-Same *idea* (multi-link vote, empty cal, sensitivity). Different *fuse details* tuned so empty stays Empty and walks still register on this hardware.
+Two stability extras, not a different formula:
+
+- Always need **≥2** links (upstream can fall back to 1 if a link drops)
+- Debounce 1 s to enter, 2.5 s to leave
+
+The temporary `0.30` / `0.12` threshold scales are removed. They were why motion would not trip unless the slider was pushed very high.
+
+Slaves ignore ESP-NOW from the TX MAC `1a:00:…`. The TX packet counter's low byte is `0x10`–`0x1F`, which upstream treats as calibration commands and wipes the presence baseline.
 
 ## Flash map (this lab)
 

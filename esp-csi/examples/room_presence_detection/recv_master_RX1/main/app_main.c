@@ -61,10 +61,6 @@ extern const uint8_t app_js_end[] asm("_binary_app_js_end");
 #define FUSE_MIN_LINKS                  2     /* Never drop to 1 — avoids Empty↔Motion blink */
 #define DEBOUNCE_ENTER_MS               1000  /* Hold before Occupied/Motion */
 #define DEBOUNCE_EXIT_MS                2500  /* Hold before Empty (stickier leave) */
-/* esp-radar train jitter_th (~0.05) is hotter than live waveform_jitter (~0.02 empty).
- * Scale so empty stays under bar but a walk can still clear it. */
-#define WANDER_TH_SCALE                 0.30f
-#define JITTER_TH_SCALE                 0.12f
 
 /* Sender's MAC address - used for CSI filtering */
 static const uint8_t CONFIG_CSI_SEND_MAC[] = {0x1a, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -334,29 +330,27 @@ static void recalculate_link_status(int link_idx)
     
     if (!link->active) return;
     
-    /* Presence: wander * sensitivity > scaled master threshold */
+    /* Presence: wander * sensitivity > threshold (limengdu formula) */
     if (g_state.wander_threshold > 0) {
-        float th = g_state.wander_threshold * WANDER_TH_SCALE;
-        link->room_status = (link->wander * link->wander_sensitivity > th);
+        link->room_status = (link->wander * link->wander_sensitivity > g_state.wander_threshold);
     } else {
-        link->room_status = false;
+        link->room_status = false;  /* No calibration done yet */
     }
     
-    /* Motion: jitter * sensitivity > scaled master threshold */
+    /* Motion: jitter * sensitivity > threshold */
     if (g_state.jitter_threshold > 0) {
-        float th = g_state.jitter_threshold * JITTER_TH_SCALE;
-        link->human_status = (link->jitter * link->jitter_sensitivity > th);
+        link->human_status = (link->jitter * link->jitter_sensitivity > g_state.jitter_threshold);
     } else {
-        link->human_status = false;
+        link->human_status = false;  /* No calibration done yet */
     }
 }
 
 /**
  * @brief Fuse multi-link detection results using voting + debounce
  *
- * Every link scored from raw wander/jitter with master cal (scaled) + UI
- * sensitivity. Slave boolean flags are not trusted (too hot on empty room).
- * Always need >=2 links; debounce output.
+ * Link 0 uses the master threshold. Links 1–2 use each slave's own
+ * room/move result (their calibration matches their CSI). Always need
+ * >=2 links, then debounce, so one noisy link cannot flip the room.
  */
 static void fuse_detection_results(void)
 {
@@ -371,7 +365,9 @@ static void fuse_detection_results(void)
     for (int i = 0; i < 3; i++) {
         if (g_state.links[i].active &&
             (now - g_state.links[i].last_update) < LINK_TIMEOUT_MS) {
-            recalculate_link_status(i);
+            if (i == 0) {
+                recalculate_link_status(i);
+            }
             
             if (g_state.links[i].room_status || g_state.links[i].human_status) {
                 detection_count++;
@@ -472,15 +468,17 @@ static void espnow_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *
     if (report->msg_type == 0x01 && report->node_id >= 1 && report->node_id <= MAX_SLAVE_NODES) {
         int link_idx = report->node_id;  /* 1 or 2 */
         
-        /* Raw metrics only — fuse recalculates room/move with master thresholds */
         g_state.links[link_idx].active = true;
+        g_state.links[link_idx].room_status = report->room_status;
+        g_state.links[link_idx].human_status = report->human_status;
         g_state.links[link_idx].wander = report->wander;
         g_state.links[link_idx].jitter = report->jitter;
         g_state.links[link_idx].rssi = report->rssi;
         g_state.links[link_idx].last_update = esp_log_timestamp();
         
-        ESP_LOGD(TAG, "Slave %d: wander=%.6f jitter=%.6f",
-                 report->node_id, report->wander, report->jitter);
+        ESP_LOGD(TAG, "Slave %d: room=%d move=%d wander=%.6f jitter=%.6f",
+                 report->node_id, report->room_status, report->human_status,
+                 report->wander, report->jitter);
         
         fuse_detection_results();
     }
