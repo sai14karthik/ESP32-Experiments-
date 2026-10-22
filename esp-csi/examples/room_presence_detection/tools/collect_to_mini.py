@@ -2,16 +2,19 @@
 """Store the four-board room readings in Postgres on the Mac Mini.
 
 The master pushes one JSON line at a time to this machine on TCP 9056.
-The Mini stays on Ethernet. It does not join RoomSensor.
+The same row gets a camera ground-truth label: empty (0) or occupied (1),
+from YOLO26-pose on the ESP camera.
 
-  ./tools/collect_to_mini.sh --session empty_01
+  ./tools/collect_to_mini.sh --session pipeline_test
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import queue
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +24,7 @@ from pathlib import Path
 SCHEMA = Path(__file__).resolve().parent / "schema.sql"
 DEFAULT_MASTER = "http://192.168.4.1"
 DEFAULT_DB = "postgresql:///csi"
+DEFAULT_CAMERA = "http://10.128.93.15:81/stream"
 
 
 def fetch_status(master: str, timeout: float = 0.8) -> dict:
@@ -57,7 +61,7 @@ def apply_schema(conn) -> None:
     conn.commit()
 
 
-def insert_status(cur, session_id, status: dict) -> None:
+def insert_status(cur, session_id, status: dict, cv_occupied: int | None) -> None:
     links = status.get("links") or []
     l1, l2, l3 = (link_fields(links, i) for i in range(3))
     cur.execute(
@@ -66,12 +70,14 @@ def insert_status(cur, session_id, status: dict) -> None:
             session_id, room, moving, calibrating, wander_th, jitter_th,
             l1_active, l1_room, l1_move, l1_wander, l1_jitter,
             l2_active, l2_room, l2_move, l2_wander, l2_jitter,
-            l3_active, l3_room, l3_move, l3_wander, l3_jitter
+            l3_active, l3_room, l3_move, l3_wander, l3_jitter,
+            cv_occupied
         ) VALUES (
             %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s,
+            %s
         )
         """,
         (
@@ -84,19 +90,84 @@ def insert_status(cur, session_id, status: dict) -> None:
             *l1,
             *l2,
             *l3,
+            cv_occupied,
         ),
     )
 
 
-def listen_push(port: int, database_url: str, tag: str) -> int:
+def start_camera(camera: str, preview: bool):
+    from csi_presence.cv_ground_truth.person_labeler import PersonLabeler
+
+    labeler = PersonLabeler(camera=camera, show_preview=preview)
+    labeler.start()
+    return labeler
+
+
+def camera_label(labeler, window_sec: float = 1.5) -> int | None:
+    """1 occupied, 0 empty, None until the camera has a stable run of frames."""
+    if labeler is None:
+        return None
+    now = time.time()
+    recent = [hit for ts, hit in labeler._hits if now - ts <= window_sec]
+    if len(recent) < 4:
+        return None
+    return 1 if labeler.recent_occupied(window_sec) else 0
+
+
+def _cv_word(cv_occupied: int | None) -> str:
+    if cv_occupied is None:
+        return "waiting"
+    return "occupied" if cv_occupied else "empty"
+
+
+def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bool) -> int:
     import psycopg
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port))
-    srv.listen(2)
-    print(f"listening 0.0.0.0:{port}  postgres {database_url}  tag={tag}")
-    print("waiting for the master. Ctrl-C to stop.")
+    labeler = None if camera == "off" else start_camera(camera, preview)
+    samples: queue.Queue = queue.Queue()
+    stop = threading.Event()
+
+    def accept_loop() -> None:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", port))
+        srv.listen(2)
+        print(f"listening 0.0.0.0:{port}  postgres {database_url}  tag={tag}", flush=True)
+        print("waiting for the master. Ctrl-C to stop.", flush=True)
+        try:
+            while not stop.is_set():
+                srv.settimeout(1.0)
+                try:
+                    client, addr = srv.accept()
+                except socket.timeout:
+                    continue
+                print(f"master connected from {addr[0]}:{addr[1]}", flush=True)
+                client.settimeout(30.0)
+                buf = b""
+                try:
+                    while not stop.is_set():
+                        try:
+                            chunk = client.recv(2048)
+                        except socket.timeout:
+                            continue
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while b"\n" in buf:
+                            raw, buf = buf.split(b"\n", 1)
+                            raw = raw.strip()
+                            if not raw:
+                                continue
+                            samples.put((json.loads(raw.decode("utf-8")), addr[0]))
+                except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
+                    print(f"link dropped ({exc})", flush=True)
+                finally:
+                    client.close()
+                    print("master disconnected; still listening", flush=True)
+        finally:
+            srv.close()
+
+    threading.Thread(target=accept_loop, daemon=True).start()
     n = 0
     session_id = None
     try:
@@ -114,50 +185,35 @@ def listen_push(port: int, database_url: str, tag: str) -> int:
                 session_id = cur.fetchone()[0]
             conn.commit()
             while True:
-                srv.settimeout(1.0)
-                try:
-                    client, addr = srv.accept()
-                except socket.timeout:
-                    continue
-                print(f"master connected from {addr[0]}:{addr[1]}", flush=True)
-                client.settimeout(30.0)
-                buf = b""
-                try:
-                    while True:
-                        try:
-                            chunk = client.recv(2048)
-                        except socket.timeout:
-                            continue
-                        if not chunk:
-                            break
-                        buf += chunk
-                        while b"\n" in buf:
-                            raw, buf = buf.split(b"\n", 1)
-                            raw = raw.strip()
-                            if not raw:
-                                continue
-                            status = json.loads(raw.decode("utf-8"))
-                            with conn.cursor() as cur:
-                                insert_status(cur, session_id, status)
-                            n += 1
-                            if n % 20 == 0:
-                                conn.commit()
-                                links = status.get("links") or [{}, {}, {}]
-                                print(
-                                    f"rows={n}  room={status.get('room')} moving={status.get('moving')}  "
-                                    f"from {addr[0]}",
-                                    flush=True,
-                                )
-                except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
-                    print(f"link dropped ({exc})")
-                finally:
+                if labeler is not None:
+                    labeler.poll()
+                cv_occupied = camera_label(labeler)
+                drained = False
+                while True:
+                    try:
+                        status, src = samples.get_nowait()
+                    except queue.Empty:
+                        break
+                    drained = True
+                    with conn.cursor() as cur:
+                        insert_status(cur, session_id, status, cv_occupied)
+                    n += 1
+                    if n % 20 == 0:
+                        print(
+                            f"rows={n}  room={status.get('room')} moving={status.get('moving')}  "
+                            f"cv={_cv_word(cv_occupied)}  from {src}",
+                            flush=True,
+                        )
+                if drained:
                     conn.commit()
-                    client.close()
-                    print("master disconnected; still listening", flush=True)
+                else:
+                    time.sleep(0.02)
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
-        srv.close()
+        stop.set()
+        if labeler is not None:
+            labeler.stop()
         if session_id is not None:
             try:
                 with psycopg.connect(database_url, autocommit=True) as conn:
@@ -185,10 +241,18 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="TCP port the master pushes to (9056). Mini stays on Ethernet.",
     )
+    p.add_argument(
+        "--camera",
+        default=DEFAULT_CAMERA,
+        help="ESP camera MJPEG/RTSP for ground truth, or 'off'",
+    )
+    p.add_argument("--no-preview", action="store_true", help="skip the camera window")
     args = p.parse_args(argv)
     tag = args.session or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if args.listen:
-        return listen_push(args.listen, args.database_url, tag)
+        return listen_push(
+            args.listen, args.database_url, tag, args.camera, not args.no_preview
+        )
 
     try:
         probe = fetch_status(args.master, timeout=2.0)
@@ -240,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                 links = status.get("links") or []
                 l1, l2, l3 = (link_fields(links, i) for i in range(3))
                 with conn.cursor() as cur:
-                    insert_status(cur, session_id, status)
+                    insert_status(cur, session_id, status, None)
                 n += 1
                 if n % 20 == 0:
                     conn.commit()

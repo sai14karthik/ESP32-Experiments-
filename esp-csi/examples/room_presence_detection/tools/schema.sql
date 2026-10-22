@@ -32,8 +32,12 @@ CREATE TABLE IF NOT EXISTS room_presence_samples (
     l3_room       SMALLINT,
     l3_move       SMALLINT,
     l3_wander     REAL,
-    l3_jitter     REAL
+    l3_jitter     REAL,
+    cv_occupied   SMALLINT
 );
+
+ALTER TABLE room_presence_samples
+    ADD COLUMN IF NOT EXISTS cv_occupied SMALLINT;
 
 CREATE INDEX IF NOT EXISTS room_presence_samples_session_ts_idx
     ON room_presence_samples (session_id, host_ts);

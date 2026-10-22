@@ -72,12 +72,12 @@ Edit `CONFIG_SLAVE_NODE_ID` in source before each slave flash (`-D` does not rea
 
 All four boards join lab Wi-Fi `LabHealthSecurePSK` and follow that access point’s channel. The master pushes the three-link status to the Mini at `10.128.93.13` port `9056`. The Mini stays on Ethernet.
 
-Phone page is still RoomSensor / `12345678` (same radio channel as the lab AP).
+The phone page on lab Wi-Fi is `http://10.128.93.25`.
 
-On the Mini:
+On the Mini, the same command stores board status and a camera ground-truth label (`cv_occupied`: 0 empty, 1 occupied) from YOLO26-pose on `http://10.128.93.15:81/stream`:
 
 ```bash
-./tools/collect_to_mini.sh --session empty_01
+./tools/collect_to_mini.sh --session pipeline_test
 ```
 
-Rows land in Postgres database `csi`, tables `room_presence_sessions` and `room_presence_samples`. Flash all four boards before powering the set; a mix of old channel-11 firmware and this build will not see each other.
+Rows land in Postgres database `csi`, tables `room_presence_sessions` and `room_presence_samples`. A line like `rows=20 ... cv=occupied` means the camera label is being saved. Flash all four boards before powering the set; a mix of old channel-11 firmware and this build will not see each other.
