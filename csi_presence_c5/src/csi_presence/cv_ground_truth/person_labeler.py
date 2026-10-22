@@ -57,7 +57,24 @@ class PersonLabeler:
         return str(self.profile["model"])
 
     def start(self) -> None:
+        import logging
+
         from ultralytics import YOLO
+
+        class _PlainPrefix(logging.Formatter):
+            def format(self, record: logging.LogRecord) -> str:
+                original = record.msg
+                try:
+                    if record.levelno == logging.WARNING and isinstance(original, str):
+                        record.msg = f"WARNING {original}"
+                    elif record.levelno == logging.ERROR and isinstance(original, str):
+                        record.msg = f"ERROR {original}"
+                    return super().format(record)
+                finally:
+                    record.msg = original
+
+        for handler in logging.getLogger("ultralytics").handlers:
+            handler.setFormatter(_PlainPrefix("%(message)s"))
 
         print(
             f"[cv] presence GT from healthcare YOLO pipeline | "
