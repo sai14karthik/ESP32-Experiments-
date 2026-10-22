@@ -6,10 +6,9 @@ Run this after collection, on the Mini, with the collector stopped:
   ./tools/train_room.sh
   ./tools/train_room.sh --holdout empty_02
 
-Rows are already labeled by the camera (cv_occupied 0 or 1). This script
-groups them into 1-second windows, concatenates the three receivers, and
-fits one model. It does not listen on :9057 and it does not update itself
-while a session is still being recorded.
+Only session tags named empty_* or occupied_* are used (empty_01, occupied_02).
+Other tags, including pipeline_test, are ignored. Inside empty_* only camera
+label 0 is kept. Inside occupied_* only camera label 1 is kept.
 """
 
 from __future__ import annotations
@@ -145,39 +144,61 @@ def fuse_session(
     )
 
 
+def tag_label(tag: str | None) -> int | None:
+    """0 for empty_*, 1 for occupied_*. Anything else is not a training session."""
+    if tag is None:
+        return None
+    if tag.startswith("empty_"):
+        return 0
+    if tag.startswith("occupied_"):
+        return 1
+    return None
+
+
 def load_sessions(url: str, tags: list[str] | None) -> list[tuple[str, dict]]:
     import psycopg
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:
         if tags:
+            skipped = [tag for tag in tags if tag_label(tag) is None]
+            for tag in skipped:
+                print(f"skip {tag}  (name must be empty_* or occupied_*)")
+            wanted = [tag for tag in tags if tag_label(tag) is not None]
+            if not wanted:
+                return []
             cur.execute(
                 """
                 SELECT id, tag, started_at
                 FROM room_presence_sessions
                 WHERE tag = ANY(%s)
+                  AND tag ~ '^(empty|occupied)_'
                 ORDER BY started_at
                 """,
-                (tags,),
+                (wanted,),
             )
         else:
             cur.execute(
                 """
                 SELECT id, tag, started_at
                 FROM room_presence_sessions
+                WHERE tag ~ '^(empty|occupied)_'
                 ORDER BY started_at
                 """
             )
         sessions = cur.fetchall()
         loaded: list[tuple[str, dict]] = []
         for sid, tag, started in sessions:
+            label = tag_label(tag)
+            if label is None:
+                continue
             cur.execute(
                 """
                 SELECT node_id, host_ts, rssi, iq, cv_occupied
                 FROM room_presence_csi
-                WHERE session_id = %s AND cv_occupied IS NOT NULL
+                WHERE session_id = %s AND cv_occupied = %s
                 ORDER BY node_id, host_ts
                 """,
-                (sid,),
+                (sid, label),
             )
             by_node: dict[int, list] = defaultdict(list)
             for node, host_ts, rssi, iq, cv in cur:
@@ -251,7 +272,7 @@ def train(
 ) -> int:
     loaded = load_sessions(url, tags)
     if not loaded:
-        print("no room_presence sessions in postgres")
+        print("no empty_* or occupied_* sessions in postgres")
         return 1
 
     blocks: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
@@ -345,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         "--session",
         action="append",
         default=None,
-        help="session tag to include (repeat for each). Default: every stored session.",
+        help="empty_* or occupied_* tag to include (repeat for each). Default: all of those.",
     )
     p.add_argument(
         "--holdout",
