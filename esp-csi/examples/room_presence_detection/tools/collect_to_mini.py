@@ -183,6 +183,39 @@ def _cv_word(cv_occupied: int | None) -> str:
     return "occupied" if cv_occupied else "empty"
 
 
+class FlipGate:
+    """Fire once when empty↔occupied holds for FLIP_HOLD_SEC.
+
+    The first stable label does not delete anything. A flicker shorter than
+    the hold, or a return to the previous label, cancels the pending delete.
+    """
+
+    def __init__(self) -> None:
+        self.stable: int | None = None
+        self.pending: int | None = None
+        self.pending_since = 0.0
+
+    def observe(self, cv: int | None, now: float) -> tuple[str, float]:
+        if cv is None:
+            return "ignore", 0.0
+        if self.stable is None:
+            self.stable = cv
+            return "init", 0.0
+        if cv == self.stable:
+            self.pending = None
+            return "same", 0.0
+        if self.pending != cv:
+            self.pending = cv
+            self.pending_since = now
+            return "wait", 0.0
+        hold = now - self.pending_since
+        if hold < FLIP_HOLD_SEC:
+            return "wait", 0.0
+        self.stable = cv
+        self.pending = None
+        return "purge", hold
+
+
 def purge_before_flip(cur, session_id, *, hold_sec: float) -> tuple[int, int]:
     """Delete this session's rows in the 5 minutes before the label flipped.
 
@@ -311,9 +344,7 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
     n = 0
     csi_n = 0
     session_id = None
-    stable_cv: int | None = None
-    pending_cv: int | None = None
-    pending_since = 0.0
+    gate = FlipGate()
     try:
         with psycopg.connect(database_url, autocommit=False) as conn:
             apply_schema(conn)
@@ -332,33 +363,23 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                 if labeler is not None:
                     labeler.poll()
                 cv_occupied = camera_label(labeler)
+                action, hold = gate.observe(cv_occupied, time.time())
                 purged = False
-                if cv_occupied is not None and stable_cv is None:
-                    stable_cv = cv_occupied
+                if action == "init":
                     print(f"cv stable {_cv_word(cv_occupied)}", flush=True)
-                elif cv_occupied is not None and cv_occupied == stable_cv:
-                    pending_cv = None
-                elif cv_occupied is not None and cv_occupied != stable_cv:
-                    now_flip = time.time()
-                    if pending_cv != cv_occupied:
-                        pending_cv = cv_occupied
-                        pending_since = now_flip
-                    elif now_flip - pending_since >= FLIP_HOLD_SEC:
-                        hold = now_flip - pending_since
-                        with conn.cursor() as cur:
-                            csi_deleted, status_deleted = purge_before_flip(
-                                cur, session_id, hold_sec=hold
-                            )
-                        csi_n = max(0, csi_n - csi_deleted)
-                        n = max(0, n - status_deleted)
-                        print(
-                            f"cv {_cv_word(stable_cv)} → {_cv_word(cv_occupied)}  "
-                            f"deleted last 5 min  csi={csi_deleted}  status={status_deleted}",
-                            flush=True,
+                elif action == "purge":
+                    with conn.cursor() as cur:
+                        csi_deleted, status_deleted = purge_before_flip(
+                            cur, session_id, hold_sec=hold
                         )
-                        stable_cv = cv_occupied
-                        pending_cv = None
-                        purged = True
+                    csi_n = max(0, csi_n - csi_deleted)
+                    n = max(0, n - status_deleted)
+                    print(
+                        f"cv {_cv_word(1 - cv_occupied)} → {_cv_word(cv_occupied)}  "
+                        f"deleted last 5 min  csi={csi_deleted}  status={status_deleted}",
+                        flush=True,
+                    )
+                    purged = True
                 drained = False
                 while True:
                     try:
