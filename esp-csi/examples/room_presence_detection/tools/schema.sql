@@ -41,3 +41,20 @@ ALTER TABLE room_presence_samples
 
 CREATE INDEX IF NOT EXISTS room_presence_samples_session_ts_idx
     ON room_presence_samples (session_id, host_ts);
+
+CREATE TABLE IF NOT EXISTS room_presence_csi (
+    id            BIGSERIAL PRIMARY KEY,
+    session_id    UUID NOT NULL REFERENCES room_presence_sessions (id) ON DELETE CASCADE,
+    host_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    source_id     TEXT,
+    node_id       SMALLINT,
+    seq           INTEGER,
+    mac           TEXT,
+    rssi          SMALLINT,
+    channel       SMALLINT,
+    iq            SMALLINT[],
+    cv_occupied   SMALLINT
+);
+
+CREATE INDEX IF NOT EXISTS room_presence_csi_session_ts_idx
+    ON room_presence_csi (session_id, host_ts);

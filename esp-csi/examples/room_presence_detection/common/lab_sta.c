@@ -1,5 +1,6 @@
 #include "lab_sta.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
@@ -195,4 +196,12 @@ void lab_report_start(lab_report_fill_fn fill, void *ctx)
     if (xTaskCreate(lab_report_task, "lab_report", 6144, args, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "report task failed");
     }
+}
+
+bool lab_wifi_ready(void)
+{
+    if (s_wifi == NULL) {
+        return false;
+    }
+    return (xEventGroupGetBits(s_wifi) & CONNECTED_BIT) != 0;
 }

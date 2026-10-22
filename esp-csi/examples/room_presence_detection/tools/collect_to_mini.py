@@ -25,6 +25,7 @@ SCHEMA = Path(__file__).resolve().parent / "schema.sql"
 DEFAULT_MASTER = "http://192.168.4.1"
 DEFAULT_DB = "postgresql:///csi"
 DEFAULT_CAMERA = "http://10.128.93.15:81/stream"
+CSI_PORT = 9057
 
 
 def fetch_status(master: str, timeout: float = 0.8) -> dict:
@@ -114,6 +115,62 @@ def camera_label(labeler, window_sec: float = 1.5) -> int | None:
     return 1 if labeler.recent_occupied(window_sec) else 0
 
 
+# HT20 ESP-NOW from the sender: 112 int8 samples = 56 complex HT-LTF taps.
+HT20_IQ_LEN = 112
+TX_MAC = "1a:00:00:00:00:00"
+
+
+def parse_csi_line(line: str) -> dict | None:
+    """CSI,<node>,<seq>,<mac>,<rssi>,<channel>,ht,<n>,i,q,..."""
+    if not line.startswith("CSI,"):
+        return None
+    parts = line.split(",")
+    if len(parts) < 9 or parts[6] != "ht":
+        return None
+    try:
+        n = int(parts[7])
+        iq = [int(x) for x in parts[8 : 8 + n]]
+        node = int(parts[1])
+        seq = int(parts[2])
+        rssi = int(parts[4])
+        channel = int(parts[5])
+    except ValueError:
+        return None
+    if n != len(iq) or n < 8 or n % 2 != 0:
+        return None
+    if any(v < -32768 or v > 32767 for v in iq):
+        return None
+    return {
+        "node": node,
+        "seq": seq,
+        "mac": parts[3].lower(),
+        "rssi": rssi,
+        "channel": channel,
+        "iq": iq,
+    }
+
+
+def insert_csi(cur, session_id, sample: dict, source: str, cv_occupied: int | None) -> None:
+    cur.execute(
+        """
+        INSERT INTO room_presence_csi (
+            session_id, source_id, node_id, seq, mac, rssi, channel, iq, cv_occupied
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            session_id,
+            source,
+            sample["node"],
+            sample["seq"],
+            sample["mac"],
+            sample["rssi"],
+            sample["channel"],
+            sample["iq"],
+            cv_occupied,
+        ),
+    )
+
+
 def _cv_word(cv_occupied: int | None) -> str:
     if cv_occupied is None:
         return "waiting"
@@ -125,6 +182,7 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
 
     labeler = None if camera == "off" else start_camera(camera, preview)
     samples: queue.Queue = queue.Queue()
+    csi_q: queue.Queue = queue.Queue(maxsize=500)
     stop = threading.Event()
 
     def accept_loop() -> None:
@@ -167,8 +225,57 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
         finally:
             srv.close()
 
+    def accept_csi() -> None:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", CSI_PORT))
+        srv.listen(8)
+        print(f"listening 0.0.0.0:{CSI_PORT} for CSI", flush=True)
+
+        def read_client(client: socket.socket, addr) -> None:
+            client.settimeout(30.0)
+            buf = b""
+            try:
+                while not stop.is_set():
+                    try:
+                        chunk = client.recv(8192)
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        raw, buf = buf.split(b"\n", 1)
+                        sample = parse_csi_line(raw.decode("utf-8", "replace").strip())
+                        if sample is None:
+                            continue
+                        try:
+                            csi_q.put_nowait((sample, addr[0]))
+                        except queue.Full:
+                            pass
+                    if len(buf) > 65536:
+                        buf = b""
+            except OSError as exc:
+                print(f"csi link {addr[0]} dropped ({exc})", flush=True)
+            finally:
+                client.close()
+
+        try:
+            while not stop.is_set():
+                srv.settimeout(1.0)
+                try:
+                    client, addr = srv.accept()
+                except socket.timeout:
+                    continue
+                print(f"csi connected from {addr[0]}:{addr[1]}", flush=True)
+                threading.Thread(target=read_client, args=(client, addr), daemon=True).start()
+        finally:
+            srv.close()
+
     threading.Thread(target=accept_loop, daemon=True).start()
+    threading.Thread(target=accept_csi, daemon=True).start()
     n = 0
+    csi_n = 0
     session_id = None
     try:
         with psycopg.connect(database_url, autocommit=False) as conn:
@@ -204,7 +311,28 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                             f"cv={_cv_word(cv_occupied)}  from {src}",
                             flush=True,
                         )
-                if drained:
+                got_csi = False
+                for _ in range(80):
+                    try:
+                        sample, src = csi_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    got_csi = True
+                    with conn.cursor() as cur:
+                        insert_csi(cur, session_id, sample, src, cv_occupied)
+                    csi_n += 1
+                    if csi_n % 100 == 0:
+                        good = (
+                            len(sample["iq"]) == HT20_IQ_LEN
+                            and sample["mac"] == TX_MAC
+                        )
+                        print(
+                            f"csi={csi_n}  node={sample['node']}  iq={len(sample['iq'])}  "
+                            f"mac={sample['mac']}  ch={sample['channel']}  "
+                            f"cv={_cv_word(cv_occupied)}  {'ok' if good else 'WRONG'}  from {src}",
+                            flush=True,
+                        )
+                if drained or got_csi:
                     conn.commit()
                 else:
                     time.sleep(0.02)
@@ -224,8 +352,8 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                         )
             except Exception as exc:
                 print(f"could not mark session ended: {exc}")
-    print(f"stored {n} rows  tag={tag}")
-    return 0 if n else 1
+    print(f"stored {n} status rows  {csi_n} csi rows  tag={tag}")
+    return 0 if (n or csi_n) else 1
 
 
 def main(argv: list[str] | None = None) -> int:

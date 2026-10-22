@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #include "esp_err.h"
 
 /**
@@ -16,3 +18,11 @@ typedef void (*lab_report_fill_fn)(char *buf, size_t buflen, void *ctx);
 
 /** Master only: push one status line per tick to the Mini. */
 void lab_report_start(lab_report_fill_fn fill, void *ctx);
+
+/** Copy one CSI frame. Register as the esp-radar filtered callback. */
+void lab_csi_filtered_cb(void *ctx, const void *info);
+/** node_id 0 = master, 1 = RX2, 2 = RX3. Pushes CSI lines to the Mini. */
+void lab_csi_start(uint8_t node_id);
+
+/** True after the lab STA has an IP. */
+bool lab_wifi_ready(void);

@@ -80,4 +80,4 @@ On the Mini, the same command stores board status and a camera ground-truth labe
 ./tools/collect_to_mini.sh --session pipeline_test
 ```
 
-Rows land in Postgres database `csi`, tables `room_presence_sessions` and `room_presence_samples`. A line like `rows=20 ... cv=occupied` means the camera label is being saved. Flash all four boards before powering the set; a mix of old channel-11 firmware and this build will not see each other.
+Rows land in Postgres database `csi`. `room_presence_samples` is the presence summary. `room_presence_csi` is the CSI I/Q from RX1 (node 0), RX2 (node 1), and RX3 (node 2), each with `cv_occupied`. A line like `csi=100 node=0 iq=... cv=occupied` means CSI is being saved. The receivers push CSI to port `9057`. Flash all four boards before powering the set; a mix of old channel-11 firmware and this build will not see each other.

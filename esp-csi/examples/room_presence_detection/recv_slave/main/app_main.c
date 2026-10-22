@@ -497,6 +497,7 @@ static void wifi_radar_init(void)
     esp_radar_csi_config_t csi_config = ESP_RADAR_CSI_CONFIG_DEFAULT();
     memcpy(csi_config.filter_mac, CONFIG_CSI_SEND_MAC, 6);
     csi_config.csi_recv_interval = 10;  /* 100Hz */
+    csi_config.csi_filtered_cb = (wifi_csi_filtered_cb_t)lab_csi_filtered_cb;
     
     /* ESP-NOW configuration */
     esp_radar_espnow_config_t espnow_config = ESP_RADAR_ESPNOW_CONFIG_DEFAULT();
@@ -575,7 +576,8 @@ void app_main(void)
     
     /* Start radar processing */
     ESP_ERROR_CHECK(esp_radar_start());
-    
+    lab_csi_start(g_node_id);
+
     ESP_LOGI(TAG, "Slave receiver started, waiting for CSI data...");
     
     /* Main task just keeps running, all work is done in callbacks */

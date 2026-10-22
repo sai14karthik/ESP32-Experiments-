@@ -1053,6 +1053,7 @@ static void radar_init(void)
     esp_radar_csi_config_t csi_config = ESP_RADAR_CSI_CONFIG_DEFAULT();
     memcpy(csi_config.filter_mac, CONFIG_CSI_SEND_MAC, 6);
     csi_config.csi_recv_interval = 10;
+    csi_config.csi_filtered_cb = (wifi_csi_filtered_cb_t)lab_csi_filtered_cb;
 
     esp_radar_dec_config_t dec_config = ESP_RADAR_DEC_CONFIG_DEFAULT();
     dec_config.wifi_radar_cb_ex = wifi_radar_cb_ex;
@@ -1129,6 +1130,7 @@ void app_main(void)
     /* Start WebSocket broadcast task */
     xTaskCreate(ws_broadcast_task, "ws_broadcast", 4096, NULL, 5, NULL);
     lab_report_start(lab_fill_status, NULL);
+    lab_csi_start(0);
     
     ESP_LOGI(TAG, "Master receiver started");
     ESP_LOGI(TAG, "Connect to WiFi '%s' and open http://192.168.4.1", CONFIG_AP_SSID);
