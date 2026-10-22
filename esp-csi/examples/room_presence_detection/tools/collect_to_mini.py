@@ -24,7 +24,8 @@ from pathlib import Path
 SCHEMA = Path(__file__).resolve().parent / "schema.sql"
 DEFAULT_MASTER = "http://192.168.4.1"
 DEFAULT_DB = "postgresql:///csi"
-DEFAULT_CAMERA = "http://10.128.93.15:81/stream"
+# MediaMTX already holds the ESP :81/stream (one client). Read the relay on the Mini.
+DEFAULT_CAMERA = "rtsp://127.0.0.1:8554/cam_sense"
 CSI_PORT = 9057
 
 
