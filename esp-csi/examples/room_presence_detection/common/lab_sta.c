@@ -8,6 +8,7 @@
 #include "freertos/event_groups.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
@@ -53,12 +54,25 @@ esp_err_t lab_sta_connect(void)
     strncpy((char *)sta.sta.ssid, LAB_WIFI_SSID, sizeof(sta.sta.ssid) - 1);
     strncpy((char *)sta.sta.password, LAB_WIFI_PASS, sizeof(sta.sta.password) - 1);
     sta.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    sta.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     sta.sta.pmf_cfg.capable = true;
     sta.sta.pmf_cfg.required = false;
+#ifdef LAB_WIFI_BSSID
+    /* One access point for every board. Same SSID has several radios. */
+    {
+        uint8_t bssid[6] = LAB_WIFI_BSSID;
+        memcpy(sta.sta.bssid, bssid, 6);
+    }
+    sta.sta.bssid_set = true;
+    sta.sta.channel = LAB_WIFI_CHANNEL;
+    sta.sta.scan_method = WIFI_FAST_SCAN;
+    ESP_LOGI(TAG, "joining %s  locked to " MACSTR " channel %d",
+             LAB_WIFI_SSID, MAC2STR(sta.sta.bssid), LAB_WIFI_CHANNEL);
+#else
+    sta.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    ESP_LOGI(TAG, "joining %s", LAB_WIFI_SSID);
+#endif
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-    ESP_LOGI(TAG, "joining %s", LAB_WIFI_SSID);
     esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
         ESP_LOGE(TAG, "connect failed: %s", esp_err_to_name(err));
