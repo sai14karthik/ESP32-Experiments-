@@ -10,8 +10,11 @@ Session tags named empty_* or occupied_* choose which runs to load.
 pipeline_test and every other tag are ignored. The label on each row is the
 camera value cv_occupied, not the session name.
 
-The score is leave-one-session-out. A saved model is trustworthy only after
-that test has seen both an empty session and an occupied session, the model
+Each window carries gain-normalized amplitude, sanitized phase, how far the
+amplitude shape sits from the camera-empty median, and the short correlation
+and slope terms from csi_pipeline_new version 4. Raw phase and RSSI are not
+features. The score is leave-one-session-out. A saved model is trustworthy
+only after that test has seen both an empty session and an occupied session, the model
 beats RSSI alone, and empty sessions are not separable from each other.
 """
 
@@ -30,7 +33,9 @@ DEFAULT_DB = "postgresql:///csi"
 DEFAULT_MODEL = HERE / "models" / "room_presence.joblib"
 N_SC = 56
 IQ_LEN = N_SC * 2
-DEAD_BIN = N_SC // 2
+# The stored 112 bytes are the valid HT-LTF only. The DC null is already
+# removed, leaving 28 lower tones and 28 upper tones.
+HALF = N_SC // 2
 WINDOW_SEC = 1.0
 HOP_SEC = 0.25
 MIN_PACKETS = 30
@@ -41,43 +46,163 @@ MIN_SPAN_SEC = 0.5
 MAX_GAP_SEC = 0.75
 MIN_WINDOWS = 50
 NODE_IDS = (0, 1, 2)
-# mean[56] + std[56] + motion + present flag
-NODE_DIM = N_SC + N_SC + 2
+# Per receiver, before the empty-room delta is appended:
+# amp mean, amp std, amp end-start, sanitized phase mean, sanitized phase std,
+# then energy slope, motion, adjacent-tap correlation, frame correlation,
+# center-band ratio, and a present flag.
+_SCALARS = 6
+NODE_DIM = N_SC * 5 + _SCALARS
+PRESENT_AT = NODE_DIM - 1
+FEATURE_VERSION = 4
+_EPS = 1e-6
 
 
-def _amp(iq) -> np.ndarray | None:
+def _hampel(x: np.ndarray, half: int = 3) -> np.ndarray:
+    """Replace a tap that disagrees with its neighbors. A real shape is kept."""
+    out = x.copy()
+    n = x.size
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        neigh = x[lo:hi]
+        med = float(np.median(neigh))
+        mad = float(np.median(np.abs(neigh - med)))
+        limit = _EPS if mad < _EPS else 3.0 * 1.4826 * mad
+        if abs(float(x[i]) - med) > limit:
+            out[i] = med
+    return out
+
+
+def _corr(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size < 4 or float(np.std(a)) < _EPS or float(np.std(b)) < _EPS:
+        return 0.0
+    value = float(np.corrcoef(a, b)[0, 1])
+    if value != value:
+        return 0.0
+    return value
+
+
+def _packet(iq) -> tuple[np.ndarray, np.ndarray] | None:
+    """Gain-normalized amplitude and phase with the linear clock trend removed.
+
+    Firmware order is imaginary, real. Raw phase is not returned.
+    """
     vals = np.asarray(iq, dtype=np.float64)
     if vals.size != IQ_LEN:
         return None
-    amp = np.hypot(vals[0::2], vals[1::2])
+    im = vals[0::2]
+    re = vals[1::2]
+    amp = np.hypot(im, re)
     if amp.shape != (N_SC,):
         return None
-    active = np.ones(N_SC, dtype=bool)
-    active[DEAD_BIN] = False
-    scale = float(amp[active].mean())
-    if scale < 1e-9:
+    cleaned = amp.copy()
+    # The removed DC bin sits between the two halves. A spike filter must
+    # not treat those neighbors as adjacent.
+    cleaned[:HALF] = _hampel(amp[:HALF])
+    cleaned[HALF:] = _hampel(amp[HALF:])
+    scale = float(cleaned.mean())
+    if scale < _EPS:
         return None
-    amp = amp / scale
-    amp[~active] = 0.0
-    return amp
+    amp = cleaned / scale
+
+    raw = np.arctan2(im, re)
+    # Each half is continuous. Join them across the missing DC bin so one
+    # clock line fits both.
+    y_lo = np.unwrap(raw[:HALF])
+    y_hi = np.unwrap(raw[HALF:])
+    step = float(y_lo[-1] - y_lo[-2]) if y_lo.size >= 2 else 0.0
+    expected = float(y_lo[-1] + 2.0 * step)
+    y_hi = y_hi + (2.0 * math.pi * round((expected - float(y_hi[0])) / (2.0 * math.pi)))
+    y = np.concatenate([y_lo, y_hi])
+    x = np.concatenate(
+        [np.arange(HALF, dtype=np.float64), np.arange(HALF + 1, N_SC + 1, dtype=np.float64)]
+    )
+    phase = np.zeros(N_SC, dtype=np.float64)
+    if float(np.std(y)) >= _EPS:
+        trend = np.polyval(np.polyfit(x, y, 1), x)
+        delta = y - trend
+        phase = np.arctan2(np.sin(delta), np.cos(delta))
+    return amp, phase
 
 
-def node_features(amps: np.ndarray) -> np.ndarray:
-    """One receiver, one second. amps shape (packets, 56)."""
+def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
+    """One receiver, one second. Baseline delta is added later, from empty windows only."""
     mean = amps.mean(axis=0)
     std = amps.std(axis=0)
-    motion = float(np.abs(np.diff(amps, axis=0)).mean()) if amps.shape[0] > 1 else 0.0
+    delta = amps[-1] - amps[0]
+    energy = amps.sum(axis=1)
+    t = np.arange(amps.shape[0], dtype=np.float64)
+    if amps.shape[0] > 1 and float(np.std(t)) > _EPS:
+        energy_slope = float(np.polyfit(t, energy, 1)[0])
+        motion = float(np.abs(np.diff(amps, axis=0)).mean())
+    else:
+        energy_slope = 0.0
+        motion = 0.0
+    adjacent = float(
+        np.mean(
+            [
+                _corr(mean[:HALF][:-1], mean[:HALF][1:]),
+                _corr(mean[HALF:][:-1], mean[HALF:][1:]),
+            ]
+        )
+    )
+    step = max(1, amps.shape[0] // 40)
+    pairs = [
+        _corr(amps[i], amps[i + step])
+        for i in range(0, amps.shape[0] - step, step)
+    ]
+    temporal = float(np.mean(pairs)) if pairs else 0.0
+    lo, hi = max(0, HALF - 8), min(N_SC, HALF + 8)
+    edges = np.concatenate([mean[:8], mean[-8:]])
+    band_ratio = float(mean[lo:hi].mean() / (float(edges.mean()) + _EPS))
     feat = np.concatenate(
-        [mean, std, np.array([motion, 1.0], dtype=np.float64)]
+        [
+            mean,
+            std,
+            delta,
+            phases.mean(axis=0),
+            phases.std(axis=0),
+            np.array(
+                [energy_slope, motion, adjacent, temporal, band_ratio, 1.0],
+                dtype=np.float64,
+            ),
+        ]
     )
     assert feat.shape == (NODE_DIM,)
     return feat
 
 
+def empty_baselines(x: np.ndarray, empty: np.ndarray) -> np.ndarray:
+    """Median amplitude shape per receiver, from camera-empty windows only."""
+    bases = []
+    for node in NODE_IDS:
+        start = node * NODE_DIM
+        present = x[:, start + PRESENT_AT] > 0.5
+        use = present & empty
+        if not np.any(use):
+            bases.append(np.ones(N_SC, dtype=np.float64))
+        else:
+            bases.append(np.median(x[use, start : start + N_SC], axis=0))
+    return np.stack(bases)
+
+
+def with_baseline(x: np.ndarray, bases: np.ndarray) -> np.ndarray:
+    """Append how far each receiver's amplitude shape sits from the empty room."""
+    deltas = []
+    for node in NODE_IDS:
+        start = node * NODE_DIM
+        mean = x[:, start : start + N_SC]
+        present = x[:, start + PRESENT_AT] > 0.5
+        delta = (mean - bases[node]) / (bases[node] + _EPS)
+        delta[~present] = 0.0
+        deltas.append(delta)
+    return np.hstack([x, *deltas])
+
+
 def _windows_for_node(
-    packets: list[tuple[float, np.ndarray, float, int]],
+    packets: list[tuple[float, np.ndarray, np.ndarray, float, int]],
 ) -> dict[int, tuple[np.ndarray, int, float]]:
-    """Map hop-bin -> (features, label, mean rssi). Packets are time-sorted."""
+    """Map hop-bin -> (features, camera label, mean rssi). Packets are time-sorted."""
     if not packets:
         return {}
     t_min = packets[0][0]
@@ -111,17 +236,18 @@ def _windows_for_node(
         ]
         if gaps and max(gaps) > MAX_GAP_SEC:
             continue
-        labels = {row[3] for row in chunk}
+        labels = {row[4] for row in chunk}
         if labels != {0} and labels != {1}:
             continue
         amps = np.stack([row[1] for row in chunk], axis=0)
-        rssi = float(np.mean([row[2] for row in chunk]))
-        out[b] = (node_features(amps), next(iter(labels)), rssi)
+        phases = np.stack([row[2] for row in chunk], axis=0)
+        rssi = float(np.mean([row[3] for row in chunk]))
+        out[b] = (node_features(amps, phases), next(iter(labels)), rssi)
     return out
 
 
 def fuse_session(
-    by_node: dict[int, list[tuple[float, np.ndarray, float, int]]],
+    by_node: dict[int, list[tuple[float, np.ndarray, np.ndarray, float, int]]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Concatenate receivers that share a 1-second bin. Need at least two."""
     per_node = {node: _windows_for_node(rows) for node, rows in by_node.items()}
@@ -212,7 +338,7 @@ def load_sessions(url: str, tags: list[str] | None) -> list[tuple[str, dict]]:
                 SELECT node_id, host_ts, rssi, iq, cv_occupied
                 FROM room_presence_csi
                 WHERE session_id = %s AND cv_occupied IN (0, 1)
-                ORDER BY node_id, host_ts
+                ORDER BY node_id, host_ts, seq
                 """,
                 (sid,),
             )
@@ -220,11 +346,12 @@ def load_sessions(url: str, tags: list[str] | None) -> list[tuple[str, dict]]:
             for node, host_ts, rssi, iq, cv in cur:
                 if node not in NODE_IDS or iq is None:
                     continue
-                amp = _amp(iq)
-                if amp is None:
+                parsed = _packet(iq)
+                if parsed is None:
                     continue
+                amp, phase = parsed
                 by_node[int(node)].append(
-                    (host_ts.timestamp(), amp, float(rssi or 0), int(cv))
+                    (host_ts.timestamp(), amp, phase, float(rssi or 0), int(cv))
                 )
             name = tag or started.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             loaded.append((name, started, by_node))
@@ -328,12 +455,10 @@ def _leave_one_session_out(blocks: list[Block], seed: int) -> list[dict]:
             print(f"loo {tag}  skipped  (the other sessions are one class)")
             reports.append({"tag": tag, "skipped": True, "labels": labels})
             continue
-        model = _fit(
-            np.vstack([b[1] for b in rest]),
-            y_tr,
-            seed,
-        )
-        pred = model.predict(x_te)
+        x_tr = np.vstack([b[1] for b in rest])
+        bases = empty_baselines(x_tr, y_tr == 0)
+        model = _fit(with_baseline(x_tr, bases), y_tr, seed)
+        pred = model.predict(with_baseline(x_te, bases))
         score = _cv_score(y_te, pred)
         rule = _rssi_rule(
             np.concatenate([b[3] for b in rest]),
@@ -390,8 +515,10 @@ def _negative_control(blocks: list[Block], seed: int) -> float | None:
     yte = np.concatenate(y_te)
     if len(set(ytr.tolist())) < 2 or len(set(yte.tolist())) < 2:
         return None
-    model = _fit(np.vstack(x_tr), ytr, seed)
-    return _balanced_accuracy(yte, model.predict(np.vstack(x_te)))
+    xtr = np.vstack(x_tr)
+    bases = empty_baselines(xtr, np.ones(xtr.shape[0], dtype=bool))
+    model = _fit(with_baseline(xtr, bases), ytr, seed)
+    return _balanced_accuracy(yte, model.predict(with_baseline(np.vstack(x_te), bases)))
 
 
 def train(
@@ -502,14 +629,14 @@ def train(
     if neg is not None:
         print(f"negative_control={neg:.3f}  (empty versus empty; want about 0.5)")
 
+    x_fit = np.vstack([b[1] for b in fit_blocks])
+    y_fit = np.concatenate([b[2] for b in fit_blocks])
+    bases = empty_baselines(x_fit, y_fit == 0)
+    model = _fit(with_baseline(x_fit, bases), y_fit, seed)
+
     exam_recall = None
     if exam is not None:
-        model_exam = _fit(
-            np.vstack([b[1] for b in fit_blocks]),
-            np.concatenate([b[2] for b in fit_blocks]),
-            seed,
-        )
-        exam_pred = model_exam.predict(exam[1])
+        exam_pred = model.predict(with_baseline(exam[1], bases))
         exam_recall = _cv_score(exam[2], exam_pred)
         shown = "+".join(
             "occupied" if v == 1 else "empty"
@@ -524,12 +651,6 @@ def train(
     if rssi_recalls and not beats_rssi:
         print("model did not beat RSSI alone")
     print(f"evaluation_trustworthy={trustworthy}")
-
-    model = _fit(
-        np.vstack([b[1] for b in fit_blocks]),
-        np.concatenate([b[2] for b in fit_blocks]),
-        seed,
-    )
     model_path.parent.mkdir(parents=True, exist_ok=True)
     import joblib
 
@@ -543,6 +664,8 @@ def train(
             "hop_sec": HOP_SEC,
             "node_ids": NODE_IDS,
             "node_dim": NODE_DIM,
+            "feature_version": FEATURE_VERSION,
+            "baselines": bases.tolist(),
             "iq_len": IQ_LEN,
             "min_packets": MIN_PACKETS,
             "max_gap_sec": MAX_GAP_SEC,
