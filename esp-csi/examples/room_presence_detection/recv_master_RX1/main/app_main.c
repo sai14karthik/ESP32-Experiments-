@@ -1028,10 +1028,8 @@ static void wifi_ap_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_bandwidths(WIFI_IF_STA, &bw));
     ESP_ERROR_CHECK(esp_wifi_set_bandwidths(WIFI_IF_AP, &bw));
 #endif
-    /* Lab AP picks the channel. Forcing 11 after join would drop LabHealthSecurePSK. */
-    if (lab_sta_connect() != ESP_OK) {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    }
+    /* Lab AP picks the channel for both the station and the RoomSensor page. */
+    lab_sta_connect();
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     uint8_t mac[6];
@@ -1040,7 +1038,11 @@ static void wifi_ap_init(void)
 
     esp_netif_ip_info_t ip_info;
     esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_AP_DEF"), &ip_info);
-    ESP_LOGI(TAG, "AP IP: " IPSTR, IP2STR(&ip_info.ip));
+    ESP_LOGI(TAG, "RoomSensor page: http://" IPSTR, IP2STR(&ip_info.ip));
+
+    esp_netif_ip_info_t sta_ip = {0};
+    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &sta_ip);
+    ESP_LOGI(TAG, "Lab Wi-Fi page: http://" IPSTR, IP2STR(&sta_ip.ip));
 }
 
 /**

@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_now.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
@@ -66,15 +67,31 @@ esp_err_t lab_sta_connect(void)
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi, CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
     if ((bits & CONNECTED_BIT) == 0) {
-        ESP_LOGW(TAG, "no IP from %s — staying on channel 11", LAB_WIFI_SSID);
+        ESP_LOGW(TAG, "no IP from %s yet — still retrying", LAB_WIFI_SSID);
         return ESP_ERR_TIMEOUT;
     }
 
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     uint8_t primary = 0;
     wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
     ESP_ERROR_CHECK(esp_wifi_get_channel(&primary, &second));
     ESP_LOGI(TAG, "radio channel %u (ESP-NOW follows this)", primary);
     return ESP_OK;
+}
+
+void lab_espnow_use_current_channel(const uint8_t mac[6])
+{
+    esp_now_del_peer(mac);
+    esp_now_peer_info_t peer = {
+        .channel = 0,
+        .ifidx = WIFI_IF_STA,
+        .encrypt = false,
+    };
+    memcpy(peer.peer_addr, mac, 6);
+    esp_err_t err = esp_now_add_peer(&peer);
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
+        ESP_LOGW(TAG, "ESP-NOW peer refresh failed: %s", esp_err_to_name(err));
+    }
 }
 
 static int s_sock = -1;
@@ -135,10 +152,22 @@ static void lab_report_task(void *arg)
             line[len++] = '\n';
             line[len] = '\0';
         }
-        int n = send(s_sock, line, len, 0);
-        if (n < 0) {
-            ESP_LOGW(TAG, "send failed errno=%d", errno);
-            lab_close_sock();
+        size_t sent = 0;
+        while (sent < len) {
+            int n = send(s_sock, line + sent, len - sent, 0);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                ESP_LOGW(TAG, "send failed errno=%d", errno);
+                lab_close_sock();
+                break;
+            }
+            if (n == 0) {
+                lab_close_sock();
+                break;
+            }
+            sent += (size_t)n;
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -149,7 +178,7 @@ void lab_report_start(lab_report_fill_fn fill, void *ctx)
     static void *args[2];
     args[0] = (void *)fill;
     args[1] = ctx;
-    if (xTaskCreate(lab_report_task, "lab_report", 4096, args, 4, NULL) != pdPASS) {
+    if (xTaskCreate(lab_report_task, "lab_report", 6144, args, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "report task failed");
     }
 }

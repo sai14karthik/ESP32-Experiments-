@@ -564,9 +564,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Sensitivity: wander=%.3f, jitter=%.3f",
              g_detect.wander_sensitivity, g_detect.jitter_sensitivity);
     
-    /* Initialize WiFi radar, then join the lab AP so the radio leaves channel 11 */
+    /* Radar init pins channel 11. Join the lab AP, then move ESP-NOW onto that channel. */
     wifi_radar_init();
     lab_sta_connect();
+    static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    lab_espnow_use_current_channel(bcast);
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_csi(true);
+    esp_wifi_set_ps(WIFI_PS_NONE);
     
     /* Start radar processing */
     ESP_ERROR_CHECK(esp_radar_start());

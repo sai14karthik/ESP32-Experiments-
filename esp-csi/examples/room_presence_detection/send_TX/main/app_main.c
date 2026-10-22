@@ -104,10 +104,8 @@ static void wifi_init(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    /* Lab AP sets the channel. Fall back to 11 only if the join fails. */
-    if (lab_sta_connect() != ESP_OK) {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    }
+    /* Stay on the lab AP. A channel-11 fallback would split this board from the others. */
+    lab_sta_connect();
 
     uint8_t sta_mac[6] = {0};
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, sta_mac));
@@ -155,7 +153,10 @@ void app_main(void)
     esp_now_init_config(&peer);
 
     ESP_LOGI(TAG, "================ CSI SEND ================");
-    ESP_LOGI(TAG, "WiFi Channel: %d, Send Frequency: %d Hz", CONFIG_WIFI_CHANNEL, CONFIG_SEND_FREQUENCY);
+    uint8_t primary = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&primary, &second);
+    ESP_LOGI(TAG, "WiFi channel: %u, Send Frequency: %d Hz", primary, CONFIG_SEND_FREQUENCY);
     ESP_LOGI(TAG, "Sender MAC: " MACSTR, MAC2STR(CONFIG_CSI_SEND_MAC));
     ESP_LOGI(TAG, "Broadcasting ESP-NOW packets for CSI extraction...");
 
