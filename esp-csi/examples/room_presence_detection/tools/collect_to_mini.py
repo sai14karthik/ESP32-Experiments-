@@ -197,6 +197,10 @@ class FlipGate:
 
     def observe(self, cv: int | None, now: float) -> tuple[str, float]:
         if cv is None:
+            # A camera stall is not a transition. Require the new label to
+            # hold continuously, or a one-frame blip followed by waiting
+            # would delete five minutes.
+            self.pending = None
             return "ignore", 0.0
         if self.stable is None:
             self.stable = cv
