@@ -359,6 +359,8 @@ def _leave_one_session_out(blocks: list[Block], seed: int) -> list[dict]:
                 "windows": int(y_te.size),
                 "recall": score,
                 "rssi_recall": rssi_score,
+                "y_true": y_te,
+                "y_pred": pred,
             }
         )
     return reports
@@ -462,6 +464,34 @@ def train(
     mean_rssi = float(np.mean(rssi_recalls)) if rssi_recalls else float("nan")
     if model_recalls:
         print(f"loo_mean_recall={mean_recall:.3f}  rssi_only={mean_rssi:.3f}")
+    confusion = None
+    pooled_true = [r["y_true"] for r in scored if "y_true" in r]
+    if pooled_true:
+        from sklearn.metrics import (
+            accuracy_score,
+            balanced_accuracy_score,
+            classification_report,
+            confusion_matrix,
+        )
+
+        y_true = np.concatenate(pooled_true)
+        y_pred = np.concatenate([r["y_pred"] for r in scored if "y_pred" in r])
+        confusion = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
+        print(
+            f"accuracy={accuracy_score(y_true, y_pred):.3f}  "
+            f"balanced_accuracy={balanced_accuracy_score(y_true, y_pred):.3f}"
+        )
+        print("confusion matrix  rows=true camera label, cols=predicted  [empty, occupied]")
+        print(f"  {confusion}")
+        print(
+            classification_report(
+                y_true,
+                y_pred,
+                labels=[0, 1],
+                target_names=["empty", "occupied"],
+                zero_division=0,
+            )
+        )
     if not tested_empty or not tested_occupied:
         print(
             "leave-one-session-out has not seen both camera labels. "
@@ -517,7 +547,11 @@ def train(
             "min_packets": MIN_PACKETS,
             "max_gap_sec": MAX_GAP_SEC,
             "evaluation_trustworthy": trustworthy,
-            "loo": reports,
+            "loo": [
+                {k: v for k, v in r.items() if k not in ("y_true", "y_pred")}
+                for r in reports
+            ],
+            "confusion_matrix": confusion,
             "loo_mean_recall": mean_recall,
             "rssi_only": mean_rssi,
             "negative_control": neg,
