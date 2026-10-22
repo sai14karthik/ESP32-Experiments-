@@ -29,6 +29,7 @@ __pycache__/
 auto.crt
 auto.key
 **/secrets.h
+**/lab_wifi.local.h
 **/sdkconfig.defaults.local
 **/sdkconfig.peer
 **/sdkconfig.sense

@@ -68,6 +68,16 @@ Slaves ignore ESP-NOW from the TX MAC `1a:00:…`. The TX packet counter's low b
 
 Edit `CONFIG_SLAVE_NODE_ID` in source before each slave flash (`-D` does not reach the C compiler).
 
-## Not this path
+## Collect onto the Mini
 
-`csi_presence_c5` Mini TCP `:9055` / LabPSK — separate. This tree is SoftAP phone UI only.
+All four boards join lab Wi-Fi `LabHealthSecurePSK` and follow that access point’s channel. The master pushes the three-link status to the Mini at `10.128.93.13` port `9056`. The Mini stays on Ethernet.
+
+Phone page is still RoomSensor / `12345678` (same radio channel as the lab AP).
+
+On the Mini:
+
+```bash
+./tools/collect_to_mini.sh --session empty_01
+```
+
+Rows land in Postgres database `csi`, tables `room_presence_sessions` and `room_presence_samples`. Flash all four boards before powering the set; a mix of old channel-11 firmware and this build will not see each other.

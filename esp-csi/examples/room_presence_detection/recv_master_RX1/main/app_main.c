@@ -39,6 +39,7 @@
 
 #include "led_strip.h"
 #include "esp_radar.h"
+#include "lab_sta.h"
 
 static const char *TAG = "recv_master";
 
@@ -516,6 +517,30 @@ static esp_err_t http_get_script(httpd_req_t *req)
     httpd_resp_send(req, (const char *)app_js_start,
                     app_js_end - app_js_start);
     return ESP_OK;
+}
+
+static void lab_fill_status(char *buf, size_t buflen, void *ctx)
+{
+    (void)ctx;
+    xSemaphoreTake(g_state_mutex, portMAX_DELAY);
+    snprintf(buf, buflen,
+        "{\"room\":%d,\"moving\":%d,\"calibrating\":%d,"
+        "\"wander_th\":%.6f,\"jitter_th\":%.6f,"
+        "\"links\":["
+        "{\"active\":%d,\"room\":%d,\"move\":%d,\"wander\":%.6f,\"jitter\":%.6f},"
+        "{\"active\":%d,\"room\":%d,\"move\":%d,\"wander\":%.6f,\"jitter\":%.6f},"
+        "{\"active\":%d,\"room\":%d,\"move\":%d,\"wander\":%.6f,\"jitter\":%.6f}]}",
+        g_state.room_status ? 1 : 0,
+        g_state.human_status ? 1 : 0,
+        g_state.calibrating ? 1 : 0,
+        g_state.wander_threshold, g_state.jitter_threshold,
+        g_state.links[0].active ? 1 : 0, g_state.links[0].room_status ? 1 : 0,
+        g_state.links[0].human_status ? 1 : 0, g_state.links[0].wander, g_state.links[0].jitter,
+        g_state.links[1].active ? 1 : 0, g_state.links[1].room_status ? 1 : 0,
+        g_state.links[1].human_status ? 1 : 0, g_state.links[1].wander, g_state.links[1].jitter,
+        g_state.links[2].active ? 1 : 0, g_state.links[2].room_status ? 1 : 0,
+        g_state.links[2].human_status ? 1 : 0, g_state.links[2].wander, g_state.links[2].jitter);
+    xSemaphoreGive(g_state_mutex);
 }
 
 static esp_err_t http_get_status(httpd_req_t *req)
@@ -1003,7 +1028,10 @@ static void wifi_ap_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_bandwidths(WIFI_IF_STA, &bw));
     ESP_ERROR_CHECK(esp_wifi_set_bandwidths(WIFI_IF_AP, &bw));
 #endif
-    ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    /* Lab AP picks the channel. Forcing 11 after join would drop LabHealthSecurePSK. */
+    if (lab_sta_connect() != ESP_OK) {
+        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    }
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     uint8_t mac[6];
@@ -1036,7 +1064,7 @@ static void radar_init(void)
     ESP_ERROR_CHECK(esp_now_set_pmk((uint8_t *)"pmk1234567890123"));
 
     esp_now_peer_info_t peer = {
-        .channel = CONFIG_WIFI_CHANNEL,
+        .channel = 0, /* current channel (lab AP), not a fixed 11 */
         .ifidx = WIFI_IF_STA,
         .encrypt = false,
         .peer_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
@@ -1098,6 +1126,7 @@ void app_main(void)
     
     /* Start WebSocket broadcast task */
     xTaskCreate(ws_broadcast_task, "ws_broadcast", 4096, NULL, 5, NULL);
+    lab_report_start(lab_fill_status, NULL);
     
     ESP_LOGI(TAG, "Master receiver started");
     ESP_LOGI(TAG, "Connect to WiFi '%s' and open http://192.168.4.1", CONFIG_AP_SSID);

@@ -23,6 +23,7 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_now.h"
+#include "lab_sta.h"
 
 static const char *TAG = "csi_send";
 
@@ -103,26 +104,10 @@ static void wifi_init(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    /* Set channel with secondary channel below for HT40 */
-#if CONFIG_IDF_TARGET_ESP32C5
-    if ((CONFIG_WIFI_BAND_MODE == WIFI_BAND_MODE_2G_ONLY && CONFIG_WIFI_2G_BANDWIDTHS == WIFI_BW_HT20)) {
+    /* Lab AP sets the channel. Fall back to 11 only if the join fails. */
+    if (lab_sta_connect() != ESP_OK) {
         ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    } else {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_BELOW));
     }
-#elif (CONFIG_IDF_TARGET_ESP32C6 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)) || CONFIG_IDF_TARGET_ESP32C61
-    if (CONFIG_WIFI_BAND_MODE == WIFI_BAND_MODE_2G_ONLY && CONFIG_WIFI_2G_BANDWIDTHS == WIFI_BW_HT20) {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    } else {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_BELOW));
-    }
-#else
-    if (CONFIG_WIFI_BANDWIDTH == WIFI_BW_HT20) {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    } else {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_WIFI_CHANNEL, WIFI_SECOND_CHAN_BELOW));
-    }
-#endif
 
     uint8_t sta_mac[6] = {0};
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, sta_mac));
@@ -162,7 +147,7 @@ void app_main(void)
 
     /* Initialize ESP-NOW with broadcast peer */
     esp_now_peer_info_t peer = {
-        .channel = CONFIG_WIFI_CHANNEL,
+        .channel = 0, /* current channel after the lab AP join */
         .ifidx = WIFI_IF_STA,
         .encrypt = false,
         .peer_addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},  // Broadcast

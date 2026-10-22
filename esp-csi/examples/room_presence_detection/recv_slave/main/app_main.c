@@ -33,6 +33,7 @@
 
 #include "led_strip.h"
 #include "esp_radar.h"
+#include "lab_sta.h"
 
 static const char *TAG = "recv_slave";
 
@@ -517,7 +518,7 @@ static void wifi_radar_init(void)
     
     /* Add master as ESP-NOW peer for sending reports */
     esp_now_peer_info_t peer = {
-        .channel = CONFIG_WIFI_CHANNEL,
+        .channel = 0, /* follow the lab AP channel */
         .ifidx = WIFI_IF_STA,
         .encrypt = false,
     };
@@ -563,8 +564,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Sensitivity: wander=%.3f, jitter=%.3f",
              g_detect.wander_sensitivity, g_detect.jitter_sensitivity);
     
-    /* Initialize WiFi radar */
+    /* Initialize WiFi radar, then join the lab AP so the radio leaves channel 11 */
     wifi_radar_init();
+    lab_sta_connect();
     
     /* Start radar processing */
     ESP_ERROR_CHECK(esp_radar_start());
