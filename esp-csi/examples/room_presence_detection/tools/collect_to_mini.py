@@ -119,6 +119,11 @@ def camera_label(labeler, window_sec: float = 1.5) -> int | None:
 # HT20 ESP-NOW from the sender: 112 int8 samples = 56 complex HT-LTF taps.
 HT20_IQ_LEN = 112
 TX_MAC = "1a:00:00:00:00:00"
+# Walk-in and walk-out are mislabeled. On a real empty↔occupied change,
+# drop the 5 minutes before the change. Hold the new label briefly so a
+# one-frame camera flicker does not wipe the session.
+PURGE_BEFORE_FLIP_SEC = 300.0
+FLIP_HOLD_SEC = 2.0
 
 
 def parse_csi_line(line: str) -> dict | None:
@@ -176,6 +181,34 @@ def _cv_word(cv_occupied: int | None) -> str:
     if cv_occupied is None:
         return "waiting"
     return "occupied" if cv_occupied else "empty"
+
+
+def purge_before_flip(cur, session_id, *, hold_sec: float) -> tuple[int, int]:
+    """Delete this session's rows in the 5 minutes before the label flipped.
+
+    ``hold_sec`` is how long the new label has already been true, so rows
+    collected after the flip stay.
+    """
+    cur.execute(
+        """
+        DELETE FROM room_presence_csi
+        WHERE session_id = %s
+          AND host_ts >= now() - make_interval(secs => %s)
+          AND host_ts < now() - make_interval(secs => %s)
+        """,
+        (session_id, PURGE_BEFORE_FLIP_SEC + hold_sec, hold_sec),
+    )
+    csi_deleted = cur.rowcount
+    cur.execute(
+        """
+        DELETE FROM room_presence_samples
+        WHERE session_id = %s
+          AND host_ts >= now() - make_interval(secs => %s)
+          AND host_ts < now() - make_interval(secs => %s)
+        """,
+        (session_id, PURGE_BEFORE_FLIP_SEC + hold_sec, hold_sec),
+    )
+    return csi_deleted, cur.rowcount
 
 
 def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bool) -> int:
@@ -278,6 +311,9 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
     n = 0
     csi_n = 0
     session_id = None
+    stable_cv: int | None = None
+    pending_cv: int | None = None
+    pending_since = 0.0
     try:
         with psycopg.connect(database_url, autocommit=False) as conn:
             apply_schema(conn)
@@ -296,6 +332,33 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                 if labeler is not None:
                     labeler.poll()
                 cv_occupied = camera_label(labeler)
+                purged = False
+                if cv_occupied is not None and stable_cv is None:
+                    stable_cv = cv_occupied
+                    print(f"cv stable {_cv_word(cv_occupied)}", flush=True)
+                elif cv_occupied is not None and cv_occupied == stable_cv:
+                    pending_cv = None
+                elif cv_occupied is not None and cv_occupied != stable_cv:
+                    now_flip = time.time()
+                    if pending_cv != cv_occupied:
+                        pending_cv = cv_occupied
+                        pending_since = now_flip
+                    elif now_flip - pending_since >= FLIP_HOLD_SEC:
+                        hold = now_flip - pending_since
+                        with conn.cursor() as cur:
+                            csi_deleted, status_deleted = purge_before_flip(
+                                cur, session_id, hold_sec=hold
+                            )
+                        csi_n = max(0, csi_n - csi_deleted)
+                        n = max(0, n - status_deleted)
+                        print(
+                            f"cv {_cv_word(stable_cv)} → {_cv_word(cv_occupied)}  "
+                            f"deleted last 5 min  csi={csi_deleted}  status={status_deleted}",
+                            flush=True,
+                        )
+                        stable_cv = cv_occupied
+                        pending_cv = None
+                        purged = True
                 drained = False
                 while True:
                     try:
@@ -333,7 +396,7 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                             f"cv={_cv_word(cv_occupied)}  {'ok' if good else 'WRONG'}  from {src}",
                             flush=True,
                         )
-                if drained or got_csi:
+                if drained or got_csi or purged:
                     conn.commit()
                 else:
                     time.sleep(0.02)
