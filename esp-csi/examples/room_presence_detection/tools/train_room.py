@@ -13,9 +13,9 @@ camera value cv_occupied, not the session name.
 Each window carries gain-normalized amplitude, sanitized phase, how far the
 amplitude shape sits from the camera-empty median, and the short correlation
 and slope terms from csi_pipeline_new version 4. Raw phase and RSSI are not
-features. The score is leave-one-session-out. Every finished fit is written to
-tools/models/room_presence.joblib and that file is what live inference loads.
-The trustworthy flag is only a warning. A later train replaces the file.
+features. The score is leave-one-session-out. Live inference loads
+tools/models/room_presence.joblib. A new fit replaces that file only when its
+score is higher than the saved one. Otherwise the previous best stays.
 """
 
 from __future__ import annotations
@@ -522,14 +522,53 @@ def _negative_control(blocks: list[Block], seed: int) -> float | None:
     return _balanced_accuracy(yte, model.predict(with_baseline(np.vstack(x_te), bases)))
 
 
+def _previous_score(path: Path) -> float | None:
+    """Score of the file live is using now. Missing or unreadable means none."""
+    if not path.is_file():
+        return None
+    import joblib
+
+    try:
+        previous = joblib.load(path)
+    except Exception:
+        return None
+    if not isinstance(previous, dict) or previous.get("role") != "best":
+        return None
+    if int(previous.get("feature_version", 0)) != FEATURE_VERSION:
+        return None
+    if int(previous.get("node_dim", 0)) != NODE_DIM:
+        return None
+    try:
+        score = float(previous.get("best_score"))
+    except (TypeError, ValueError):
+        return None
+    if score != score:
+        return None
+    return score
+
+
 def _save_best(path: Path, bundle: dict, score: float, trustworthy: bool) -> None:
-    """Write the one file live inference loads. The latest fit replaces it."""
+    """Keep the higher score. Live inference loads this one file."""
+    previous = _previous_score(path)
+    shown = f"{score:.3f}" if score == score else "n/a"
+    if previous is not None and not (score == score and score > previous):
+        print(
+            f"kept previous best  score={previous:.3f}  this train scored {shown}  "
+            f"evaluation_trustworthy={trustworthy}"
+        )
+        print(f"live inference still uses {path}")
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     import joblib
 
     joblib.dump(bundle, path)
-    shown = f"{score:.3f}" if score == score else "n/a"
-    print(f"saved {path}  score={shown}  evaluation_trustworthy={trustworthy}")
+    if previous is None:
+        print(f"saved {path}  score={shown}  evaluation_trustworthy={trustworthy}")
+    else:
+        print(
+            f"saved {path}  score={shown}  previous={previous:.3f}  "
+            f"evaluation_trustworthy={trustworthy}"
+        )
     print("live inference uses this file")
 
 
