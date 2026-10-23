@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Live camera label next to the trained room model.
 
-Run this on the Mini. It does not bind the CSI port, so a collect can run
-at the same time. While CSI is being stored, the Camera card follows that
-collect. With no collect running, the Camera card reads the RTSP camera
-itself. The Model card scores the open collect, or the last stored second.
+Run this on the Mini. While a collect is storing CSI, both cards follow that
+collect. With no collect running, the Camera card reads the RTSP camera and
+the Model card scores CSI the boards send on port 9057. Starting a collect
+takes that port back.
 
   ./tools/live_room.sh
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import threading
 import time
 from collections import deque
@@ -26,7 +27,14 @@ from pathlib import Path
 import numpy as np
 
 import train_room as recipe
-from collect_to_mini import DEFAULT_CAMERA, FLIP_HOLD_SEC, camera_label, start_camera
+from collect_to_mini import (
+    CSI_PORT,
+    DEFAULT_CAMERA,
+    FLIP_HOLD_SEC,
+    camera_label,
+    parse_csi_line,
+    start_camera,
+)
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_DB = recipe.DEFAULT_DB
@@ -128,7 +136,8 @@ def _fetch(url: str, tag: str | None) -> dict:
         if tag:
             cur.execute(
                 """
-                SELECT id::text, tag, (ended_at IS NULL)
+                SELECT id::text, tag, (ended_at IS NULL),
+                       EXTRACT(EPOCH FROM (now() - started_at))
                 FROM room_presence_sessions
                 WHERE tag = %s
                 ORDER BY started_at DESC
@@ -139,7 +148,8 @@ def _fetch(url: str, tag: str | None) -> dict:
         else:
             cur.execute(
                 """
-                SELECT id::text, tag, (ended_at IS NULL)
+                SELECT id::text, tag, (ended_at IS NULL),
+                       EXTRACT(EPOCH FROM (now() - started_at))
                 FROM room_presence_sessions
                 WHERE tag ~ '^(empty|occupied)_'
                 ORDER BY (ended_at IS NULL) DESC, COALESCE(ended_at, started_at) DESC
@@ -149,7 +159,7 @@ def _fetch(url: str, tag: str | None) -> dict:
         session = cur.fetchone()
         if session is None:
             return {"session": None}
-        sid, found, is_open = session
+        sid, found, is_open, started_age = session
         cur.execute(
             """
             SELECT node_id, host_ts, rssi, iq, cv_occupied, seq
@@ -165,7 +175,13 @@ def _fetch(url: str, tag: str | None) -> dict:
             (sid, LOOKBACK_SEC, sid),
         )
         rows = cur.fetchall()
-    return {"session": sid, "tag": found, "rows": rows, "open": bool(is_open)}
+    return {
+        "session": sid,
+        "tag": found,
+        "rows": rows,
+        "open": bool(is_open),
+        "started_age_sec": float(started_age),
+    }
 
 
 def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
@@ -217,6 +233,114 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
     }
 
 
+class CsiEar:
+    """CSI from the boards when collect is not listening on 9057."""
+
+    def __init__(self) -> None:
+        self._buf: deque = deque()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._srv: socket.socket | None = None
+        self.running = False
+
+    def start(self) -> bool:
+        if self.running:
+            return True
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            srv.bind(("0.0.0.0", CSI_PORT))
+        except OSError:
+            srv.close()
+            return False
+        srv.listen(8)
+        self._srv = srv
+        self._stop = threading.Event()
+        self.running = True
+        threading.Thread(target=self._accept, daemon=True).start()
+        print(f"csi live  0.0.0.0:{CSI_PORT}", flush=True)
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        srv = self._srv
+        self._srv = None
+        self.running = False
+        with self._lock:
+            self._buf.clear()
+        if srv is not None:
+            try:
+                srv.close()
+            except OSError:
+                pass
+
+    def recent(self) -> dict[int, list]:
+        cutoff = time.time() - LOOKBACK_SEC
+        by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
+        with self._lock:
+            rows = [row for row in self._buf if row[0] >= cutoff]
+        for ts, node, amp, phase, rssi in rows:
+            by_node[node].append((ts, amp, phase, rssi, 0))
+        return by_node
+
+    def _add(self, sample: dict) -> None:
+        parsed = recipe._packet(sample["iq"])
+        if parsed is None:
+            return
+        amp, phase = parsed
+        now = time.time()
+        node = int(sample["node"])
+        if node not in recipe.NODE_IDS:
+            return
+        with self._lock:
+            self._buf.append((now, node, amp, phase, float(sample["rssi"])))
+            cutoff = now - 3.0
+            while self._buf and self._buf[0][0] < cutoff:
+                self._buf.popleft()
+
+    def _accept(self) -> None:
+        srv = self._srv
+        if srv is None:
+            return
+
+        def read_client(client: socket.socket) -> None:
+            client.settimeout(30.0)
+            buf = b""
+            try:
+                while not self._stop.is_set():
+                    try:
+                        chunk = client.recv(8192)
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        raw, buf = buf.split(b"\n", 1)
+                        sample = parse_csi_line(raw.decode("utf-8", "replace").strip())
+                        if sample is not None:
+                            self._add(sample)
+                    if len(buf) > 65536:
+                        buf = b""
+            except OSError:
+                pass
+            finally:
+                client.close()
+
+        try:
+            while not self._stop.is_set():
+                srv.settimeout(1.0)
+                try:
+                    client, _addr = srv.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                threading.Thread(target=read_client, args=(client,), daemon=True).start()
+        finally:
+            self.running = False
+
+
 class Live:
     def __init__(self, url: str, model_path: Path, tag: str | None, camera: str) -> None:
         self.url = url
@@ -227,6 +351,7 @@ class Live:
         self.camera_error = None
         self._camera_thread_on = False
         self._camera_stop = False
+        self.ear = CsiEar()
         self.lock = threading.Lock()
         self.model_pack = None
         self.model_mtime = None
@@ -305,6 +430,36 @@ class Live:
         if labeler is not None:
             labeler.stop()
 
+    def stop_csi(self) -> None:
+        self.ear.stop()
+
+    def _session_is_live(self, snap: dict) -> bool:
+        """True while collect owns the CSI port and its rows are current."""
+        if not snap.get("open"):
+            return False
+        age = snap.get("age_sec")
+        if age is None:
+            return float(snap.get("started_age_sec") or 999) < 30
+        return age <= PURGE_STALL_SEC
+
+    def _score_ear(self) -> str | None:
+        if self.model_pack is None or not self.ear.running:
+            return None
+        scored = score_packets(self.ear.recent(), self.model_pack[0], self.model_pack[1])
+        if scored is None:
+            return None
+        return _word(scored["model"])
+
+    def _apply_sources(self, snap: dict) -> None:
+        """Camera and model both move, with a collect running or without one."""
+        if self._session_is_live(snap):
+            self.stop_csi()
+        else:
+            self.ear.start()
+            snap["model"] = self._score_ear()
+            snap["agree"] = None
+        self._choose_camera(snap)
+
     def _collecting_now(self, snap: dict) -> bool:
         if not snap.get("open"):
             return False
@@ -377,12 +532,13 @@ class Live:
                 "rows": 0,
                 "history": list(self.history),
             }
-            self._choose_camera(snap)
+            self._apply_sources(snap)
             with self.lock:
                 self.state = {**self.state, **snap}
             return
         snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
         snap["open"] = bool(fetched.get("open"))
+        snap["started_age_sec"] = fetched.get("started_age_sec")
         stamp = snap["stamp"]
         if stamp is not None and stamp != self.last_stamp and snap["model"] is not None:
             self.history.append(
@@ -397,7 +553,7 @@ class Live:
         snap["trustworthy"] = self.trustworthy
         snap["history"] = list(self.history)
         snap["error"] = None
-        self._choose_camera(snap)
+        self._apply_sources(snap)
         with self.lock:
             self.state = snap
 
@@ -552,6 +708,7 @@ def serve(live: Live, host: str, port: int) -> None:
         print("\nstopped")
     finally:
         live.stop_camera()
+        live.stop_csi()
         httpd.server_close()
 
 

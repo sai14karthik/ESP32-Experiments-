@@ -305,7 +305,17 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
     def accept_csi() -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("0.0.0.0", CSI_PORT))
+        deadline = time.time() + 20
+        while not stop.is_set():
+            try:
+                srv.bind(("0.0.0.0", CSI_PORT))
+                break
+            except OSError as exc:
+                if time.time() > deadline:
+                    print(f"could not listen on {CSI_PORT} ({exc})", flush=True)
+                    srv.close()
+                    return
+                time.sleep(0.3)
         srv.listen(8)
         print(f"listening 0.0.0.0:{CSI_PORT} for CSI", flush=True)
 
@@ -349,8 +359,6 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
         finally:
             srv.close()
 
-    threading.Thread(target=accept_loop, daemon=True).start()
-    threading.Thread(target=accept_csi, daemon=True).start()
     n = 0
     csi_n = 0
     session_id = None
@@ -369,6 +377,10 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                 )
                 session_id = cur.fetchone()[0]
             conn.commit()
+            # Session is open first, so a running live page drops port 9057
+            # and this bind can take the boards.
+            threading.Thread(target=accept_loop, daemon=True).start()
+            threading.Thread(target=accept_csi, daemon=True).start()
             while True:
                 if labeler is not None:
                     labeler.poll()
