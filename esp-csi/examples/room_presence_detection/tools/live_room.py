@@ -260,6 +260,9 @@ class CsiEar:
         self._stop = threading.Event()
         self._srv: socket.socket | None = None
         self.running = False
+        self.clients = 0
+        self.lines = 0
+        self._bad_logged = False
 
     def start(self) -> bool:
         if self.running:
@@ -275,6 +278,9 @@ class CsiEar:
         self._srv = srv
         self._stop = threading.Event()
         self.running = True
+        self.clients = 0
+        self.lines = 0
+        self._bad_logged = False
         threading.Thread(target=self._accept, daemon=True).start()
         print(f"csi live  0.0.0.0:{CSI_PORT}", flush=True)
         return True
@@ -297,24 +303,28 @@ class CsiEar:
         by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
         with self._lock:
             rows = [row for row in self._buf if row[0] >= cutoff]
-        for ts, node, amp, phase, rssi in rows:
+        for ts, node, iq, rssi in rows:
+            parsed = recipe._packet(iq)
+            if parsed is None:
+                continue
+            amp, phase = parsed
             by_node[node].append((ts, amp, phase, rssi, 0))
         return by_node
 
     def _add(self, sample: dict) -> None:
-        parsed = recipe._packet(sample["iq"])
-        if parsed is None:
-            return
-        amp, phase = parsed
-        now = time.time()
         node = int(sample["node"])
         if node not in recipe.NODE_IDS:
             return
+        now = time.time()
         with self._lock:
-            self._buf.append((now, node, amp, phase, float(sample["rssi"])))
+            self.lines += 1
+            first = self.lines == 1
+            self._buf.append((now, node, sample["iq"], float(sample["rssi"])))
             cutoff = now - 3.0
             while self._buf and self._buf[0][0] < cutoff:
                 self._buf.popleft()
+        if first:
+            print(f"csi line  node={node} iq={len(sample['iq'])}", flush=True)
 
     def _accept(self) -> None:
         srv = self._srv
@@ -323,11 +333,15 @@ class CsiEar:
 
         def read_client(client: socket.socket) -> None:
             client.settimeout(30.0)
+            try:
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
             buf = b""
             try:
                 while not self._stop.is_set():
                     try:
-                        chunk = client.recv(8192)
+                        chunk = client.recv(65536)
                     except socket.timeout:
                         continue
                     if not chunk:
@@ -335,15 +349,22 @@ class CsiEar:
                     buf += chunk
                     while b"\n" in buf:
                         raw, buf = buf.split(b"\n", 1)
-                        sample = parse_csi_line(raw.decode("utf-8", "replace").strip())
-                        if sample is not None:
-                            self._add(sample)
-                    if len(buf) > 65536:
+                        text = raw.decode("utf-8", "replace").strip()
+                        sample = parse_csi_line(text)
+                        if sample is None:
+                            if text and not self._bad_logged:
+                                self._bad_logged = True
+                                print(f"csi ignored  {text[:80]}", flush=True)
+                            continue
+                        self._add(sample)
+                    if len(buf) > 1_000_000:
                         buf = b""
             except OSError:
                 pass
             finally:
                 client.close()
+                with self._lock:
+                    self.clients = max(0, self.clients - 1)
 
         try:
             while not self._stop.is_set():
@@ -354,7 +375,10 @@ class CsiEar:
                     continue
                 except OSError:
                     break
-                print("csi connected", flush=True)
+                with self._lock:
+                    self.clients += 1
+                    shown = self.clients
+                print(f"csi connected  boards={shown}", flush=True)
                 threading.Thread(target=read_client, args=(client,), daemon=True).start()
         finally:
             self.running = False
@@ -580,10 +604,14 @@ class Live:
                 snap["model"] = None
                 snap["confidence"] = None
                 snap["error"] = "model is waiting. Port 9057 is busy."
-            elif sum(self._ear_counts.values()) == 0:
+            elif self.ear.lines == 0 and self.ear.clients == 0:
                 snap["model"] = None
                 snap["confidence"] = None
                 snap["error"] = "model is waiting for CSI from the boards."
+            elif self.ear.lines == 0:
+                snap["model"] = None
+                snap["confidence"] = None
+                snap["error"] = "boards are connected. Waiting for a CSI line."
             else:
                 snap["model"] = None
                 snap["confidence"] = None
