@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# On the Mac Mini, after collect sessions are finished. Collector must be stopped.
+# On the Mac Mini. Reads CSI already stored in Postgres, including an open collect.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../../.." && pwd)"
