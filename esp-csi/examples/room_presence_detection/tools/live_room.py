@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Live camera label next to the trained room model.
 
-Run this on the Mini. It only reads Postgres. It does not bind the CSI port.
-While a collect is open it scores that live data. With no collect running it
-scores the last second already stored.
+Run this on the Mini. It does not bind the CSI port.
+The Camera card reads the RTSP camera itself, so it updates when someone
+walks in even if no collect is running. The Model card scores the open
+collect, or the last second already stored.
 
   ./tools/live_room.sh
 
@@ -25,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 import train_room as recipe
+from collect_to_mini import DEFAULT_CAMERA, camera_label, start_camera
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_DB = recipe.DEFAULT_DB
@@ -207,10 +209,13 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
 
 
 class Live:
-    def __init__(self, url: str, model_path: Path, tag: str | None) -> None:
+    def __init__(self, url: str, model_path: Path, tag: str | None, camera: str) -> None:
         self.url = url
         self.model_path = model_path
         self.tag = tag
+        self.camera_url = camera
+        self.camera_labeler = None
+        self.camera_error = None
         self.lock = threading.Lock()
         self.model_pack = None
         self.model_mtime = None
@@ -257,6 +262,47 @@ class Live:
         self.trustworthy = loaded[2]
         self.model_note = "loaded best model"
 
+    def start_camera(self) -> None:
+        """Open the RTSP camera in the background. The page comes up while YOLO loads."""
+        if not self.camera_url or self.camera_url == "off":
+            return
+
+        def run() -> None:
+            try:
+                self.camera_labeler = start_camera(self.camera_url, False)
+                print(f"camera live  {self.camera_url}", flush=True)
+            except Exception as exc:
+                self.camera_error = str(exc)
+                print(f"camera failed  {exc}", flush=True)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def stop_camera(self) -> None:
+        labeler = self.camera_labeler
+        self.camera_labeler = None
+        if labeler is not None:
+            labeler.stop()
+
+    def _apply_live_camera(self, snap: dict) -> None:
+        """Camera card follows the lens. Model card stays the CSI score."""
+        if self.camera_error:
+            snap["error"] = snap.get("error") or self.camera_error
+            return
+        if self.camera_url and self.camera_url != "off" and self.camera_labeler is None:
+            snap["camera"] = "waiting"
+            snap["agree"] = None
+            return
+        if self.camera_labeler is None:
+            return
+        word = _word(camera_label(self.camera_labeler))
+        if word is None:
+            snap["camera"] = "waiting"
+            snap["agree"] = None
+            return
+        snap["camera"] = word
+        model = snap.get("model")
+        snap["agree"] = word == model if model in ("empty", "occupied") else None
+
     def poll_once(self) -> None:
         self.refresh_model()
         try:
@@ -266,17 +312,19 @@ class Live:
                 self.state["error"] = str(exc)
             return
         if fetched.get("session") is None:
+            snap = {
+                "error": None,
+                "tag": self.tag,
+                "camera": "waiting",
+                "model": None,
+                "agree": None,
+                "note": "no stored session",
+                "rows": 0,
+                "history": list(self.history),
+            }
+            self._apply_live_camera(snap)
             with self.lock:
-                self.state = {
-                    **self.state,
-                    "error": None,
-                    "tag": self.tag,
-                    "camera": "waiting",
-                    "model": None,
-                    "note": "no stored session",
-                    "rows": 0,
-                    "history": list(self.history),
-                }
+                self.state = {**self.state, **snap}
             return
         snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
         stamp = snap["stamp"]
@@ -293,6 +341,7 @@ class Live:
         snap["trustworthy"] = self.trustworthy
         snap["history"] = list(self.history)
         snap["error"] = None
+        self._apply_live_camera(snap)
         with self.lock:
             self.state = snap
 
@@ -436,12 +485,13 @@ def serve(live: Live, host: str, port: int) -> None:
     threading.Thread(target=loop, daemon=True).start()
     httpd = ThreadingHTTPServer((host, port), make_handler(live))
     print(f"room live  http://{host}:{port}", flush=True)
-    print("camera is the stored cv label. model is the last full second.", flush=True)
+    print("camera follows the lens. model is the last full second of CSI.", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        live.stop_camera()
         httpd.server_close()
 
 
@@ -455,8 +505,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=PORT)
+    p.add_argument(
+        "--camera",
+        default=DEFAULT_CAMERA,
+        help="RTSP camera for the Camera card. 'off' leaves that card on the stored label.",
+    )
     args = p.parse_args(argv)
-    live = Live(args.database_url, recipe.DEFAULT_MODEL, args.session)
+    live = Live(args.database_url, recipe.DEFAULT_MODEL, args.session, args.camera)
+    live.start_camera()
     serve(live, args.host, args.port)
     return 0
 
