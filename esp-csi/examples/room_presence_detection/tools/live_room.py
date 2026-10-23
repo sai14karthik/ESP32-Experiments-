@@ -568,7 +568,7 @@ class Live:
                 self._last_model = heard[0]
                 if heard[1] is not None:
                     self._last_confidence = heard[1]
-            elif snap.get("open") and self._last_model in ("empty", "occupied"):
+            elif self.model_pack is not None and self._last_model in ("empty", "occupied"):
                 snap["model"] = self._last_model
                 if self._last_confidence is not None:
                     snap["confidence"] = self._last_confidence
