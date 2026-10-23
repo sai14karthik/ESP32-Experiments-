@@ -7,9 +7,9 @@ It only reads Postgres. It does not bind the CSI port.
   ./tools/live_room.sh
 
 Open http://127.0.0.1:9070 on the Mini. The camera value is the same
-cv_occupied stored with the CSI. The model scores the last full second
-with the same features as train_room.py. Until a model file exists, the
-camera side still updates.
+cv_occupied stored with the CSI. The model is only
+tools/models/room_presence.joblib, and only when training saved it as the
+trusted best. A weaker later training run does not replace that file.
 """
 
 from __future__ import annotations
@@ -51,12 +51,16 @@ def _word(label: int | None) -> str | None:
 
 
 def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
-    """Return (pipeline, empty-room baselines, trustworthy) or None if absent."""
+    """Load the one saved best model. Any other file is refused."""
+    if path.resolve() != recipe.DEFAULT_MODEL.resolve():
+        raise RuntimeError("live inference loads only tools/models/room_presence.joblib")
     if not path.is_file():
         return None
     import joblib
 
     bundle = joblib.load(path)
+    if bundle.get("role") != "best" or not bundle.get("evaluation_trustworthy"):
+        raise RuntimeError("room_presence.joblib is not the saved best model")
     if int(bundle.get("feature_version", 0)) != recipe.FEATURE_VERSION:
         raise RuntimeError(f"{path} is an older feature recipe. Train again.")
     if int(bundle.get("node_dim", 0)) != recipe.NODE_DIM:
@@ -64,7 +68,7 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     bases = np.asarray(bundle["baselines"], dtype=np.float64)
     if bases.shape != (len(recipe.NODE_IDS), recipe.N_SC):
         raise RuntimeError(f"{path} baselines have shape {bases.shape}")
-    return bundle["model"], bases, bool(bundle.get("evaluation_trustworthy"))
+    return bundle["model"], bases, True
 
 
 def score_packets(
@@ -247,7 +251,7 @@ class Live:
         self.model_pack = loaded
         self.model_mtime = mtime
         self.trustworthy = loaded[2]
-        self.model_note = "model loaded" if loaded[2] else "model loaded, evaluation not trustworthy yet"
+        self.model_note = "loaded best model"
 
     def poll_once(self) -> None:
         self.refresh_model()
@@ -326,12 +330,12 @@ def _page(state: dict) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Room live</title>
+<title>Mock patient room</title>
 <style>
   :root {{ color-scheme: dark; }}
   body {{ margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #12141a; color: #e8e6e3; }}
   main {{ max-width: 880px; margin: 0 auto; padding: 28px 20px 48px; }}
-  h1 {{ font-size: 15px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #9a968f; margin: 0 0 18px; }}
+  h1 {{ font-size: 28px; font-weight: 650; letter-spacing: 0; text-transform: none; color: #e8e6e3; margin: 0 0 22px; }}
   .cards {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
   .card {{ border-radius: 16px; padding: 18px 20px 16px; background: #1c1f27; }}
   .card .k {{ font-size: 13px; color: #9a968f; text-transform: uppercase; letter-spacing: 0.06em; }}
@@ -339,14 +343,10 @@ def _page(state: dict) -> str:
   .empty {{ color: #8fd49a; }}
   .occupied {{ color: #f0c36a; }}
   .waiting, .none {{ color: #8b909a; }}
-  .match {{ margin: 16px 0 8px; font-size: 18px; }}
+  .match {{ margin: 18px 0 0; font-size: 18px; }}
   .match.bad {{ color: #f0a0a0; }}
   .match.ok {{ color: #8fd49a; }}
-  .meta {{ color: #9a968f; font-size: 14px; line-height: 1.55; }}
-  .strip {{ display: flex; gap: 4px; flex-wrap: wrap; margin-top: 18px; min-height: 14px; }}
-  .strip i {{ width: 14px; height: 14px; border-radius: 3px; display: inline-block; background: #2a2e38; }}
-  .strip i.ok {{ background: #3d8f55; }}
-  .strip i.bad {{ background: #a85a5a; }}
+  .meta {{ color: #9a968f; font-size: 14px; line-height: 1.5; min-height: 1.2em; }}
   @media (max-width: 640px) {{
     .cards {{ grid-template-columns: 1fr; }}
     .card .v {{ font-size: 42px; }}
@@ -355,7 +355,7 @@ def _page(state: dict) -> str:
 </head>
 <body>
 <main>
-  <h1>Room live · {_esc(str(tag))}</h1>
+  <h1>Mock patient room</h1>
   <div class="cards">
     <section class="card">
       <div class="k">Camera</div>
@@ -367,8 +367,7 @@ def _page(state: dict) -> str:
     </section>
   </div>
   <p class="match {('ok' if agree else 'bad') if agree is not None else ''}">{match}</p>
-  <p class="meta">{_esc(lag)}<br>{_esc(conf_s)}<br>receivers {_esc(nodes)} · {_esc(age_s)}<br>{_esc(note)} {_esc(trust_s)}<br>{_esc(error)}</p>
-  <div class="strip">{''.join(ticks)}</div>
+  <p class="meta">{_esc(error)}</p>
 </main>
 <script>
 async function tick() {{
@@ -377,7 +376,6 @@ async function tick() {{
     const data = await res.json();
     const cam = data.camera || 'waiting';
     const model = data.model || '—';
-    document.querySelector('h1').textContent = 'Room live · ' + (data.tag || '—');
     const cards = document.querySelectorAll('.card .v');
     cards[0].textContent = cam;
     cards[0].className = 'v ' + cam;
@@ -385,31 +383,16 @@ async function tick() {{
     cards[1].className = 'v ' + (model === 'empty' || model === 'occupied' ? model : 'none');
     const match = document.querySelector('.match');
     if (data.agree === true) {{
-      match.textContent = 'model matches the camera on that second';
+      match.textContent = 'model matches the camera';
       match.className = 'match ok';
     }} else if (data.agree === false) {{
-      match.textContent = 'model disagrees with the camera on that second';
+      match.textContent = 'model disagrees with the camera';
       match.className = 'match bad';
     }} else {{
-      match.textContent = 'waiting for a full second from two receivers';
+      match.textContent = 'waiting for a full second';
       match.className = 'match';
     }}
-    const lag = (data.window_camera && data.window_camera !== cam)
-      ? ('The scored second was ' + data.window_camera + '. The camera now says ' + cam + '.')
-      : '';
-    const conf = data.confidence == null ? '' : (Math.round(data.confidence * 100) + '% confidence');
-    const nodes = (data.nodes || []).join(', ') || '—';
-    const age = data.age_sec == null ? '—' : (data.age_sec.toFixed(1) + 's since last row');
-    const trust = data.trustworthy == null ? '' : (data.trustworthy ? 'trustworthy' : 'not trustworthy yet');
-    document.querySelector('.meta').innerHTML = [lag, conf, 'receivers ' + nodes + ' · ' + age, (data.note || '') + ' ' + trust, data.error || ''].filter(Boolean).join('<br>');
-    const strip = document.querySelector('.strip');
-    strip.textContent = '';
-    for (const item of data.history || []) {{
-      const mark = document.createElement('i');
-      mark.className = item.agree ? 'ok' : 'bad';
-      mark.title = item.camera + ' / ' + item.model;
-      strip.appendChild(mark);
-    }}
+    document.querySelector('.meta').textContent = data.error || '';
   }} catch (err) {{
     document.querySelector('.match').textContent = 'dashboard lost the update';
   }}
@@ -469,12 +452,11 @@ def serve(live: Live, host: str, port: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Live camera vs room model")
     p.add_argument("--database-url", default=DEFAULT_DB)
-    p.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     p.add_argument("--session", default=None, help="tag to follow. Default: the open collection.")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=PORT)
     args = p.parse_args(argv)
-    live = Live(args.database_url, args.model, args.session)
+    live = Live(args.database_url, recipe.DEFAULT_MODEL, args.session)
     serve(live, args.host, args.port)
     return 0
 

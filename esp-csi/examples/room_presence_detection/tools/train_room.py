@@ -521,6 +521,44 @@ def _negative_control(blocks: list[Block], seed: int) -> float | None:
     return _balanced_accuracy(yte, model.predict(with_baseline(np.vstack(x_te), bases)))
 
 
+def _previous_best_score(path: Path) -> float | None:
+    """Score of the model live inference is allowed to load, if one is on disk."""
+    if not path.is_file():
+        return None
+    import joblib
+
+    try:
+        previous = joblib.load(path)
+    except Exception:
+        return None
+    if previous.get("role") != "best":
+        return None
+    if int(previous.get("feature_version", 0)) != FEATURE_VERSION:
+        return None
+    if not previous.get("evaluation_trustworthy"):
+        return None
+    score = previous.get("best_score", previous.get("loo_mean_recall"))
+    if score is None or score != score:
+        return None
+    return float(score)
+
+
+def _save_best(path: Path, bundle: dict, score: float, trustworthy: bool) -> None:
+    """Write the one file live inference loads. A weaker later run does not replace it."""
+    if not trustworthy or score != score:
+        print("not saved. Live inference loads only a trusted best model.")
+        return
+    previous = _previous_best_score(path)
+    if previous is not None and previous >= score:
+        print(f"kept {path}  best={previous:.3f}  this run={score:.3f}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import joblib
+
+    joblib.dump(bundle, path)
+    print(f"saved {path}  best={score:.3f}")
+
+
 def train(
     url: str,
     model_path: Path,
