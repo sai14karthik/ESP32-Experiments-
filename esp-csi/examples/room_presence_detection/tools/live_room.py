@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Live camera label next to the trained room model.
 
-Run this on the Mini in a second terminal while collect_to_mini is writing.
-It only reads Postgres. It does not bind the CSI port.
+Run this on the Mini. It only reads Postgres. It does not bind the CSI port.
+While a collect is open it scores that live data. With no collect running it
+scores the last second already stored.
 
   ./tools/live_room.sh
 
@@ -129,8 +130,8 @@ def _fetch(url: str, tag: str | None) -> dict:
                 """
                 SELECT id::text, tag
                 FROM room_presence_sessions
-                WHERE ended_at IS NULL
-                ORDER BY started_at DESC
+                WHERE tag ~ '^(empty|occupied)_'
+                ORDER BY (ended_at IS NULL) DESC, COALESCE(ended_at, started_at) DESC
                 LIMIT 1
                 """
             )
@@ -143,10 +144,14 @@ def _fetch(url: str, tag: str | None) -> dict:
             SELECT node_id, host_ts, rssi, iq, cv_occupied, seq
             FROM room_presence_csi
             WHERE session_id = %s
-              AND host_ts >= now() - make_interval(secs => %s)
+              AND host_ts >= (
+                    SELECT max(host_ts) - make_interval(secs => %s)
+                    FROM room_presence_csi
+                    WHERE session_id = %s
+                  )
             ORDER BY node_id, host_ts, seq
             """,
-            (sid, LOOKBACK_SEC),
+            (sid, LOOKBACK_SEC, sid),
         )
         rows = cur.fetchall()
     return {"session": sid, "tag": found, "rows": rows}
@@ -268,7 +273,7 @@ class Live:
                     "tag": self.tag,
                     "camera": "waiting",
                     "model": None,
-                    "note": "no collection running",
+                    "note": "no stored session",
                     "rows": 0,
                     "history": list(self.history),
                 }
@@ -440,7 +445,11 @@ def serve(live: Live, host: str, port: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Live camera vs room model")
     p.add_argument("--database-url", default=DEFAULT_DB)
-    p.add_argument("--session", default=None, help="tag to follow. Default: the open collection.")
+    p.add_argument(
+        "--session",
+        default=None,
+        help="tag to score. Default: the open collect, or the latest stored session.",
+    )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=PORT)
     args = p.parse_args(argv)

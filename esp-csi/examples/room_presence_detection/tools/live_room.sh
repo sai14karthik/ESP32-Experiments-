@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Second terminal on the Mini, while collect_to_mini is still running.
+# On the Mini. Scores the open collect, or the latest stored session if none is open.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../../.." && pwd)"
