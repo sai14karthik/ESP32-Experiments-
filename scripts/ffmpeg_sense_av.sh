@@ -51,7 +51,7 @@ exec ffmpeg -hide_banner -loglevel warning \
   -rw_timeout 15000000 \
   -probesize 512k \
   -analyzeduration 500000 \
-  -thread_queue_size 2048 \
+  -thread_queue_size 8 \
   -f mjpeg -framerate "$FPS" \
   -i "$VURL" \
   -itsoffset "$AUDIO_DELAY_S" \
@@ -77,17 +77,18 @@ exec ffmpeg -hide_banner -loglevel warning \
   -bf 0 \
   -g $((FPS * 2)) \
   -keyint_min $((FPS * 2)) \
+  -tune zerolatency \
   -crf 18 \
   -maxrate 6000k \
-  -bufsize 12000k \
-  -x264-params "scenecut=0:repeat-headers=1" \
+  -bufsize 500k \
+  -x264-params "scenecut=0:repeat-headers=1:rc-lookahead=0:sync-lookahead=0" \
   -c:a aac \
   -b:a 96k \
   -ar 16000 \
   -ac 1 \
-  -max_interleave_delta 2000000 \
-  -muxdelay 1.5 \
-  -muxpreload 1.5 \
+  -max_interleave_delta 0 \
+  -muxdelay 0 \
+  -muxpreload 0 \
   -f rtsp \
   -rtsp_transport tcp \
   "$OUT" \

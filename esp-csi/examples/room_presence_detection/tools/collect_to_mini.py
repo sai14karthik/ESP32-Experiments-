@@ -110,15 +110,19 @@ def start_camera(camera: str, preview: bool):
     return labeler
 
 
-def camera_label(labeler, window_sec: float = 1.5) -> int | None:
+def camera_label(
+    labeler,
+    window_sec: float = 1.5,
+    min_hits: int = 4,
+) -> int | None:
     """1 occupied, 0 empty, None until the camera has a stable run of frames."""
     if labeler is None:
         return None
     now = time.time()
     recent = [hit for ts, hit in labeler._hits if now - ts <= window_sec]
-    if len(recent) < 4:
+    if len(recent) < min_hits:
         return None
-    return 1 if labeler.recent_occupied(window_sec) else 0
+    return 1 if labeler.recent_occupied(window_sec, min_hits=min_hits) else 0
 
 
 # HT20 ESP-NOW from the sender: 112 int8 samples = 56 complex HT-LTF taps.

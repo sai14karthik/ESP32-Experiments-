@@ -126,7 +126,21 @@ def iter_rtsp(
     Pull RTSP frames with OpenCV over TCP (MediaMTX / cam_sense).
     Avoids Ultralytics 'Waiting for stream 0' stalls.
     """
-    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+    # Default FFmpeg RTSP buffering holds several seconds of video. The live
+    # camera label then updates long after the person has moved.
+    current = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+    parts = [part for part in current.split("|") if part]
+    for item in (
+        "rtsp_transport;tcp",
+        "fflags;nobuffer",
+        "flags;low_delay",
+        "max_delay;0",
+        "probesize;32768",
+        "analyzeduration;0",
+    ):
+        if item not in parts:
+            parts.append(item)
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(parts)
     failures = 0
     while True:
         cap = cv2.VideoCapture()

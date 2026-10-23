@@ -507,7 +507,9 @@ class Live:
             return
         if self.camera_labeler is None:
             return
-        word = _word(camera_label(self.camera_labeler))
+        # Two agreeing frames are enough for the page. Collection still waits
+        # longer before it writes a training label.
+        word = _word(camera_label(self.camera_labeler, window_sec=0.8, min_hits=2))
         if word is None:
             snap["camera"] = "waiting"
             snap["agree"] = None
