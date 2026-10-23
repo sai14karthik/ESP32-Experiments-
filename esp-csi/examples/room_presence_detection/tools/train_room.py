@@ -13,9 +13,11 @@ camera value cv_occupied, not the session name.
 Each window carries gain-normalized amplitude, sanitized phase, how far the
 amplitude shape sits from the camera-empty median, and the short correlation
 and slope terms from csi_pipeline_new version 4. Raw phase and RSSI are not
-features. The score is leave-one-session-out. Live inference loads
-tools/models/room_presence.joblib. A new fit replaces that file only when its
-score is higher than the saved one. Otherwise the previous best stays.
+features. The score is leave-one-session-out, weighted by how many windows
+each session has. Live inference loads tools/models/room_presence.joblib.
+A new fit replaces that file only when it tested both camera labels and its
+score is higher, or when the saved file never tested both and this one did.
+A train that never held out occupied does not replace the file.
 """
 
 from __future__ import annotations
@@ -417,6 +419,7 @@ def _fit(X: np.ndarray, y: np.ndarray, seed: int):
                     max_depth=6,
                     learning_rate=0.08,
                     max_iter=200,
+                    class_weight="balanced",
                     random_state=seed,
                 ),
             ),
@@ -522,43 +525,80 @@ def _negative_control(blocks: list[Block], seed: int) -> float | None:
     return _balanced_accuracy(yte, model.predict(with_baseline(np.vstack(x_te), bases)))
 
 
-def _previous_score(path: Path) -> float | None:
-    """Score of the file live is using now. Missing or unreadable means none."""
+def _tested_both(loo: object) -> bool:
+    """True when some held-out fold contained empty and some contained occupied."""
+    if not isinstance(loo, list):
+        return False
+    labels: set[int] = set()
+    for row in loo:
+        if not isinstance(row, dict) or row.get("skipped"):
+            continue
+        for lab in row.get("labels") or []:
+            try:
+                labels.add(int(lab))
+            except (TypeError, ValueError):
+                continue
+    return 0 in labels and 1 in labels
+
+
+def _previous(path: Path) -> tuple[float | None, bool]:
+    """Score of the file live is using, and whether that score tested both labels."""
     if not path.is_file():
-        return None
+        return None, False
     import joblib
 
     try:
         previous = joblib.load(path)
     except Exception:
-        return None
+        return None, False
     if not isinstance(previous, dict) or previous.get("role") != "best":
-        return None
+        return None, False
     if int(previous.get("feature_version", 0)) != FEATURE_VERSION:
-        return None
+        return None, False
     if int(previous.get("node_dim", 0)) != NODE_DIM:
-        return None
+        return None, False
+    both = _tested_both(previous.get("loo"))
     try:
         raw = previous.get("best_score")
         if raw is None:
             raw = previous.get("loo_mean_recall")
         score = float(raw)
     except (TypeError, ValueError):
-        return None
+        return None, both
     if score != score:
-        return None
-    return score
+        return None, both
+    return score, both
 
 
-def _save_best(path: Path, bundle: dict, score: float, trustworthy: bool) -> None:
-    """Keep the higher score. Live inference loads this one file."""
-    previous = _previous_score(path)
+def _save_best(
+    path: Path,
+    bundle: dict,
+    score: float,
+    trustworthy: bool,
+    tested_both: bool,
+) -> None:
+    """Replace the live file only when this train is the better presence test.
+
+    A score that never held out occupied cannot replace a file, and it cannot
+    block a later train that did test both labels. Live loads this one file.
+    """
+    previous, previous_both = _previous(path)
     shown = f"{score:.3f}" if score == score else "n/a"
-    if previous is not None and not (score == score and score > previous):
+    keep = False
+    if previous is not None and previous_both and not tested_both:
+        keep = True
         print(
-            f"kept previous best  score={previous:.3f}  this train scored {shown}  "
-            f"evaluation_trustworthy={trustworthy}"
+            f"kept previous best  score={previous:.3f}  "
+            "this train did not test occupied"
         )
+    elif previous is not None and previous_both == tested_both:
+        if not (score == score and score > previous):
+            keep = True
+            print(
+                f"kept previous best  score={previous:.3f}  this train scored {shown}  "
+                f"evaluation_trustworthy={trustworthy}"
+            )
+    if keep:
         print(f"live inference still uses {path}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -632,12 +672,30 @@ def train(
     scored = [r for r in reports if not r.get("skipped")]
     tested_empty = any(0 in r["labels"] for r in scored)
     tested_occupied = any(1 in r["labels"] for r in scored)
-    model_recalls = [r["recall"] for r in scored]
-    rssi_recalls = [r["rssi_recall"] for r in scored if r["rssi_recall"] == r["rssi_recall"]]
-    mean_recall = float(np.mean(model_recalls)) if model_recalls else float("nan")
-    mean_rssi = float(np.mean(rssi_recalls)) if rssi_recalls else float("nan")
+    model_recalls: list[float] = []
+    weights: list[int] = []
+    rssi_pairs: list[tuple[float, int]] = []
+    for row in scored:
+        weight = int(row.get("windows") or 0)
+        recall = row["recall"]
+        if weight <= 0 or recall != recall:
+            continue
+        model_recalls.append(recall)
+        weights.append(weight)
+        rssi_recall = row["rssi_recall"]
+        if rssi_recall == rssi_recall:
+            rssi_pairs.append((rssi_recall, weight))
+    mean_recall = (
+        float(np.average(model_recalls, weights=weights)) if weights else float("nan")
+    )
+    mean_rssi = (
+        float(np.average([pair[0] for pair in rssi_pairs], weights=[pair[1] for pair in rssi_pairs]))
+        if rssi_pairs
+        else float("nan")
+    )
+    rssi_recalls = [pair[0] for pair in rssi_pairs]
     if model_recalls:
-        print(f"loo_mean_recall={mean_recall:.3f}  rssi_only={mean_rssi:.3f}")
+        print(f"loo_mean_recall={mean_recall:.3f}  rssi_only={mean_rssi:.3f}  (weighted by windows)")
     confusion = None
     pooled_true = [r["y_true"] for r in scored if "y_true" in r]
     if pooled_true:
@@ -721,13 +779,20 @@ def train(
         "confusion_matrix": confusion,
         "loo_mean_recall": mean_recall,
         "best_score": mean_recall,
+        "tested_both": bool(tested_empty and tested_occupied),
         "rssi_only": mean_rssi,
         "negative_control": neg,
         "holdout_recall": exam_recall,
         "n_empty": n_empty,
         "n_occupied": n_occ,
     }
-    _save_best(DEFAULT_MODEL, bundle, mean_recall, trustworthy)
+    _save_best(
+        DEFAULT_MODEL,
+        bundle,
+        mean_recall,
+        trustworthy,
+        bool(tested_empty and tested_occupied),
+    )
     return 0
 
 
