@@ -557,11 +557,11 @@ def _save_best(path: Path, bundle: dict, score: float, trustworthy: bool) -> Non
 
     joblib.dump(bundle, path)
     print(f"saved {path}  best={score:.3f}")
+    print("live inference uses this file")
 
 
 def train(
     url: str,
-    model_path: Path,
     holdout: str | None,
     seed: int,
     tags: list[str] | None,
@@ -718,14 +718,13 @@ def train(
         "n_empty": n_empty,
         "n_occupied": n_occ,
     }
-    _save_best(model_path, bundle, mean_recall, trustworthy)
+    _save_best(DEFAULT_MODEL, bundle, mean_recall, trustworthy)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Train room empty/occupied offline")
     p.add_argument("--database-url", default=DEFAULT_DB)
-    p.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     p.add_argument(
         "--session",
         action="append",
@@ -739,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args(argv)
-    return train(args.database_url, args.model, args.holdout, args.seed, args.session)
+    return train(args.database_url, args.holdout, args.seed, args.session)
 
 
 if __name__ == "__main__":

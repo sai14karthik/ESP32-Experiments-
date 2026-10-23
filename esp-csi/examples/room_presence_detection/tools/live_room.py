@@ -302,29 +302,12 @@ def _page(state: dict) -> str:
     model = state.get("model") or "—"
     agree = state.get("agree")
     if agree is True:
-        match = "model matches the camera on that second"
+        match = "model matches the camera"
     elif agree is False:
-        match = "model disagrees with the camera on that second"
+        match = "model disagrees with the camera"
     else:
-        match = "waiting for a full second from two receivers"
-    window_camera = state.get("window_camera")
-    lag = ""
-    if window_camera and window_camera != camera:
-        lag = f"The scored second was {window_camera}. The camera now says {camera}."
-    conf = state.get("confidence")
-    conf_s = "" if conf is None else f"{conf * 100:.0f}% confidence"
-    nodes = ", ".join(str(n) for n in state.get("nodes") or []) or "—"
-    age = state.get("age_sec")
-    age_s = "—" if age is None else f"{age:.1f}s since last row"
-    ticks = []
-    for item in state.get("history") or []:
-        kind = "ok" if item.get("agree") else "bad"
-        ticks.append(f'<i class="{kind}" title="{item.get("camera")} / {item.get("model")}"></i>')
-    tag = state.get("tag") or "—"
-    note = state.get("note") or ""
+        match = "waiting for a full second"
     error = state.get("error") or ""
-    trust = state.get("trustworthy")
-    trust_s = "" if trust is None else ("trustworthy" if trust else "not trustworthy yet")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -339,7 +322,12 @@ def _page(state: dict) -> str:
   .cards {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
   .card {{ border-radius: 16px; padding: 18px 20px 16px; background: #1c1f27; }}
   .card .k {{ font-size: 13px; color: #9a968f; text-transform: uppercase; letter-spacing: 0.06em; }}
-  .card .v {{ font-size: 44px; font-weight: 680; line-height: 1.05; margin-top: 8px; text-transform: lowercase; }}
+  .card .v {{ font-size: 44px; font-weight: 680; line-height: 1.05; margin-top: 8px; text-transform: lowercase; animation: liveblink 0.9s step-end infinite; }}
+  @keyframes liveblink {{
+    0% {{ opacity: 1; }}
+    50% {{ opacity: 0.15; }}
+    100% {{ opacity: 1; }}
+  }}
   .empty {{ color: #8fd49a; }}
   .occupied {{ color: #f0c36a; }}
   .waiting, .none {{ color: #8b909a; }}
@@ -397,7 +385,8 @@ async function tick() {{
     document.querySelector('.match').textContent = 'dashboard lost the update';
   }}
 }}
-setInterval(tick, 500);
+tick();
+setInterval(tick, 400);
 </script>
 </body>
 </html>
