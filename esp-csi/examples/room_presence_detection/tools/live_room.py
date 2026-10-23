@@ -574,14 +574,19 @@ class Live:
                     snap["confidence"] = self._last_confidence
             elif self.model_pack is None:
                 snap["model"] = None
+                snap["confidence"] = None
                 snap["error"] = self.model_note
             elif not self.ear.running:
                 snap["model"] = None
+                snap["confidence"] = None
                 snap["error"] = "model is waiting. Port 9057 is busy."
             elif sum(self._ear_counts.values()) == 0:
                 snap["model"] = None
+                snap["confidence"] = None
                 snap["error"] = "model is waiting for CSI from the boards."
             else:
+                snap["model"] = None
+                snap["confidence"] = None
                 snap["error"] = "model is waiting for one full second of CSI."
             snap["agree"] = None
         self._choose_camera(snap)
@@ -774,7 +779,7 @@ async function tick() {{
     cards[1].textContent = model;
     cards[1].className = 'v ' + (model === 'empty' || model === 'occupied' ? model : 'none');
     const conf = document.querySelector('.conf');
-    conf.textContent = (typeof data.confidence === 'number')
+    conf.textContent = (model === 'empty' || model === 'occupied') && typeof data.confidence === 'number'
       ? Math.round(data.confidence * 100) + '%'
       : '';
     const match = document.querySelector('.match');
