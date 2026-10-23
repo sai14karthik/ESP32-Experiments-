@@ -415,6 +415,9 @@ class Live:
                     return
                 self.camera_labeler = labeler
                 print(f"camera live  {self.camera_url}", flush=True)
+                while not self._camera_stop:
+                    labeler.poll()
+                    time.sleep(0.05)
             except Exception as exc:
                 self._camera_thread_on = False
                 self.camera_error = str(exc)
