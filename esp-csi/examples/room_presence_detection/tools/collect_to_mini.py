@@ -229,7 +229,8 @@ def purge_before_flip(cur, session_id, *, hold_sec: float) -> tuple[int, int]:
     """Delete this session's rows in the 5 minutes before the label flipped.
 
     ``hold_sec`` is how long the new label has already been true, so rows
-    collected after the flip stay.
+    collected after the flip stay. Live inference reads only that kept tail,
+    so this delete does not remove a row the live page is showing.
     """
     cur.execute(
         """

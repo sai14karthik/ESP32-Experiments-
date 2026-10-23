@@ -26,16 +26,22 @@ from pathlib import Path
 import numpy as np
 
 import train_room as recipe
-from collect_to_mini import DEFAULT_CAMERA, camera_label, start_camera
+from collect_to_mini import DEFAULT_CAMERA, FLIP_HOLD_SEC, camera_label, start_camera
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_DB = recipe.DEFAULT_DB
 DEFAULT_MODEL = recipe.DEFAULT_MODEL
 PORT = 9070
-LOOKBACK_SEC = 3.0
+# The label-flip delete keeps the last FLIP_HOLD_SEC seconds and removes the
+# 5 minutes before that. Live reads only inside the kept tail, so that delete
+# cannot remove a row this page is showing.
+LOOKBACK_SEC = FLIP_HOLD_SEC - 0.1
 # A collect commits CSI many times a second. Newer than this means that
 # collect is the camera, so this page does not open a second one.
 FRESH_SEC = 5.0
+# The 5-minute delete can pause commits while it runs. Keep the current
+# cards up through that pause instead of blanking them.
+PURGE_STALL_SEC = 20.0
 VOTE_WINDOWS = 4
 HISTORY = 40
 
@@ -122,7 +128,7 @@ def _fetch(url: str, tag: str | None) -> dict:
         if tag:
             cur.execute(
                 """
-                SELECT id::text, tag
+                SELECT id::text, tag, (ended_at IS NULL)
                 FROM room_presence_sessions
                 WHERE tag = %s
                 ORDER BY started_at DESC
@@ -133,7 +139,7 @@ def _fetch(url: str, tag: str | None) -> dict:
         else:
             cur.execute(
                 """
-                SELECT id::text, tag
+                SELECT id::text, tag, (ended_at IS NULL)
                 FROM room_presence_sessions
                 WHERE tag ~ '^(empty|occupied)_'
                 ORDER BY (ended_at IS NULL) DESC, COALESCE(ended_at, started_at) DESC
@@ -143,7 +149,7 @@ def _fetch(url: str, tag: str | None) -> dict:
         session = cur.fetchone()
         if session is None:
             return {"session": None}
-        sid, found = session
+        sid, found, is_open = session
         cur.execute(
             """
             SELECT node_id, host_ts, rssi, iq, cv_occupied, seq
@@ -159,7 +165,7 @@ def _fetch(url: str, tag: str | None) -> dict:
             (sid, LOOKBACK_SEC, sid),
         )
         rows = cur.fetchall()
-    return {"session": sid, "tag": found, "rows": rows}
+    return {"session": sid, "tag": found, "rows": rows, "open": bool(is_open)}
 
 
 def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
@@ -300,12 +306,25 @@ class Live:
             labeler.stop()
 
     def _collecting_now(self, snap: dict) -> bool:
+        if not snap.get("open"):
+            return False
         age = snap.get("age_sec")
-        return (
-            age is not None
-            and age <= FRESH_SEC
-            and snap.get("camera") in ("empty", "occupied")
-        )
+        if age is None or age > PURGE_STALL_SEC:
+            return False
+        if snap.get("camera") not in ("empty", "occupied"):
+            previous = self.state.get("camera")
+            if previous in ("empty", "occupied") and age <= PURGE_STALL_SEC:
+                snap["camera"] = previous
+            else:
+                return False
+        if snap.get("model") not in ("empty", "occupied"):
+            previous = self.state.get("model")
+            if previous in ("empty", "occupied"):
+                snap["model"] = previous
+        if age <= FRESH_SEC:
+            return True
+        # Commits pause while the 5-minute delete runs. The cards stay as they are.
+        return snap.get("camera") in ("empty", "occupied")
 
     def _choose_camera(self, snap: dict) -> None:
         """Use the collect's camera while it is writing. Otherwise read the lens."""
@@ -363,6 +382,7 @@ class Live:
                 self.state = {**self.state, **snap}
             return
         snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
+        snap["open"] = bool(fetched.get("open"))
         stamp = snap["stamp"]
         if stamp is not None and stamp != self.last_stamp and snap["model"] is not None:
             self.history.append(
