@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Live camera label next to the trained room model.
 
-Run this on the Mini. While a collect is storing CSI, both cards follow that
-collect. With no collect running, the Camera card reads the RTSP camera and
-the Model card scores CSI the boards send on port 9057. Starting a collect
-takes that port back.
+Run this on the Mini. The two cards always share one source.
+
+While a collect is open, both cards read that collect: the Camera card is the
+cv_occupied stored on the newest rows, and the Model card scores the CSI
+stored with that same label. This process lets go of port 9057 so the
+collector can take the boards.
+
+With no collect open, neither card reads stored rows. The Camera card is the
+RTSP lens and the Model card scores CSI arriving now on port 9057.
 
   ./tools/live_room.sh
 
-Open http://127.0.0.1:9070 on the Mini. The camera value is the same
-cv_occupied stored with the CSI. The model is only
+Open http://127.0.0.1:9070 on the Mini. The model is only
 tools/models/room_presence.joblib, the latest file training saved.
 """
 
@@ -44,13 +48,6 @@ PORT = 9070
 # 5 minutes before that. Live reads only inside the kept tail, so that delete
 # cannot remove a row this page is showing.
 LOOKBACK_SEC = FLIP_HOLD_SEC - 0.1
-# A collect commits CSI many times a second. Newer than this means that
-# collect is the camera, so this page does not open a second one.
-FRESH_SEC = 5.0
-# The 5-minute delete runs in one transaction, so new CSI can pause well
-# past a few seconds. An open collect stays the source until rows are
-# this old. A crashed collect that never sets ended_at falls through after.
-PURGE_STALL_SEC = 120.0
 VOTE_WINDOWS = 4
 HISTORY = 40
 
@@ -144,36 +141,39 @@ def score_packets(
 
 
 def _fetch(url: str, tag: str | None) -> dict:
+    """The open collect, if one is running. A finished session is not the live page."""
     import psycopg
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:
+        session = None
         if tag:
             cur.execute(
                 """
-                SELECT id::text, tag, (ended_at IS NULL),
+                SELECT id::text, tag,
                        EXTRACT(EPOCH FROM (now() - started_at))
                 FROM room_presence_sessions
-                WHERE tag = %s
+                WHERE ended_at IS NULL AND tag = %s
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
                 (tag,),
             )
-        else:
+            session = cur.fetchone()
+        if session is None:
             cur.execute(
                 """
-                SELECT id::text, tag, (ended_at IS NULL),
+                SELECT id::text, tag,
                        EXTRACT(EPOCH FROM (now() - started_at))
                 FROM room_presence_sessions
-                WHERE tag ~ '^(empty|occupied)_'
-                ORDER BY (ended_at IS NULL) DESC, COALESCE(ended_at, started_at) DESC
+                WHERE ended_at IS NULL
+                ORDER BY started_at DESC
                 LIMIT 1
                 """
             )
-        session = cur.fetchone()
+            session = cur.fetchone()
         if session is None:
-            return {"session": None}
-        sid, found, is_open, started_age = session
+            return {"session": None, "open": False}
+        sid, found, started_age = session
         cur.execute(
             """
             SELECT node_id, host_ts, rssi, iq, cv_occupied, seq
@@ -193,8 +193,8 @@ def _fetch(url: str, tag: str | None) -> dict:
         "session": sid,
         "tag": found,
         "rows": rows,
-        "open": bool(is_open),
-        "started_age_sec": float(started_age),
+        "open": True,
+        "started_age_sec": None if started_age is None else float(started_age),
     }
 
 
@@ -203,22 +203,29 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
     latest_ts = None
     latest_seq = -1
     latest_cv = None
-    by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
+    kept: list[tuple] = []
     for node, host_ts, rssi, iq, cv, seq in rows:
         ts = host_ts.timestamp()
+        cv_i = None if cv is None else int(cv)
         if latest_ts is None or ts > latest_ts or (ts == latest_ts and int(seq or 0) >= latest_seq):
             latest_ts = ts
             latest_seq = int(seq or 0)
-            latest_cv = None if cv is None else int(cv)
-        if node not in recipe.NODE_IDS or iq is None or cv is None:
+            latest_cv = cv_i
+        if node not in recipe.NODE_IDS or iq is None or cv_i is None:
             continue
         parsed = recipe._packet(iq)
         if parsed is None:
             continue
         amp, phase = parsed
-        # One label for the whole slice. A flip in the middle would otherwise
-        # throw the second away and the card would go blank.
-        by_node[int(node)].append((ts, amp, phase, float(rssi or 0), 0))
+        kept.append((ts, int(node), amp, phase, float(rssi or 0), cv_i))
+    # Score only packets stored with the label on the newest row, so the
+    # model second is the same moment as the Camera card.
+    by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
+    if latest_cv is not None:
+        for ts, node, amp, phase, rssi, cv_i in kept:
+            if cv_i != latest_cv:
+                continue
+            by_node[node].append((ts, amp, phase, rssi, cv_i))
 
     age = None if latest_ts is None else max(0.0, time.time() - latest_ts)
     scored = None
@@ -399,6 +406,7 @@ class Live:
         self._last_camera: str | None = None
         self._last_model: str | None = None
         self._last_confidence: float | None = None
+        self._source: str | None = None
         self._score_error: str | None = None
         self.lock = threading.Lock()
         self.model_pack = None
@@ -524,7 +532,12 @@ class Live:
         threading.Thread(target=run, daemon=True).start()
 
     def stop_camera(self) -> None:
-        """Process shutdown only. A poll must not reload YOLO."""
+        """Stop the lens. Used on shutdown, and once when a collect takes over.
+
+        A poll must not call this on every pass. The thread clears
+        ``_camera_thread_on`` when it exits, so the next room period can
+        start one new load.
+        """
         self._camera_stop = True
         labeler = self.camera_labeler
         self.camera_labeler = None
@@ -535,12 +548,29 @@ class Live:
         self.ear.stop()
 
     def _session_is_live(self, snap: dict) -> bool:
-        """An open collect owns the page until it sets ended_at.
+        """An open collect owns both cards until it sets ended_at.
 
         The 5-minute delete pauses new rows. That pause must not switch the
         page onto the lens or onto port 9057.
         """
         return bool(snap.get("open"))
+
+    def _use_source(self, collect: bool) -> None:
+        """Switch camera and model together. A cached word stays in its source."""
+        source = "collect" if collect else "room"
+        if source == self._source:
+            return
+        self._source = source
+        self._last_camera = None
+        self._last_model = None
+        self._last_confidence = None
+        self.last_stamp = None
+        if source == "collect":
+            self.stop_csi()
+            self.stop_camera()
+            print("live follows the collect", flush=True)
+        else:
+            print("live follows the room", flush=True)
 
     def _score_ear(self) -> tuple[str, float | None] | None:
         if self.model_pack is None or not self.ear.running:
@@ -581,71 +611,72 @@ class Live:
                 snap["confidence"] = self._last_confidence
 
     def _apply_sources(self, snap: dict) -> None:
-        """Camera and model both move, with a collect running or without one."""
-        if self._session_is_live(snap):
+        """One source for both cards. Collect rows, or the room right now."""
+        collect = self._session_is_live(snap)
+        self._use_source(collect)
+        if collect:
             self.stop_csi()
-        else:
-            self.ear.start()
-            heard = self._score_ear()
-            if heard is not None:
-                snap["model"], snap["confidence"] = heard
-                self._last_model = heard[0]
-                if heard[1] is not None:
-                    self._last_confidence = heard[1]
-            elif self.model_pack is not None and self._last_model in ("empty", "occupied"):
-                snap["model"] = self._last_model
-                if self._last_confidence is not None:
-                    snap["confidence"] = self._last_confidence
-            elif self.model_pack is None:
-                snap["model"] = None
-                snap["confidence"] = None
-                snap["error"] = self.model_note
-            elif not self.ear.running:
-                snap["model"] = None
-                snap["confidence"] = None
-                snap["error"] = "model is waiting. Port 9057 is busy."
-            elif self.ear.lines == 0 and self.ear.clients == 0:
-                snap["model"] = None
-                snap["confidence"] = None
-                snap["error"] = "model is waiting for CSI from the boards."
-            elif self.ear.lines == 0:
-                snap["model"] = None
-                snap["confidence"] = None
-                snap["error"] = "boards are connected. Waiting for a CSI line."
-            else:
-                snap["model"] = None
-                snap["confidence"] = None
-                snap["error"] = "model is waiting for one full second of CSI."
-            snap["agree"] = None
-        self._choose_camera(snap)
-        if self._session_is_live(snap):
+            cam_now = snap.get("camera")
+            if (
+                cam_now in ("empty", "occupied")
+                and self._last_camera in ("empty", "occupied")
+                and cam_now != self._last_camera
+            ):
+                self._last_model = None
+                self._last_confidence = None
             self._remember(snap)
             cam = snap.get("camera")
             model = snap.get("model")
             if cam in ("empty", "occupied") and model in ("empty", "occupied"):
                 snap["agree"] = cam == model
-
-    def _collecting_now(self, snap: dict) -> bool:
-        if not self._session_is_live(snap):
-            return False
-        # The stored label can disappear for one poll while the delete runs.
-        # Put the last real camera word back before deciding to open the lens.
-        if snap.get("camera") not in ("empty", "occupied") and self._last_camera in (
-            "empty",
-            "occupied",
-        ):
-            snap["camera"] = self._last_camera
-        return True
-
-    def _choose_camera(self, snap: dict) -> None:
-        """Use the collect's camera while it is writing. Otherwise read the lens."""
-        if self._collecting_now(snap):
-            model = snap.get("model")
-            cam = snap.get("camera")
-            snap["agree"] = cam == model if model in ("empty", "occupied") else None
+            else:
+                snap["agree"] = None
             return
+        snap["camera"] = "waiting"
+        snap["model"] = None
+        snap["confidence"] = None
+        snap["agree"] = None
+        snap["window_camera"] = None
+        self.ear.start()
+        heard = self._score_ear()
+        if heard is not None:
+            snap["model"], snap["confidence"] = heard
+            self._last_model = heard[0]
+            if heard[1] is not None:
+                self._last_confidence = heard[1]
+        elif self.model_pack is not None and self._last_model in ("empty", "occupied"):
+            snap["model"] = self._last_model
+            if self._last_confidence is not None:
+                snap["confidence"] = self._last_confidence
+        elif self.model_pack is None:
+            snap["model"] = None
+            snap["confidence"] = None
+            snap["error"] = self.model_note
+        elif not self.ear.running:
+            snap["model"] = None
+            snap["confidence"] = None
+            snap["error"] = "model is waiting. Port 9057 is busy."
+        elif self.ear.lines == 0 and self.ear.clients == 0:
+            snap["model"] = None
+            snap["confidence"] = None
+            snap["error"] = "model is waiting for CSI from the boards."
+        elif self.ear.lines == 0:
+            snap["model"] = None
+            snap["confidence"] = None
+            snap["error"] = "boards are connected. Waiting for a CSI line."
+        else:
+            snap["model"] = None
+            snap["confidence"] = None
+            snap["error"] = "model is waiting for one full second of CSI."
         self.start_camera()
         self._apply_live_camera(snap)
+        self._remember(snap)
+        cam = snap.get("camera")
+        model = snap.get("model")
+        if cam in ("empty", "occupied") and model in ("empty", "occupied"):
+            snap["agree"] = cam == model
+        else:
+            snap["agree"] = None
 
     def _apply_live_camera(self, snap: dict) -> None:
         """Camera card follows the lens. Model card stays the CSI score."""
@@ -678,46 +709,46 @@ class Live:
             with self.lock:
                 self.state["error"] = str(exc)
             return
-        if fetched.get("session") is None:
+        if not fetched.get("open"):
             snap = {
                 "error": None,
                 "tag": self.tag,
                 "camera": "waiting",
                 "model": None,
                 "agree": None,
-                "note": "no stored session",
+                "confidence": None,
+                "open": False,
                 "rows": 0,
                 "history": list(self.history),
             }
-            self._apply_sources(snap)
-            snap["note"] = self._model_line()
-            if self._score_error and not snap.get("error"):
-                snap["error"] = self._score_error
-            with self.lock:
-                self.state = {**self.state, **snap}
-            return
-        snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
-        snap["open"] = bool(fetched.get("open"))
-        snap["started_age_sec"] = fetched.get("started_age_sec")
-        stamp = snap["stamp"]
-        if stamp is not None and stamp != self.last_stamp and snap["model"] is not None:
-            self.history.append(
-                {
-                    "camera": snap["window_camera"],
-                    "model": snap["model"],
-                    "agree": snap["agree"],
-                }
-            )
-            self.last_stamp = stamp
-        snap["trustworthy"] = self.trustworthy
-        snap["history"] = list(self.history)
-        snap["error"] = None
+        else:
+            snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
+            snap["open"] = True
+            snap["started_age_sec"] = fetched.get("started_age_sec")
+            snap["error"] = None
+            snap["history"] = list(self.history)
         self._apply_sources(snap)
         if snap.get("model_error") and not snap.get("error"):
             snap["error"] = snap["model_error"]
         if self._score_error and not snap.get("error"):
             snap["error"] = self._score_error
-        snap["note"] = self._model_line()
+        where = "with the collect" if snap.get("open") else "live room"
+        snap["note"] = f"{self._model_line()}  ·  {where}"
+        snap["trustworthy"] = self.trustworthy
+        cam = snap.get("camera")
+        model = snap.get("model")
+        stamp = snap.get("stamp")
+        if (
+            stamp is not None
+            and stamp != self.last_stamp
+            and cam in ("empty", "occupied")
+            and model in ("empty", "occupied")
+        ):
+            self.history.append(
+                {"camera": cam, "model": model, "agree": snap.get("agree")}
+            )
+            self.last_stamp = stamp
+            snap["history"] = list(self.history)
         with self.lock:
             self.state = snap
 
@@ -875,8 +906,7 @@ def serve(live: Live, host: str, port: int) -> None:
     httpd = ThreadingHTTPServer((host, port), make_handler(live))
     print(f"room live  http://{host}:{port}", flush=True)
     print(
-        "camera follows a running collect, or the lens when collect is stopped. "
-        "model is the latest CSI second.",
+        "both cards follow a running collect. With collect stopped, both follow the room now.",
         flush=True,
     )
     try:
@@ -895,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--session",
         default=None,
-        help="tag to score. Default: the open collect, or the latest stored session.",
+        help="Prefer this open collect. With no collect running, the page reads the room directly.",
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=PORT)

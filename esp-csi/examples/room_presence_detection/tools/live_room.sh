@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# On the Mini, with or without collect_to_mini. Does not bind the CSI ports.
+# On the Mini. With a collect open, both cards read that collect and this
+# script leaves port 9057 to it. With collect stopped, this script binds 9057.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../../.." && pwd)"
