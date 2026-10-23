@@ -539,7 +539,10 @@ def _previous_score(path: Path) -> float | None:
     if int(previous.get("node_dim", 0)) != NODE_DIM:
         return None
     try:
-        score = float(previous.get("best_score"))
+        raw = previous.get("best_score")
+        if raw is None:
+            raw = previous.get("loo_mean_recall")
+        score = float(raw)
     except (TypeError, ValueError):
         return None
     if score != score:

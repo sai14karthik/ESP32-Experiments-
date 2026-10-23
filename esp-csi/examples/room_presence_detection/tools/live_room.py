@@ -409,6 +409,7 @@ class Live:
             self.model_mtime = None
             self.model_note = note
             self.trustworthy = None
+            self._forget_model_score()
             self._publish_note()
             return
         mtime = self.model_path.stat().st_mtime
@@ -421,6 +422,7 @@ class Live:
             self.model_mtime = mtime
             self.model_note = str(exc)
             self.trustworthy = None
+            self._forget_model_score()
             print(self.model_note, flush=True)
             self._publish_note()
             return
@@ -429,15 +431,22 @@ class Live:
             self.model_mtime = mtime
             self.model_note = "no trained model yet. Camera still updates."
             self.trustworthy = None
+            self._forget_model_score()
             print(self.model_note, flush=True)
             self._publish_note()
             return
         self.model_pack = loaded
         self.model_mtime = mtime
         self.trustworthy = loaded[2]
+        self._forget_model_score()
         self.model_note = self._model_line()
         print(self.model_note, flush=True)
         self._publish_note()
+
+    def _forget_model_score(self) -> None:
+        """Drop a cached call so the next word comes from the file just loaded."""
+        self._last_model = None
+        self._last_confidence = None
 
     def _publish_note(self) -> None:
         with self.lock:
@@ -534,6 +543,10 @@ class Live:
             self._last_camera = camera
         elif self._last_camera in ("empty", "occupied"):
             snap["camera"] = self._last_camera
+        if self.model_pack is None:
+            snap["model"] = None
+            snap["confidence"] = None
+            return
         if model in ("empty", "occupied"):
             self._last_model = model
             if isinstance(snap.get("confidence"), (int, float)):
