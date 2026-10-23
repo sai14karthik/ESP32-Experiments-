@@ -6,6 +6,11 @@ The same row gets a camera ground-truth label: empty (0) or occupied (1),
 from YOLO26-pose on the ESP camera.
 
   ./tools/collect_to_mini.sh --session pipeline_test
+
+A second terminal can show the camera label next to the trained model
+without stopping this collector:
+
+  ./tools/live_room.sh
 """
 
 from __future__ import annotations

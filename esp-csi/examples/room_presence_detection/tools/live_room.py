@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""Live camera label next to the trained room model.
+
+Run this on the Mini in a second terminal while collect_to_mini is writing.
+It only reads Postgres. It does not bind the CSI port.
+
+  ./tools/live_room.sh
+
+Open http://127.0.0.1:9070 on the Mini. The camera value is the same
+cv_occupied stored with the CSI. The model scores the last full second
+with the same features as train_room.py. Until a model file exists, the
+camera side still updates.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import threading
+import time
+from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import numpy as np
+
+import train_room as recipe
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_DB = recipe.DEFAULT_DB
+DEFAULT_MODEL = recipe.DEFAULT_MODEL
+PORT = 9070
+LOOKBACK_SEC = 3.0
+VOTE_WINDOWS = 4
+HISTORY = 40
+
+
+def _esc(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _word(label: int | None) -> str | None:
+    if label is None:
+        return None
+    return "occupied" if int(label) else "empty"
+
+
+def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
+    """Return (pipeline, empty-room baselines, trustworthy) or None if absent."""
+    if not path.is_file():
+        return None
+    import joblib
+
+    bundle = joblib.load(path)
+    if int(bundle.get("feature_version", 0)) != recipe.FEATURE_VERSION:
+        raise RuntimeError(f"{path} is an older feature recipe. Train again.")
+    if int(bundle.get("node_dim", 0)) != recipe.NODE_DIM:
+        raise RuntimeError(f"{path} does not match this trainer.")
+    bases = np.asarray(bundle["baselines"], dtype=np.float64)
+    if bases.shape != (len(recipe.NODE_IDS), recipe.N_SC):
+        raise RuntimeError(f"{path} baselines have shape {bases.shape}")
+    return bundle["model"], bases, bool(bundle.get("evaluation_trustworthy"))
+
+
+def score_packets(
+    by_node: dict[int, list],
+    model,
+    bases: np.ndarray,
+) -> dict | None:
+    """Score the newest complete seconds. Majority of the last few windows."""
+    x, y, _rssi = recipe.fuse_session(by_node)
+    if x.shape[0] == 0:
+        return None
+    n = min(VOTE_WINDOWS, x.shape[0])
+    xs = x[-n:]
+    ys = y[-n:]
+    scored = recipe.with_baseline(xs, bases)
+    pred = model.predict(scored).astype(int)
+    newest = int(pred[-1])
+    ones = int(np.sum(pred == 1))
+    zeros = int(pred.size - ones)
+    if ones == zeros:
+        held = newest
+    else:
+        held = 1 if ones > zeros else 0
+    confidence = None
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(scored[-1:])[0]
+        confidence = float(np.max(proba))
+    nodes = [
+        node
+        for node in recipe.NODE_IDS
+        if x[-1, node * recipe.NODE_DIM + recipe.PRESENT_AT] > 0.5
+    ]
+    return {
+        "model": held,
+        "window_camera": int(ys[-1]),
+        "confidence": confidence,
+        "nodes": nodes,
+        "windows": int(x.shape[0]),
+    }
+
+
+def _fetch(url: str, tag: str | None) -> dict:
+    import psycopg
+
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        if tag:
+            cur.execute(
+                """
+                SELECT id::text, tag
+                FROM room_presence_sessions
+                WHERE tag = %s
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (tag,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id::text, tag
+                FROM room_presence_sessions
+                WHERE ended_at IS NULL
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+        session = cur.fetchone()
+        if session is None:
+            return {"session": None}
+        sid, found = session
+        cur.execute(
+            """
+            SELECT node_id, host_ts, rssi, iq, cv_occupied, seq
+            FROM room_presence_csi
+            WHERE session_id = %s
+              AND host_ts >= now() - make_interval(secs => %s)
+            ORDER BY node_id, host_ts, seq
+            """,
+            (sid, LOOKBACK_SEC),
+        )
+        rows = cur.fetchall()
+    return {"session": sid, "tag": found, "rows": rows}
+
+
+def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
+    """Build one dashboard snapshot from a few seconds of CSI rows."""
+    latest_ts = None
+    latest_seq = -1
+    latest_cv = None
+    by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
+    for node, host_ts, rssi, iq, cv, seq in rows:
+        ts = host_ts.timestamp()
+        if latest_ts is None or ts > latest_ts or (ts == latest_ts and int(seq or 0) >= latest_seq):
+            latest_ts = ts
+            latest_seq = int(seq or 0)
+            latest_cv = None if cv is None else int(cv)
+        if node not in recipe.NODE_IDS or iq is None or cv is None:
+            continue
+        parsed = recipe._packet(iq)
+        if parsed is None:
+            continue
+        amp, phase = parsed
+        by_node[int(node)].append((ts, amp, phase, float(rssi or 0), int(cv)))
+
+    age = None if latest_ts is None else max(0.0, time.time() - latest_ts)
+    scored = None
+    model_error = None
+    if model_pack is not None and any(by_node.values()):
+        try:
+            scored = score_packets(by_node, model_pack[0], model_pack[1])
+        except Exception as exc:
+            model_error = str(exc)
+    camera_now = _word(latest_cv) or "waiting"
+    window_camera = _word(scored["window_camera"]) if scored else None
+    model_word = _word(scored["model"]) if scored else None
+    agree = None
+    if scored is not None:
+        agree = scored["model"] == scored["window_camera"]
+    return {
+        "tag": tag,
+        "camera": camera_now,
+        "window_camera": window_camera,
+        "model": model_word,
+        "agree": agree,
+        "confidence": None if scored is None else scored["confidence"],
+        "nodes": [] if scored is None else scored["nodes"],
+        "age_sec": age,
+        "rows": len(rows),
+        "model_error": model_error,
+        "stamp": None if latest_ts is None else round(latest_ts, 3),
+    }
+
+
+class Live:
+    def __init__(self, url: str, model_path: Path, tag: str | None) -> None:
+        self.url = url
+        self.model_path = model_path
+        self.tag = tag
+        self.lock = threading.Lock()
+        self.model_pack = None
+        self.model_mtime = None
+        self.model_note = "no trained model yet"
+        self.trustworthy = None
+        self.history: deque[dict] = deque(maxlen=HISTORY)
+        self.last_stamp = None
+        self.state: dict = {
+            "tag": tag,
+            "camera": "waiting",
+            "window_camera": None,
+            "model": None,
+            "agree": None,
+            "confidence": None,
+            "nodes": [],
+            "age_sec": None,
+            "rows": 0,
+            "model_error": None,
+            "note": self.model_note,
+            "trustworthy": None,
+            "history": [],
+            "error": None,
+        }
+
+    def refresh_model(self) -> None:
+        if not self.model_path.is_file():
+            self.model_pack = None
+            self.model_mtime = None
+            self.model_note = "no trained model yet. Camera still updates."
+            self.trustworthy = None
+            return
+        mtime = self.model_path.stat().st_mtime
+        if self.model_mtime == mtime and self.model_pack is not None:
+            return
+        try:
+            loaded = load_model(self.model_path)
+        except Exception as exc:
+            self.model_pack = None
+            self.model_note = str(exc)
+            self.trustworthy = None
+            return
+        self.model_pack = loaded
+        self.model_mtime = mtime
+        self.trustworthy = loaded[2]
+        self.model_note = "model loaded" if loaded[2] else "model loaded, evaluation not trustworthy yet"
+
+    def poll_once(self) -> None:
+        self.refresh_model()
+        try:
+            fetched = _fetch(self.url, self.tag)
+        except Exception as exc:
+            with self.lock:
+                self.state["error"] = str(exc)
+            return
+        if fetched.get("session") is None:
+            with self.lock:
+                self.state = {
+                    **self.state,
+                    "error": None,
+                    "tag": self.tag,
+                    "camera": "waiting",
+                    "model": None,
+                    "note": "no collection running",
+                    "rows": 0,
+                    "history": list(self.history),
+                }
+            return
+        snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
+        stamp = snap["stamp"]
+        if stamp is not None and stamp != self.last_stamp and snap["model"] is not None:
+            self.history.append(
+                {
+                    "camera": snap["window_camera"],
+                    "model": snap["model"],
+                    "agree": snap["agree"],
+                }
+            )
+            self.last_stamp = stamp
+        snap["note"] = snap["model_error"] or self.model_note
+        snap["trustworthy"] = self.trustworthy
+        snap["history"] = list(self.history)
+        snap["error"] = None
+        with self.lock:
+            self.state = snap
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return dict(self.state)
+
+
+def _page(state: dict) -> str:
+    camera = state.get("camera") or "waiting"
+    model = state.get("model") or "—"
+    agree = state.get("agree")
+    if agree is True:
+        match = "model matches the camera on that second"
+    elif agree is False:
+        match = "model disagrees with the camera on that second"
+    else:
+        match = "waiting for a full second from two receivers"
+    window_camera = state.get("window_camera")
+    lag = ""
+    if window_camera and window_camera != camera:
+        lag = f"The scored second was {window_camera}. The camera now says {camera}."
+    conf = state.get("confidence")
+    conf_s = "" if conf is None else f"{conf * 100:.0f}% confidence"
+    nodes = ", ".join(str(n) for n in state.get("nodes") or []) or "—"
+    age = state.get("age_sec")
+    age_s = "—" if age is None else f"{age:.1f}s since last row"
+    ticks = []
+    for item in state.get("history") or []:
+        kind = "ok" if item.get("agree") else "bad"
+        ticks.append(f'<i class="{kind}" title="{item.get("camera")} / {item.get("model")}"></i>')
+    tag = state.get("tag") or "—"
+    note = state.get("note") or ""
+    error = state.get("error") or ""
+    trust = state.get("trustworthy")
+    trust_s = "" if trust is None else ("trustworthy" if trust else "not trustworthy yet")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room live</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #12141a; color: #e8e6e3; }}
+  main {{ max-width: 880px; margin: 0 auto; padding: 28px 20px 48px; }}
+  h1 {{ font-size: 15px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #9a968f; margin: 0 0 18px; }}
+  .cards {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+  .card {{ border-radius: 16px; padding: 18px 20px 16px; background: #1c1f27; }}
+  .card .k {{ font-size: 13px; color: #9a968f; text-transform: uppercase; letter-spacing: 0.06em; }}
+  .card .v {{ font-size: 44px; font-weight: 680; line-height: 1.05; margin-top: 8px; text-transform: lowercase; }}
+  .empty {{ color: #8fd49a; }}
+  .occupied {{ color: #f0c36a; }}
+  .waiting, .none {{ color: #8b909a; }}
+  .match {{ margin: 16px 0 8px; font-size: 18px; }}
+  .match.bad {{ color: #f0a0a0; }}
+  .match.ok {{ color: #8fd49a; }}
+  .meta {{ color: #9a968f; font-size: 14px; line-height: 1.55; }}
+  .strip {{ display: flex; gap: 4px; flex-wrap: wrap; margin-top: 18px; min-height: 14px; }}
+  .strip i {{ width: 14px; height: 14px; border-radius: 3px; display: inline-block; background: #2a2e38; }}
+  .strip i.ok {{ background: #3d8f55; }}
+  .strip i.bad {{ background: #a85a5a; }}
+  @media (max-width: 640px) {{
+    .cards {{ grid-template-columns: 1fr; }}
+    .card .v {{ font-size: 42px; }}
+  }}
+</style>
+</head>
+<body>
+<main>
+  <h1>Room live · {_esc(str(tag))}</h1>
+  <div class="cards">
+    <section class="card">
+      <div class="k">Camera</div>
+      <div class="v {camera}">{camera}</div>
+    </section>
+    <section class="card">
+      <div class="k">Model</div>
+      <div class="v {model if model in ('empty', 'occupied') else 'none'}">{model}</div>
+    </section>
+  </div>
+  <p class="match {('ok' if agree else 'bad') if agree is not None else ''}">{match}</p>
+  <p class="meta">{_esc(lag)}<br>{_esc(conf_s)}<br>receivers {_esc(nodes)} · {_esc(age_s)}<br>{_esc(note)} {_esc(trust_s)}<br>{_esc(error)}</p>
+  <div class="strip">{''.join(ticks)}</div>
+</main>
+<script>
+async function tick() {{
+  try {{
+    const res = await fetch('/api/live', {{ cache: 'no-store' }});
+    const data = await res.json();
+    const cam = data.camera || 'waiting';
+    const model = data.model || '—';
+    document.querySelector('h1').textContent = 'Room live · ' + (data.tag || '—');
+    const cards = document.querySelectorAll('.card .v');
+    cards[0].textContent = cam;
+    cards[0].className = 'v ' + cam;
+    cards[1].textContent = model;
+    cards[1].className = 'v ' + (model === 'empty' || model === 'occupied' ? model : 'none');
+    const match = document.querySelector('.match');
+    if (data.agree === true) {{
+      match.textContent = 'model matches the camera on that second';
+      match.className = 'match ok';
+    }} else if (data.agree === false) {{
+      match.textContent = 'model disagrees with the camera on that second';
+      match.className = 'match bad';
+    }} else {{
+      match.textContent = 'waiting for a full second from two receivers';
+      match.className = 'match';
+    }}
+    const lag = (data.window_camera && data.window_camera !== cam)
+      ? ('The scored second was ' + data.window_camera + '. The camera now says ' + cam + '.')
+      : '';
+    const conf = data.confidence == null ? '' : (Math.round(data.confidence * 100) + '% confidence');
+    const nodes = (data.nodes || []).join(', ') || '—';
+    const age = data.age_sec == null ? '—' : (data.age_sec.toFixed(1) + 's since last row');
+    const trust = data.trustworthy == null ? '' : (data.trustworthy ? 'trustworthy' : 'not trustworthy yet');
+    document.querySelector('.meta').innerHTML = [lag, conf, 'receivers ' + nodes + ' · ' + age, (data.note || '') + ' ' + trust, data.error || ''].filter(Boolean).join('<br>');
+    const strip = document.querySelector('.strip');
+    strip.textContent = '';
+    for (const item of data.history || []) {{
+      const mark = document.createElement('i');
+      mark.className = item.agree ? 'ok' : 'bad';
+      mark.title = item.camera + ' / ' + item.model;
+      strip.appendChild(mark);
+    }}
+  }} catch (err) {{
+    document.querySelector('.match').textContent = 'dashboard lost the update';
+  }}
+}}
+setInterval(tick, 500);
+</script>
+</body>
+</html>
+"""
+
+
+def make_handler(live: Live):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+        def _send(self, code: int, body: bytes, content_type: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            path = self.path.split("?", 1)[0]
+            if path == "/api/live":
+                body = json.dumps(live.snapshot()).encode()
+                self._send(200, body, "application/json")
+                return
+            if path in ("/", "/index.html"):
+                self._send(200, _page(live.snapshot()).encode(), "text/html; charset=utf-8")
+                return
+            self._send(404, b"not found", "text/plain")
+
+    return Handler
+
+
+def serve(live: Live, host: str, port: int) -> None:
+    def loop() -> None:
+        while True:
+            live.poll_once()
+            time.sleep(0.4)
+
+    threading.Thread(target=loop, daemon=True).start()
+    httpd = ThreadingHTTPServer((host, port), make_handler(live))
+    print(f"room live  http://{host}:{port}", flush=True)
+    print("camera is the stored cv label. model is the last full second.", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        httpd.server_close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Live camera vs room model")
+    p.add_argument("--database-url", default=DEFAULT_DB)
+    p.add_argument("--model", type=Path, default=DEFAULT_MODEL)
+    p.add_argument("--session", default=None, help="tag to follow. Default: the open collection.")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=PORT)
+    args = p.parse_args(argv)
+    live = Live(args.database_url, args.model, args.session)
+    serve(live, args.host, args.port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

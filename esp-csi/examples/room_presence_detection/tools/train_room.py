@@ -651,40 +651,36 @@ def train(
     if rssi_recalls and not beats_rssi:
         print("model did not beat RSSI alone")
     print(f"evaluation_trustworthy={trustworthy}")
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    import joblib
-
-    joblib.dump(
-        {
-            "model": model,
-            "trained_at": datetime.now(timezone.utc).isoformat(),
-            "holdout": holdout,
-            "train_tags": [b[0] for b in fit_blocks],
-            "window_sec": WINDOW_SEC,
-            "hop_sec": HOP_SEC,
-            "node_ids": NODE_IDS,
-            "node_dim": NODE_DIM,
-            "feature_version": FEATURE_VERSION,
-            "baselines": bases.tolist(),
-            "iq_len": IQ_LEN,
-            "min_packets": MIN_PACKETS,
-            "max_gap_sec": MAX_GAP_SEC,
-            "evaluation_trustworthy": trustworthy,
-            "loo": [
-                {k: v for k, v in r.items() if k not in ("y_true", "y_pred")}
-                for r in reports
-            ],
-            "confusion_matrix": confusion,
-            "loo_mean_recall": mean_recall,
-            "rssi_only": mean_rssi,
-            "negative_control": neg,
-            "holdout_recall": exam_recall,
-            "n_empty": n_empty,
-            "n_occupied": n_occ,
-        },
-        model_path,
-    )
-    print(f"saved {model_path}")
+    bundle = {
+        "model": model,
+        "role": "best",
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "holdout": holdout,
+        "train_tags": [b[0] for b in fit_blocks],
+        "window_sec": WINDOW_SEC,
+        "hop_sec": HOP_SEC,
+        "node_ids": NODE_IDS,
+        "node_dim": NODE_DIM,
+        "feature_version": FEATURE_VERSION,
+        "baselines": bases.tolist(),
+        "iq_len": IQ_LEN,
+        "min_packets": MIN_PACKETS,
+        "max_gap_sec": MAX_GAP_SEC,
+        "evaluation_trustworthy": trustworthy,
+        "loo": [
+            {k: v for k, v in r.items() if k not in ("y_true", "y_pred")}
+            for r in reports
+        ],
+        "confusion_matrix": confusion,
+        "loo_mean_recall": mean_recall,
+        "best_score": mean_recall,
+        "rssi_only": mean_rssi,
+        "negative_control": neg,
+        "holdout_recall": exam_recall,
+        "n_empty": n_empty,
+        "n_occupied": n_occ,
+    }
+    _save_best(model_path, bundle, mean_recall, trustworthy)
     return 0
 
 
