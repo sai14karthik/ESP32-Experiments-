@@ -125,8 +125,10 @@ def score_packets(
         held = 1 if ones > zeros else 0
     confidence = None
     if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(scored[-1:])[0]
-        confidence = float(np.max(proba))
+        proba = model.predict_proba(scored)
+        classes = [int(c) for c in model.classes_]
+        if held in classes:
+            confidence = float(np.mean(proba[:, classes.index(held)]))
     nodes = [
         node
         for node in recipe.NODE_IDS
@@ -372,6 +374,7 @@ class Live:
         self._ear_counts: dict[int, int] = {}
         self._last_camera: str | None = None
         self._last_model: str | None = None
+        self._last_confidence: float | None = None
         self._score_error: str | None = None
         self.lock = threading.Lock()
         self.model_pack = None
@@ -506,7 +509,7 @@ class Live:
         """
         return bool(snap.get("open"))
 
-    def _score_ear(self) -> str | None:
+    def _score_ear(self) -> tuple[str, float | None] | None:
         if self.model_pack is None or not self.ear.running:
             return None
         by_node = self.ear.recent()
@@ -521,7 +524,7 @@ class Live:
         if scored is None:
             return None
         self._score_error = None
-        return _word(scored["model"])
+        return _word(scored["model"]), scored["confidence"]
 
     def _remember(self, snap: dict) -> None:
         """Keep the last real words. A failed score must not erase them."""
@@ -533,8 +536,12 @@ class Live:
             snap["camera"] = self._last_camera
         if model in ("empty", "occupied"):
             self._last_model = model
+            if isinstance(snap.get("confidence"), (int, float)):
+                self._last_confidence = float(snap["confidence"])
         elif self._last_model in ("empty", "occupied"):
             snap["model"] = self._last_model
+            if snap.get("confidence") is None and self._last_confidence is not None:
+                snap["confidence"] = self._last_confidence
 
     def _apply_sources(self, snap: dict) -> None:
         """Camera and model both move, with a collect running or without one."""
@@ -544,9 +551,14 @@ class Live:
             self.ear.start()
             heard = self._score_ear()
             if heard is not None:
-                snap["model"] = heard
+                snap["model"], snap["confidence"] = heard
+                self._last_model = heard[0]
+                if heard[1] is not None:
+                    self._last_confidence = heard[1]
             elif snap.get("open") and self._last_model in ("empty", "occupied"):
                 snap["model"] = self._last_model
+                if self._last_confidence is not None:
+                    snap["confidence"] = self._last_confidence
             elif self.model_pack is None:
                 snap["model"] = None
                 snap["error"] = self.model_note
@@ -668,9 +680,16 @@ class Live:
             return dict(self.state)
 
 
+def _percent(confidence) -> str:
+    if not isinstance(confidence, (int, float)) or confidence != confidence:
+        return ""
+    return f"{round(100 * float(confidence))}%"
+
+
 def _page(state: dict) -> str:
     camera = state.get("camera") or "waiting"
     model = state.get("model") or "—"
+    confidence = _percent(state.get("confidence"))
     agree = state.get("agree")
     if agree is True:
         match = "model matches the camera"
@@ -692,7 +711,7 @@ def _page(state: dict) -> str:
   h1 {{ font-size: 28px; font-weight: 650; letter-spacing: 0; text-transform: none; color: #e8e6e3; margin: 0 0 22px; }}
   .cards {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
   .card {{ border-radius: 16px; padding: 18px 20px 16px; background: #1c1f27; }}
-  .card .k {{ font-size: 13px; color: #9a968f; text-transform: uppercase; letter-spacing: 0.06em; }}
+  .card .conf {{ margin-top: 10px; font-size: 22px; font-weight: 600; color: #d5d1ca; min-height: 1.2em; }}
   .card .v {{ font-size: 44px; font-weight: 680; line-height: 1.05; margin-top: 8px; text-transform: lowercase; animation: liveblink 0.9s step-end infinite; }}
   @keyframes liveblink {{
     0% {{ opacity: 1; }}
@@ -723,6 +742,7 @@ def _page(state: dict) -> str:
     <section class="card">
       <div class="k">Model</div>
       <div class="v {model if model in ('empty', 'occupied') else 'none'}">{model}</div>
+      <div class="conf">{confidence}</div>
     </section>
   </div>
   <p class="match {('ok' if agree else 'bad') if agree is not None else ''}">{match}</p>
@@ -740,6 +760,10 @@ async function tick() {{
     cards[0].className = 'v ' + cam;
     cards[1].textContent = model;
     cards[1].className = 'v ' + (model === 'empty' || model === 'occupied' ? model : 'none');
+    const conf = document.querySelector('.conf');
+    conf.textContent = (typeof data.confidence === 'number')
+      ? Math.round(data.confidence * 100) + '%'
+      : '';
     const match = document.querySelector('.match');
     if (data.agree === true) {{
       match.textContent = 'model matches the camera';
