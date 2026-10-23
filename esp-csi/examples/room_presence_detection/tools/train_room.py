@@ -247,8 +247,10 @@ def _windows_for_node(
 
 def fuse_session(
     by_node: dict[int, list[tuple[float, np.ndarray, np.ndarray, float, int]]],
+    *,
+    min_nodes: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Concatenate receivers that share a 1-second bin. Need at least two."""
+    """Concatenate receivers that share a 1-second bin. Training needs two."""
     per_node = {node: _windows_for_node(rows) for node, rows in by_node.items()}
     bins: set[int] = set()
     for windows in per_node.values():
@@ -272,7 +274,7 @@ def fuse_session(
             labels.add(label)
             rssis.append(mean_rssi)
             present += 1
-        if present < 2 or len(labels) != 1:
+        if present < min_nodes or len(labels) != 1:
             continue
         xs.append(np.concatenate(parts))
         ys.append(next(iter(labels)))

@@ -94,9 +94,11 @@ def score_packets(
     by_node: dict[int, list],
     model,
     bases: np.ndarray,
+    *,
+    min_nodes: int = 2,
 ) -> dict | None:
     """Score the newest complete seconds. Majority of the last few windows."""
-    x, y, _rssi = recipe.fuse_session(by_node)
+    x, y, _rssi = recipe.fuse_session(by_node, min_nodes=min_nodes)
     if x.shape[0] == 0:
         return None
     n = min(VOTE_WINDOWS, x.shape[0])
@@ -275,7 +277,7 @@ class CsiEar:
                 pass
 
     def recent(self) -> dict[int, list]:
-        cutoff = time.time() - LOOKBACK_SEC
+        cutoff = time.time() - 3.0
         by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
         with self._lock:
             rows = [row for row in self._buf if row[0] >= cutoff]
@@ -336,6 +338,7 @@ class CsiEar:
                     continue
                 except OSError:
                     break
+                print("csi connected", flush=True)
                 threading.Thread(target=read_client, args=(client,), daemon=True).start()
         finally:
             self.running = False
@@ -352,6 +355,7 @@ class Live:
         self._camera_thread_on = False
         self._camera_stop = False
         self.ear = CsiEar()
+        self._ear_counts: dict[int, int] = {}
         self.lock = threading.Lock()
         self.model_pack = None
         self.model_mtime = None
@@ -448,7 +452,15 @@ class Live:
     def _score_ear(self) -> str | None:
         if self.model_pack is None or not self.ear.running:
             return None
-        scored = score_packets(self.ear.recent(), self.model_pack[0], self.model_pack[1])
+        by_node = self.ear.recent()
+        self._ear_counts = {node: len(rows) for node, rows in by_node.items()}
+        try:
+            scored = score_packets(
+                by_node, self.model_pack[0], self.model_pack[1], min_nodes=1
+            )
+        except Exception as exc:
+            self.model_note = str(exc)
+            return None
         if scored is None:
             return None
         return _word(scored["model"])
@@ -459,8 +471,17 @@ class Live:
             self.stop_csi()
         else:
             self.ear.start()
-            snap["model"] = self._score_ear()
+            heard = self._score_ear()
+            snap["model"] = heard
             snap["agree"] = None
+            if heard is None and self.model_pack is None:
+                snap["error"] = self.model_note
+            elif heard is None and not self.ear.running:
+                snap["error"] = "model is waiting. Port 9057 is busy."
+            elif heard is None and sum(self._ear_counts.values()) == 0:
+                snap["error"] = "model is waiting for CSI from the boards."
+            elif heard is None:
+                snap["error"] = "model is waiting for one full second of CSI."
         self._choose_camera(snap)
 
     def _collecting_now(self, snap: dict) -> bool:
