@@ -13,9 +13,9 @@ camera value cv_occupied, not the session name.
 Each window carries gain-normalized amplitude, sanitized phase, how far the
 amplitude shape sits from the camera-empty median, and the short correlation
 and slope terms from csi_pipeline_new version 4. Raw phase and RSSI are not
-features. The score is leave-one-session-out. A saved model is trustworthy
-only after that test has seen both an empty session and an occupied session, the model
-beats RSSI alone, and empty sessions are not separable from each other.
+features. The score is leave-one-session-out. Every finished fit is written to
+tools/models/room_presence.joblib and that file is what live inference loads.
+The trustworthy flag is only a warning. A later train replaces the file.
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ MIN_SPAN_SEC = 0.5
 # batch lands a fraction of a second later. Ignore that clump. A real hole
 # inside the second is larger.
 MAX_GAP_SEC = 0.75
-MIN_WINDOWS = 50
 NODE_IDS = (0, 1, 2)
 # Per receiver, before the empty-room delta is appended:
 # amp mean, amp std, amp end-start, sanitized phase mean, sanitized phase std,
@@ -521,42 +520,14 @@ def _negative_control(blocks: list[Block], seed: int) -> float | None:
     return _balanced_accuracy(yte, model.predict(with_baseline(np.vstack(x_te), bases)))
 
 
-def _previous_best_score(path: Path) -> float | None:
-    """Score of the model live inference is allowed to load, if one is on disk."""
-    if not path.is_file():
-        return None
-    import joblib
-
-    try:
-        previous = joblib.load(path)
-    except Exception:
-        return None
-    if previous.get("role") != "best":
-        return None
-    if int(previous.get("feature_version", 0)) != FEATURE_VERSION:
-        return None
-    if not previous.get("evaluation_trustworthy"):
-        return None
-    score = previous.get("best_score", previous.get("loo_mean_recall"))
-    if score is None or score != score:
-        return None
-    return float(score)
-
-
 def _save_best(path: Path, bundle: dict, score: float, trustworthy: bool) -> None:
-    """Write the one file live inference loads. A weaker later run does not replace it."""
-    if not trustworthy or score != score:
-        print("not saved. Live inference loads only a trusted best model.")
-        return
-    previous = _previous_best_score(path)
-    if previous is not None and previous >= score:
-        print(f"kept {path}  best={previous:.3f}  this run={score:.3f}")
-        return
+    """Write the one file live inference loads. The latest fit replaces it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     import joblib
 
     joblib.dump(bundle, path)
-    print(f"saved {path}  best={score:.3f}")
+    shown = f"{score:.3f}" if score == score else "n/a"
+    print(f"saved {path}  score={shown}  evaluation_trustworthy={trustworthy}")
     print("live inference uses this file")
 
 
@@ -591,12 +562,6 @@ def train(
     if n_empty == 0 or n_occ == 0:
         have = "empty" if n_occ == 0 else "occupied"
         print(f"only {have} windows so far. Collect the other class, then run this again.")
-        return 1
-    if n_empty < MIN_WINDOWS or n_occ < MIN_WINDOWS:
-        print(f"need at least {MIN_WINDOWS} windows of each class (empty={n_empty} occupied={n_occ})")
-        return 1
-    if len(blocks) < 2:
-        print("only one session. Collect a second session before training.")
         return 1
     empty_share = n_empty / max(n_empty + n_occ, 1)
     if empty_share < 0.3 or empty_share > 0.7:

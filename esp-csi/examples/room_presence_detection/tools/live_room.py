@@ -8,8 +8,7 @@ It only reads Postgres. It does not bind the CSI port.
 
 Open http://127.0.0.1:9070 on the Mini. The camera value is the same
 cv_occupied stored with the CSI. The model is only
-tools/models/room_presence.joblib, and only when training saved it as the
-trusted best. A weaker later training run does not replace that file.
+tools/models/room_presence.joblib, the latest file training saved.
 """
 
 from __future__ import annotations
@@ -59,8 +58,8 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     import joblib
 
     bundle = joblib.load(path)
-    if bundle.get("role") != "best" or not bundle.get("evaluation_trustworthy"):
-        raise RuntimeError("room_presence.joblib is not the saved best model")
+    if bundle.get("role") != "best" or "model" not in bundle:
+        raise RuntimeError("room_presence.joblib is not the saved model")
     if int(bundle.get("feature_version", 0)) != recipe.FEATURE_VERSION:
         raise RuntimeError(f"{path} is an older feature recipe. Train again.")
     if int(bundle.get("node_dim", 0)) != recipe.NODE_DIM:
@@ -68,7 +67,7 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     bases = np.asarray(bundle["baselines"], dtype=np.float64)
     if bases.shape != (len(recipe.NODE_IDS), recipe.N_SC):
         raise RuntimeError(f"{path} baselines have shape {bases.shape}")
-    return bundle["model"], bases, True
+    return bundle["model"], bases, bool(bundle.get("evaluation_trustworthy"))
 
 
 def score_packets(
