@@ -47,9 +47,10 @@ LOOKBACK_SEC = FLIP_HOLD_SEC - 0.1
 # A collect commits CSI many times a second. Newer than this means that
 # collect is the camera, so this page does not open a second one.
 FRESH_SEC = 5.0
-# The 5-minute delete can pause commits while it runs. Keep the current
-# cards up through that pause instead of blanking them.
-PURGE_STALL_SEC = 20.0
+# The 5-minute delete runs in one transaction, so new CSI can pause well
+# past a few seconds. An open collect stays the source until rows are
+# this old. A crashed collect that never sets ended_at falls through after.
+PURGE_STALL_SEC = 120.0
 VOTE_WINDOWS = 4
 HISTORY = 40
 
@@ -87,7 +88,16 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     bases = np.asarray(bundle["baselines"], dtype=np.float64)
     if bases.shape != (len(recipe.NODE_IDS), recipe.N_SC):
         raise RuntimeError(f"{path} baselines have shape {bases.shape}")
-    return bundle["model"], bases, bool(bundle.get("evaluation_trustworthy"))
+    return (
+        bundle["model"],
+        bases,
+        bool(bundle.get("evaluation_trustworthy")),
+        {
+            "role": "best",
+            "score": bundle.get("best_score"),
+            "trained_at": bundle.get("trained_at"),
+        },
+    )
 
 
 def score_packets(
@@ -204,14 +214,18 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
         if parsed is None:
             continue
         amp, phase = parsed
-        by_node[int(node)].append((ts, amp, phase, float(rssi or 0), int(cv)))
+        # One label for the whole slice. A flip in the middle would otherwise
+        # throw the second away and the card would go blank.
+        by_node[int(node)].append((ts, amp, phase, float(rssi or 0), 0))
 
     age = None if latest_ts is None else max(0.0, time.time() - latest_ts)
     scored = None
     model_error = None
     if model_pack is not None and any(by_node.values()):
         try:
-            scored = score_packets(by_node, model_pack[0], model_pack[1])
+            scored = score_packets(
+                by_node, model_pack[0], model_pack[1], min_nodes=1
+            )
         except Exception as exc:
             model_error = str(exc)
     camera_now = _word(latest_cv) or "waiting"
@@ -356,6 +370,9 @@ class Live:
         self._camera_stop = False
         self.ear = CsiEar()
         self._ear_counts: dict[int, int] = {}
+        self._last_camera: str | None = None
+        self._last_model: str | None = None
+        self._score_error: str | None = None
         self.lock = threading.Lock()
         self.model_pack = None
         self.model_mtime = None
@@ -382,28 +399,64 @@ class Live:
 
     def refresh_model(self) -> None:
         if not self.model_path.is_file():
+            note = "no trained model yet. Camera still updates."
+            if self.model_note != note:
+                print(note, flush=True)
             self.model_pack = None
             self.model_mtime = None
-            self.model_note = "no trained model yet. Camera still updates."
+            self.model_note = note
             self.trustworthy = None
+            self._publish_note()
             return
         mtime = self.model_path.stat().st_mtime
-        if self.model_mtime == mtime and self.model_pack is not None:
+        if self.model_mtime == mtime:
             return
         try:
             loaded = load_model(self.model_path)
         except Exception as exc:
             self.model_pack = None
+            self.model_mtime = mtime
             self.model_note = str(exc)
             self.trustworthy = None
+            print(self.model_note, flush=True)
+            self._publish_note()
+            return
+        if not loaded:
+            self.model_pack = None
+            self.model_mtime = mtime
+            self.model_note = "no trained model yet. Camera still updates."
+            self.trustworthy = None
+            print(self.model_note, flush=True)
+            self._publish_note()
             return
         self.model_pack = loaded
         self.model_mtime = mtime
         self.trustworthy = loaded[2]
-        self.model_note = "loaded best model"
+        self.model_note = self._model_line()
+        print(self.model_note, flush=True)
+        self._publish_note()
+
+    def _publish_note(self) -> None:
+        with self.lock:
+            self.state["note"] = self.model_note
+            self.state["trustworthy"] = self.trustworthy
+
+    def _model_line(self) -> str:
+        """Identity of the file every live score uses. Training writes this one file."""
+        pack = self.model_pack
+        if not pack or len(pack) < 4:
+            return self.model_note
+        info = pack[3]
+        score = info.get("score")
+        if isinstance(score, (int, float)) and score == score:
+            shown = f"{float(score):.3f}"
+        else:
+            shown = "n/a"
+        when = info.get("trained_at") or ""
+        return f"best model  {self.model_path.name}  score={shown}  {when}".strip()
 
     def start_camera(self) -> None:
-        """Open the RTSP camera in the background. The page comes up while YOLO loads."""
+        """Open the RTSP camera once. Reloading YOLO blanks the card."""
         if self._camera_thread_on or not self.camera_url or self.camera_url == "off":
             return
         if self.camera_error:
@@ -412,26 +465,31 @@ class Live:
         self._camera_stop = False
 
         def run() -> None:
+            labeler = None
             try:
                 labeler = start_camera(self.camera_url, False)
                 if self._camera_stop:
-                    labeler.stop()
                     return
                 self.camera_labeler = labeler
+                labeler = None
                 print(f"camera live  {self.camera_url}", flush=True)
                 while not self._camera_stop:
-                    labeler.poll()
+                    self.camera_labeler.poll()
                     time.sleep(0.05)
             except Exception as exc:
-                self._camera_thread_on = False
                 self.camera_error = str(exc)
                 print(f"camera failed  {exc}", flush=True)
+            finally:
+                self.camera_labeler = None
+                if labeler is not None:
+                    labeler.stop()
+                self._camera_thread_on = False
 
         threading.Thread(target=run, daemon=True).start()
 
     def stop_camera(self) -> None:
+        """Process shutdown only. A poll must not reload YOLO."""
         self._camera_stop = True
-        self._camera_thread_on = False
         labeler = self.camera_labeler
         self.camera_labeler = None
         if labeler is not None:
@@ -441,13 +499,12 @@ class Live:
         self.ear.stop()
 
     def _session_is_live(self, snap: dict) -> bool:
-        """True while collect owns the CSI port and its rows are current."""
-        if not snap.get("open"):
-            return False
-        age = snap.get("age_sec")
-        if age is None:
-            return float(snap.get("started_age_sec") or 999) < 30
-        return age <= PURGE_STALL_SEC
+        """An open collect owns the page until it sets ended_at.
+
+        The 5-minute delete pauses new rows. That pause must not switch the
+        page onto the lens or onto port 9057.
+        """
+        return bool(snap.get("open"))
 
     def _score_ear(self) -> str | None:
         if self.model_pack is None or not self.ear.running:
@@ -459,11 +516,25 @@ class Live:
                 by_node, self.model_pack[0], self.model_pack[1], min_nodes=1
             )
         except Exception as exc:
-            self.model_note = str(exc)
+            self._score_error = str(exc)
             return None
         if scored is None:
             return None
+        self._score_error = None
         return _word(scored["model"])
+
+    def _remember(self, snap: dict) -> None:
+        """Keep the last real words. A failed score must not erase them."""
+        camera = snap.get("camera")
+        model = snap.get("model")
+        if camera in ("empty", "occupied"):
+            self._last_camera = camera
+        elif self._last_camera in ("empty", "occupied"):
+            snap["camera"] = self._last_camera
+        if model in ("empty", "occupied"):
+            self._last_model = model
+        elif self._last_model in ("empty", "occupied"):
+            snap["model"] = self._last_model
 
     def _apply_sources(self, snap: dict) -> None:
         """Camera and model both move, with a collect running or without one."""
@@ -472,44 +543,45 @@ class Live:
         else:
             self.ear.start()
             heard = self._score_ear()
-            snap["model"] = heard
-            snap["agree"] = None
-            if heard is None and self.model_pack is None:
+            if heard is not None:
+                snap["model"] = heard
+            elif snap.get("open") and self._last_model in ("empty", "occupied"):
+                snap["model"] = self._last_model
+            elif self.model_pack is None:
+                snap["model"] = None
                 snap["error"] = self.model_note
-            elif heard is None and not self.ear.running:
+            elif not self.ear.running:
+                snap["model"] = None
                 snap["error"] = "model is waiting. Port 9057 is busy."
-            elif heard is None and sum(self._ear_counts.values()) == 0:
+            elif sum(self._ear_counts.values()) == 0:
+                snap["model"] = None
                 snap["error"] = "model is waiting for CSI from the boards."
-            elif heard is None:
+            else:
                 snap["error"] = "model is waiting for one full second of CSI."
+            snap["agree"] = None
         self._choose_camera(snap)
+        if self._session_is_live(snap):
+            self._remember(snap)
+            cam = snap.get("camera")
+            model = snap.get("model")
+            if cam in ("empty", "occupied") and model in ("empty", "occupied"):
+                snap["agree"] = cam == model
 
     def _collecting_now(self, snap: dict) -> bool:
-        if not snap.get("open"):
+        if not self._session_is_live(snap):
             return False
-        age = snap.get("age_sec")
-        if age is None or age > PURGE_STALL_SEC:
-            return False
-        if snap.get("camera") not in ("empty", "occupied"):
-            previous = self.state.get("camera")
-            if previous in ("empty", "occupied") and age <= PURGE_STALL_SEC:
-                snap["camera"] = previous
-            else:
-                return False
-        if snap.get("model") not in ("empty", "occupied"):
-            previous = self.state.get("model")
-            if previous in ("empty", "occupied"):
-                snap["model"] = previous
-        if age <= FRESH_SEC:
-            return True
-        # Commits pause while the 5-minute delete runs. The cards stay as they are.
-        return snap.get("camera") in ("empty", "occupied")
+        # The stored label can disappear for one poll while the delete runs.
+        # Put the last real camera word back before deciding to open the lens.
+        if snap.get("camera") not in ("empty", "occupied") and self._last_camera in (
+            "empty",
+            "occupied",
+        ):
+            snap["camera"] = self._last_camera
+        return True
 
     def _choose_camera(self, snap: dict) -> None:
         """Use the collect's camera while it is writing. Otherwise read the lens."""
         if self._collecting_now(snap):
-            if self.camera_labeler is not None or self._camera_thread_on:
-                self.stop_camera()
             model = snap.get("model")
             cam = snap.get("camera")
             snap["agree"] = cam == model if model in ("empty", "occupied") else None
@@ -540,6 +612,7 @@ class Live:
         snap["agree"] = word == model if model in ("empty", "occupied") else None
 
     def poll_once(self) -> None:
+        self._score_error = None
         self.refresh_model()
         try:
             fetched = _fetch(self.url, self.tag)
@@ -559,6 +632,9 @@ class Live:
                 "history": list(self.history),
             }
             self._apply_sources(snap)
+            snap["note"] = self._model_line()
+            if self._score_error and not snap.get("error"):
+                snap["error"] = self._score_error
             with self.lock:
                 self.state = {**self.state, **snap}
             return
@@ -575,11 +651,15 @@ class Live:
                 }
             )
             self.last_stamp = stamp
-        snap["note"] = snap["model_error"] or self.model_note
         snap["trustworthy"] = self.trustworthy
         snap["history"] = list(self.history)
         snap["error"] = None
         self._apply_sources(snap)
+        if snap.get("model_error") and not snap.get("error"):
+            snap["error"] = snap["model_error"]
+        if self._score_error and not snap.get("error"):
+            snap["error"] = self._score_error
+        snap["note"] = self._model_line()
         with self.lock:
             self.state = snap
 
@@ -646,7 +726,7 @@ def _page(state: dict) -> str:
     </section>
   </div>
   <p class="match {('ok' if agree else 'bad') if agree is not None else ''}">{match}</p>
-  <p class="meta">{_esc(error)}</p>
+  <p class="meta">{_esc(state.get("note") or error)}</p>
 </main>
 <script>
 async function tick() {{
@@ -671,7 +751,8 @@ async function tick() {{
       match.textContent = 'waiting for a full second';
       match.className = 'match';
     }}
-    document.querySelector('.meta').textContent = data.error || '';
+    const bits = [data.note, data.error].filter(Boolean);
+    document.querySelector('.meta').textContent = bits.join('  ');
   }} catch (err) {{
     document.querySelector('.match').textContent = 'dashboard lost the update';
   }}
@@ -755,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
     live = Live(args.database_url, recipe.DEFAULT_MODEL, args.session, args.camera)
+    live.refresh_model()
     serve(live, args.host, args.port)
     return 0
 

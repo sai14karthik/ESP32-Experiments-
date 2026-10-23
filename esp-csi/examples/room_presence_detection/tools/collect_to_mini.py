@@ -309,17 +309,19 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
     def accept_csi() -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        deadline = time.time() + 20
+        announced = False
         while not stop.is_set():
             try:
                 srv.bind(("0.0.0.0", CSI_PORT))
                 break
             except OSError as exc:
-                if time.time() > deadline:
-                    print(f"could not listen on {CSI_PORT} ({exc})", flush=True)
-                    srv.close()
-                    return
-                time.sleep(0.3)
+                if not announced:
+                    print(f"waiting for port {CSI_PORT} ({exc})", flush=True)
+                    announced = True
+                time.sleep(0.5)
+        else:
+            srv.close()
+            return
         srv.listen(8)
         print(f"listening 0.0.0.0:{CSI_PORT} for CSI", flush=True)
 
