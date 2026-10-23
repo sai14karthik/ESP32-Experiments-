@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Live camera label next to the trained room model.
 
-Run this on the Mini. It does not bind the CSI port.
-The Camera card reads the RTSP camera itself, so it updates when someone
-walks in even if no collect is running. The Model card scores the open
-collect, or the last second already stored.
+Run this on the Mini. It does not bind the CSI port, so a collect can run
+at the same time. While CSI is being stored, the Camera card follows that
+collect. With no collect running, the Camera card reads the RTSP camera
+itself. The Model card scores the open collect, or the last stored second.
 
   ./tools/live_room.sh
 
@@ -33,6 +33,9 @@ DEFAULT_DB = recipe.DEFAULT_DB
 DEFAULT_MODEL = recipe.DEFAULT_MODEL
 PORT = 9070
 LOOKBACK_SEC = 3.0
+# A collect commits CSI many times a second. Newer than this means that
+# collect is the camera, so this page does not open a second one.
+FRESH_SEC = 5.0
 VOTE_WINDOWS = 4
 HISTORY = 40
 
@@ -216,6 +219,8 @@ class Live:
         self.camera_url = camera
         self.camera_labeler = None
         self.camera_error = None
+        self._camera_thread_on = False
+        self._camera_stop = False
         self.lock = threading.Lock()
         self.model_pack = None
         self.model_mtime = None
@@ -264,24 +269,55 @@ class Live:
 
     def start_camera(self) -> None:
         """Open the RTSP camera in the background. The page comes up while YOLO loads."""
-        if not self.camera_url or self.camera_url == "off":
+        if self._camera_thread_on or not self.camera_url or self.camera_url == "off":
             return
+        if self.camera_error:
+            return
+        self._camera_thread_on = True
+        self._camera_stop = False
 
         def run() -> None:
             try:
-                self.camera_labeler = start_camera(self.camera_url, False)
+                labeler = start_camera(self.camera_url, False)
+                if self._camera_stop:
+                    labeler.stop()
+                    return
+                self.camera_labeler = labeler
                 print(f"camera live  {self.camera_url}", flush=True)
             except Exception as exc:
+                self._camera_thread_on = False
                 self.camera_error = str(exc)
                 print(f"camera failed  {exc}", flush=True)
 
         threading.Thread(target=run, daemon=True).start()
 
     def stop_camera(self) -> None:
+        self._camera_stop = True
+        self._camera_thread_on = False
         labeler = self.camera_labeler
         self.camera_labeler = None
         if labeler is not None:
             labeler.stop()
+
+    def _collecting_now(self, snap: dict) -> bool:
+        age = snap.get("age_sec")
+        return (
+            age is not None
+            and age <= FRESH_SEC
+            and snap.get("camera") in ("empty", "occupied")
+        )
+
+    def _choose_camera(self, snap: dict) -> None:
+        """Use the collect's camera while it is writing. Otherwise read the lens."""
+        if self._collecting_now(snap):
+            if self.camera_labeler is not None or self._camera_thread_on:
+                self.stop_camera()
+            model = snap.get("model")
+            cam = snap.get("camera")
+            snap["agree"] = cam == model if model in ("empty", "occupied") else None
+            return
+        self.start_camera()
+        self._apply_live_camera(snap)
 
     def _apply_live_camera(self, snap: dict) -> None:
         """Camera card follows the lens. Model card stays the CSI score."""
@@ -322,7 +358,7 @@ class Live:
                 "rows": 0,
                 "history": list(self.history),
             }
-            self._apply_live_camera(snap)
+            self._choose_camera(snap)
             with self.lock:
                 self.state = {**self.state, **snap}
             return
@@ -341,7 +377,7 @@ class Live:
         snap["trustworthy"] = self.trustworthy
         snap["history"] = list(self.history)
         snap["error"] = None
-        self._apply_live_camera(snap)
+        self._choose_camera(snap)
         with self.lock:
             self.state = snap
 
@@ -485,7 +521,11 @@ def serve(live: Live, host: str, port: int) -> None:
     threading.Thread(target=loop, daemon=True).start()
     httpd = ThreadingHTTPServer((host, port), make_handler(live))
     print(f"room live  http://{host}:{port}", flush=True)
-    print("camera follows the lens. model is the last full second of CSI.", flush=True)
+    print(
+        "camera follows a running collect, or the lens when collect is stopped. "
+        "model is the latest CSI second.",
+        flush=True,
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -512,7 +552,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
     live = Live(args.database_url, recipe.DEFAULT_MODEL, args.session, args.camera)
-    live.start_camera()
     serve(live, args.host, args.port)
     return 0
 

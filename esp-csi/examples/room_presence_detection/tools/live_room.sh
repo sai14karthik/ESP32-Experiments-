@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# On the Mini. Scores the open collect, or the latest stored session if none is open.
+# On the Mini, with or without collect_to_mini. Does not bind the CSI ports.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../../.." && pwd)"
