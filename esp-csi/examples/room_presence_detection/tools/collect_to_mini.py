@@ -492,8 +492,15 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
             threading.Thread(target=accept_loop, daemon=True).start()
             threading.Thread(target=accept_csi, daemon=True).start()
             while True:
+                # The camera pass and the database writes run on this thread.
+                # Judge the boards at the start of the pass so a slow frame
+                # cannot look like every receiver went silent together.
+                loop_start = time.time()
                 if labeler is not None:
                     labeler.poll()
+                # Inference holds this thread. Let the CSI readers drain what
+                # arrived during that pass before deciding anyone is down.
+                time.sleep(0)
                 watch.note_camera(_camera_frame_at(labeler))
                 cv_occupied = camera_label(labeler)
                 action, hold = gate.observe(cv_occupied, time.time())
@@ -511,7 +518,7 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                         break
                     csi_batch.append((sample, src))
                 now = time.time()
-                missing = watch.update(now)
+                missing = watch.update(loop_start)
                 if missing:
                     if not watch.ready:
                         noted = tuple(missing)
