@@ -17,7 +17,8 @@ on port 9057.
 
   ./tools/live_room.sh
 
-Open http://127.0.0.1:9070 on the Mini. The model is only
+Open http://127.0.0.1:9070 on the Mini. The same camera and model pair
+is printed in this terminal. The model is only
 tools/models/room_presence.joblib, the latest file training saved.
 """
 
@@ -417,6 +418,9 @@ class Live:
         self.trustworthy = None
         self.history: deque[dict] = deque(maxlen=HISTORY)
         self.last_stamp = None
+        self._printed_key = None
+        self._printed_at = 0.0
+        self._last_pair_at = 0.0
         self.state: dict = {
             "tag": tag,
             "camera": "waiting",
@@ -482,34 +486,43 @@ class Live:
         self._last_camera = None
         self._last_model = None
         self._last_confidence = None
+        self._last_pair_at = 0.0
 
     def _show_pair(self, snap: dict, camera, model, confidence) -> bool:
         """Publish both cards from one moment.
 
         A camera word without a model score from that same moment stays off
         the page, and the reverse. The last complete pair stays until the next
-        one is ready.
+        one is ready, and only while it is still this moment.
         """
+        now = time.time()
         if camera in ("empty", "occupied") and model in ("empty", "occupied"):
             self._last_camera = camera
             self._last_model = model
             self._last_confidence = (
                 float(confidence) if isinstance(confidence, (int, float)) else None
             )
+            self._last_pair_at = now
             snap["camera"] = camera
             snap["model"] = model
             snap["confidence"] = self._last_confidence
             snap["agree"] = camera == model
             return True
-        if self._last_camera in ("empty", "occupied") and self._last_model in (
-            "empty",
-            "occupied",
-        ):
+        held = (
+            self._last_camera in ("empty", "occupied")
+            and self._last_model in ("empty", "occupied")
+            and now - self._last_pair_at <= COLLECT_STALE_SEC
+        )
+        if held:
             snap["camera"] = self._last_camera
             snap["model"] = self._last_model
             snap["confidence"] = self._last_confidence
             snap["agree"] = self._last_camera == self._last_model
             return True
+        self._last_camera = None
+        self._last_model = None
+        self._last_confidence = None
+        self._last_pair_at = 0.0
         snap["camera"] = "waiting"
         snap["model"] = None
         snap["confidence"] = None
@@ -738,6 +751,41 @@ class Live:
             snap["history"] = list(self.history)
         with self.lock:
             self.state = snap
+        self._print_live(snap)
+
+    def _print_live(self, snap: dict) -> None:
+        """Print the same pair the page shows. Repeat a steady pair once a second."""
+        camera = snap.get("camera") or "waiting"
+        model = snap.get("model")
+        if model in ("empty", "occupied"):
+            conf = _percent(snap.get("confidence"))
+            model_col = f"{model}  {conf}".rstrip()
+        else:
+            model = "—"
+            model_col = "—"
+            conf = ""
+        agree = snap.get("agree")
+        if agree is True:
+            match = "match"
+        elif agree is False:
+            match = "disagree"
+        else:
+            match = ""
+        where = "with the collect" if snap.get("open") else "live room"
+        err = snap.get("error") or ""
+        key = (camera, model, conf, match, where, err)
+        now = time.time()
+        if key == self._printed_key and now - self._printed_at < 1.0:
+            return
+        self._printed_key = key
+        self._printed_at = now
+        line = f"camera={camera}  model={model_col}"
+        if match:
+            line += f"  {match}"
+        line += f"  {where}"
+        if err:
+            line += f"  {err}"
+        print(line, flush=True)
 
     def snapshot(self) -> dict:
         with self.lock:
