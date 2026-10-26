@@ -133,6 +133,14 @@ TX_MAC = "1a:00:00:00:00:00"
 # one-frame camera flicker does not wipe the session.
 PURGE_BEFORE_FLIP_SEC = 300.0
 FLIP_HOLD_SEC = 2.0
+# Receivers that must all be delivering. One silent board is a stall.
+NODE_IDS = (0, 1, 2)
+# No frame or CSI packet for this long means that device is stuck.
+DEVICE_STALL_SEC = 8.0
+# While a stall lasts, repeat the 5-minute delete about once a second.
+PURGE_REPEAT_SEC = 1.0
+# If any device, or all of them, stay down this long, stop the collector.
+OUTAGE_STOP_SEC = 300.0
 
 
 def parse_csi_line(line: str) -> dict | None:
@@ -258,12 +266,97 @@ def purge_before_flip(cur, session_id, *, hold_sec: float) -> tuple[int, int]:
     return csi_deleted, cur.rowcount
 
 
+def purge_while_down(cur, session_id) -> tuple[int, int]:
+    """Delete this session's rows from the last 5 minutes.
+
+    Called for as long as the camera or any receiver is stuck, so partial
+    rows from the outage do not stay, and neither do the 5 minutes before it.
+    """
+    cur.execute(
+        """
+        DELETE FROM room_presence_csi
+        WHERE session_id = %s
+          AND host_ts >= now() - make_interval(secs => %s)
+        """,
+        (session_id, PURGE_BEFORE_FLIP_SEC),
+    )
+    csi_deleted = cur.rowcount
+    cur.execute(
+        """
+        DELETE FROM room_presence_samples
+        WHERE session_id = %s
+          AND host_ts >= now() - make_interval(secs => %s)
+        """,
+        (session_id, PURGE_BEFORE_FLIP_SEC),
+    )
+    return csi_deleted, cur.rowcount
+
+
+class DeviceWatch:
+    """Camera plus every receiver. Storage waits until all of them are live."""
+
+    def __init__(self, *, camera_on: bool) -> None:
+        self.camera_on = camera_on
+        self.node_at: dict[int, float | None] = {node: None for node in NODE_IDS}
+        self.camera_at: float | None = None
+        self.ready = False
+        self._lock = threading.Lock()
+
+    def note_node(self, node: int, now: float) -> None:
+        with self._lock:
+            if node in self.node_at:
+                self.node_at[node] = now
+
+    def note_camera(self, frame_at: float | None) -> None:
+        if frame_at is None:
+            return
+        with self._lock:
+            self.camera_at = frame_at
+
+    def missing(self, now: float) -> list[str]:
+        with self._lock:
+            node_at = dict(self.node_at)
+            camera_at = self.camera_at
+        missing = []
+        for node in NODE_IDS:
+            seen = node_at[node]
+            if seen is None or now - seen > DEVICE_STALL_SEC:
+                missing.append(f"node {node}")
+        if self.camera_on and (camera_at is None or now - camera_at > DEVICE_STALL_SEC):
+            missing.append("camera")
+        return missing
+
+    def update(self, now: float) -> list[str]:
+        missing = self.missing(now)
+        if not missing:
+            self.ready = True
+        return missing
+
+
+def _camera_frame_at(labeler) -> float | None:
+    """Newest proof the camera delivered a frame.
+
+    Frame time is when the picture arrived. The hit time is when YOLO finished
+    that picture. A slow inference must not look like a dead camera.
+    """
+    if labeler is None:
+        return None
+    frames = getattr(labeler, "_frames", None)
+    frame_at = getattr(frames, "frame_at", None) if frames is not None else None
+    hits = getattr(labeler, "_hits", None)
+    hit_at = hits[-1][0] if hits else None
+    times = [stamp for stamp in (frame_at, hit_at) if stamp is not None]
+    if not times:
+        return None
+    return max(times)
+
+
 def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bool) -> int:
     import psycopg
 
     labeler = None if camera == "off" else start_camera(camera, preview)
     samples: queue.Queue = queue.Queue()
-    csi_q: queue.Queue = queue.Queue(maxsize=500)
+    csi_q: queue.Queue = queue.Queue(maxsize=8000)
     stop = threading.Event()
 
     def accept_loop() -> None:
@@ -342,6 +435,9 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                         sample = parse_csi_line(raw.decode("utf-8", "replace").strip())
                         if sample is None:
                             continue
+                        # Stamp liveness here. The main loop may be busy in
+                        # YOLO, and a full queue must not look like a dead board.
+                        watch.note_node(int(sample["node"]), time.time())
                         try:
                             csi_q.put_nowait((sample, addr[0]))
                         except queue.Full:
@@ -369,6 +465,14 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
     csi_n = 0
     session_id = None
     gate = FlipGate()
+    watch = DeviceWatch(camera_on=labeler is not None)
+    outage = False
+    outage_since = 0.0
+    stopped_down = False
+    announced_live = False
+    wait_note: tuple[str, ...] | None = None
+    last_purge_at = 0.0
+    last_outage_note = 0.0
     try:
         with psycopg.connect(database_url, autocommit=False) as conn:
             apply_schema(conn)
@@ -390,8 +494,87 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
             while True:
                 if labeler is not None:
                     labeler.poll()
+                watch.note_camera(_camera_frame_at(labeler))
                 cv_occupied = camera_label(labeler)
                 action, hold = gate.observe(cv_occupied, time.time())
+                statuses: list[tuple] = []
+                while True:
+                    try:
+                        statuses.append(samples.get_nowait())
+                    except queue.Empty:
+                        break
+                csi_batch: list[tuple] = []
+                while True:
+                    try:
+                        sample, src = csi_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    csi_batch.append((sample, src))
+                now = time.time()
+                missing = watch.update(now)
+                if missing:
+                    if not watch.ready:
+                        noted = tuple(missing)
+                        if noted != wait_note:
+                            print(
+                                f"waiting for {', '.join(missing)}",
+                                flush=True,
+                            )
+                            wait_note = noted
+                    else:
+                        if not outage:
+                            outage = True
+                            outage_since = now
+                            print(
+                                f"devices down  {', '.join(missing)}  "
+                                "deleting last 5 min until all are back  "
+                                f"stopping in {int(OUTAGE_STOP_SEC)}s if they stay down",
+                                flush=True,
+                            )
+                            last_outage_note = now
+                        elif now - last_outage_note >= 30.0:
+                            left = max(0, int(OUTAGE_STOP_SEC - (now - outage_since)))
+                            print(
+                                f"still down  {', '.join(missing)}  "
+                                f"deleting last 5 min  stopping in {left}s",
+                                flush=True,
+                            )
+                            last_outage_note = now
+                        if now - last_purge_at >= PURGE_REPEAT_SEC:
+                            with conn.cursor() as cur:
+                                csi_deleted, status_deleted = purge_while_down(
+                                    cur, session_id
+                                )
+                            csi_n = max(0, csi_n - csi_deleted)
+                            n = max(0, n - status_deleted)
+                            conn.commit()
+                            last_purge_at = now
+                            if csi_deleted or status_deleted:
+                                print(
+                                    f"deleted last 5 min  csi={csi_deleted}  "
+                                    f"status={status_deleted}",
+                                    flush=True,
+                                )
+                        if now - outage_since >= OUTAGE_STOP_SEC:
+                            stopped_down = True
+                            print(
+                                f"devices still down  {', '.join(missing)}  stopping",
+                                flush=True,
+                            )
+                            break
+                    if not statuses and not csi_batch:
+                        time.sleep(0.02)
+                    continue
+                if outage:
+                    outage = False
+                    print("all devices back", flush=True)
+                    # Queued lines arrived while a device was down. Do not store them.
+                    statuses.clear()
+                    csi_batch.clear()
+                if not announced_live:
+                    announced_live = True
+                    print("all devices live", flush=True)
+                wait_note = None
                 purged = False
                 if action == "init":
                     print(f"cv stable {_cv_word(cv_occupied)}", flush=True)
@@ -409,11 +592,7 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                     )
                     purged = True
                 drained = False
-                while True:
-                    try:
-                        status, src = samples.get_nowait()
-                    except queue.Empty:
-                        break
+                for status, src in statuses:
                     drained = True
                     with conn.cursor() as cur:
                         insert_status(cur, session_id, status, cv_occupied)
@@ -425,11 +604,7 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
                             flush=True,
                         )
                 got_csi = False
-                for _ in range(80):
-                    try:
-                        sample, src = csi_q.get_nowait()
-                    except queue.Empty:
-                        break
+                for sample, src in csi_batch:
                     got_csi = True
                     with conn.cursor() as cur:
                         insert_csi(cur, session_id, sample, src, cv_occupied)
@@ -466,6 +641,8 @@ def listen_push(port: int, database_url: str, tag: str, camera: str, preview: bo
             except Exception as exc:
                 print(f"could not mark session ended: {exc}")
     print(f"stored {n} status rows  {csi_n} csi rows  tag={tag}")
+    if stopped_down:
+        return 2
     return 0 if (n or csi_n) else 1
 
 

@@ -51,6 +51,7 @@ class PersonLabeler:
         self._preview_ok = show_preview
         self._warned_preview = False
         self.last_occupied = False
+        self._frame_seq_seen = -1
 
     @property
     def model_name(self) -> str:
@@ -137,8 +138,11 @@ class PersonLabeler:
         """Grab one frame, update occupancy. Must run on main thread if previewing."""
         assert self._model is not None and self._frames is not None
         frame = self._frames.read()
-        if frame is None:
+        seq = self._frames.frame_seq
+        # A dead stream keeps the last picture. That is not a new frame.
+        if frame is None or seq == self._frame_seq_seen:
             return self.last_occupied
+        self._frame_seq_seen = seq
 
         results = self._model.predict(frame, **self._predict_kw)
         occupied = False

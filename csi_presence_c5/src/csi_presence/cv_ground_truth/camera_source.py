@@ -84,6 +84,8 @@ class FrameSource:
         self._thread: threading.Thread | None = None
         self._cap = None
         self._mode = "webcam"
+        self.frame_at: float | None = None
+        self._frame_seq = 0
 
     def start(self) -> None:
         errors: list[str] = []
@@ -162,21 +164,34 @@ class FrameSource:
             time.sleep(0.05)
         raise RuntimeError(f"no frames from {self.source} within {timeout}s")
 
+    def _remember(self, frame: np.ndarray) -> None:
+        with self._lock:
+            self._frame = frame
+            self._frame_seq += 1
+            self.frame_at = time.time()
+
     def _loop_iter(self, it: Any) -> None:
         try:
             for frame, _ts in it:
                 if self._stop.is_set():
                     break
-                with self._lock:
-                    self._frame = frame
+                self._remember(frame)
         except Exception as exc:
             print(f"[cv] stream ended ({exc})", flush=True)
+
+    @property
+    def frame_seq(self) -> int:
+        with self._lock:
+            return self._frame_seq
 
     def read(self) -> np.ndarray | None:
         if self._mode == "webcam":
             assert self._cap is not None
             ok, frame = self._cap.read()
-            return frame if ok else None
+            if not ok or frame is None:
+                return None
+            self._remember(frame)
+            return frame
         with self._lock:
             if self._frame is None:
                 return None
