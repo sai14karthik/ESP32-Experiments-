@@ -14,7 +14,8 @@ Each window carries gain-normalized amplitude, sanitized phase, how far the
 amplitude shape sits from the camera-empty median, and the short correlation
 and slope terms from csi_pipeline_new version 4. Raw phase and RSSI are not
 features. The score is leave-one-session-out, weighted by how many windows
-each session has. Live inference loads tools/models/room_presence.joblib.
+each session has. Results include unoccupied accuracy and occupied accuracy
+separately. A class that was not in the held-out windows is reported as n/a. Live inference loads tools/models/room_presence.joblib.
 A new fit replaces that file only when it tested both camera labels and its
 score is higher, or when the saved file never tested both and this one did.
 A train that never held out occupied does not replace the file.
@@ -438,6 +439,26 @@ def _recall(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(y_pred == y_true))
 
 
+def _class_accuracy(y_true: np.ndarray, y_pred: np.ndarray, label: int) -> float:
+    """Share of windows of this camera label that were predicted as that label."""
+    mask = y_true == label
+    if y_true.size == 0 or not np.any(mask):
+        return float("nan")
+    return float(np.mean(y_pred[mask] == label))
+
+
+def _fmt_acc(value: float) -> str:
+    if value != value:
+        return "n/a"
+    return f"{value:.3f}"
+
+
+def _stored_acc(value: float) -> float | None:
+    if value != value:
+        return None
+    return float(value)
+
+
 def _cv_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Camera-label score. Balanced accuracy when the session has both labels."""
     if len(set(y_true.tolist())) > 1:
@@ -464,6 +485,8 @@ def _leave_one_session_out(blocks: list[Block], seed: int) -> list[dict]:
         model = _fit(with_baseline(x_tr, bases), y_tr, seed)
         pred = model.predict(with_baseline(x_te, bases))
         score = _cv_score(y_te, pred)
+        empty_acc = _class_accuracy(y_te, pred, 0)
+        occupied_acc = _class_accuracy(y_te, pred, 1)
         rule = _rssi_rule(
             np.concatenate([b[3] for b in rest]),
             y_tr,
@@ -478,6 +501,7 @@ def _leave_one_session_out(blocks: list[Block], seed: int) -> list[dict]:
         shown = "+".join("occupied" if v == 1 else "empty" for v in labels)
         print(
             f"loo {tag}  cv={shown}  windows={y_te.size}  "
+            f"unoccupied={_fmt_acc(empty_acc)}  occupied={_fmt_acc(occupied_acc)}  "
             f"score={score:.3f}  rssi_only={rssi_score:.3f}"
         )
         reports.append(
@@ -487,6 +511,8 @@ def _leave_one_session_out(blocks: list[Block], seed: int) -> list[dict]:
                 "labels": labels,
                 "windows": int(y_te.size),
                 "recall": score,
+                "unoccupied_accuracy": _stored_acc(empty_acc),
+                "occupied_accuracy": _stored_acc(occupied_acc),
                 "rssi_recall": rssi_score,
                 "y_true": y_te,
                 "y_pred": pred,
@@ -697,6 +723,8 @@ def train(
     if model_recalls:
         print(f"loo_mean_recall={mean_recall:.3f}  rssi_only={mean_rssi:.3f}  (weighted by windows)")
     confusion = None
+    unoccupied_accuracy = float("nan")
+    occupied_accuracy = float("nan")
     pooled_true = [r["y_true"] for r in scored if "y_true" in r]
     if pooled_true:
         from sklearn.metrics import (
@@ -708,22 +736,32 @@ def train(
 
         y_true = np.concatenate(pooled_true)
         y_pred = np.concatenate([r["y_pred"] for r in scored if "y_pred" in r])
+        unoccupied_accuracy = _class_accuracy(y_true, y_pred, 0)
+        occupied_accuracy = _class_accuracy(y_true, y_pred, 1)
         confusion = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
+        print(
+            f"unoccupied_accuracy={_fmt_acc(unoccupied_accuracy)}  "
+            f"windows={int(np.sum(y_true == 0))}  "
+            f"occupied_accuracy={_fmt_acc(occupied_accuracy)}  "
+            f"windows={int(np.sum(y_true == 1))}"
+        )
         print(
             f"accuracy={accuracy_score(y_true, y_pred):.3f}  "
             f"balanced_accuracy={balanced_accuracy_score(y_true, y_pred):.3f}"
         )
-        print("confusion matrix  rows=true camera label, cols=predicted  [empty, occupied]")
+        print("confusion matrix  rows=true camera label, cols=predicted  [unoccupied, occupied]")
         print(f"  {confusion}")
         print(
             classification_report(
                 y_true,
                 y_pred,
                 labels=[0, 1],
-                target_names=["empty", "occupied"],
+                target_names=["unoccupied", "occupied"],
                 zero_division=0,
             )
         )
+    else:
+        print("unoccupied_accuracy=n/a  windows=0  occupied_accuracy=n/a  windows=0")
     if not tested_empty or not tested_occupied:
         print(
             "leave-one-session-out has not seen both camera labels. "
@@ -743,11 +781,17 @@ def train(
     if exam is not None:
         exam_pred = model.predict(with_baseline(exam[1], bases))
         exam_recall = _cv_score(exam[2], exam_pred)
+        exam_empty = _class_accuracy(exam[2], exam_pred, 0)
+        exam_occupied = _class_accuracy(exam[2], exam_pred, 1)
         shown = "+".join(
-            "occupied" if v == 1 else "empty"
+            "occupied" if v == 1 else "unoccupied"
             for v in sorted({int(v) for v in exam[2].tolist()})
         )
-        print(f"holdout {exam[0]}  cv={shown}  windows={exam[2].size}  score={exam_recall:.3f}")
+        print(
+            f"holdout {exam[0]}  cv={shown}  windows={exam[2].size}  "
+            f"unoccupied={_fmt_acc(exam_empty)}  occupied={_fmt_acc(exam_occupied)}  "
+            f"score={exam_recall:.3f}"
+        )
 
     beats_rssi = (not rssi_recalls) or mean_recall > mean_rssi + 1e-6
     trustworthy = bool(tested_empty and tested_occupied and beats_rssi and (neg is None or neg < 0.7))
@@ -779,6 +823,8 @@ def train(
         "confusion_matrix": confusion,
         "loo_mean_recall": mean_recall,
         "best_score": mean_recall,
+        "unoccupied_accuracy": _stored_acc(unoccupied_accuracy),
+        "occupied_accuracy": _stored_acc(occupied_accuracy),
         "tested_both": bool(tested_empty and tested_occupied),
         "rssi_only": mean_rssi,
         "negative_control": neg,
