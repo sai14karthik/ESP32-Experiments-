@@ -86,9 +86,10 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     bundle = joblib.load(path)
     if bundle.get("role") != "best" or "model" not in bundle:
         raise RuntimeError("room_presence.joblib is not the saved model")
-    if int(bundle.get("feature_version", 0)) != recipe.FEATURE_VERSION:
+    version = int(bundle.get("feature_version", 0))
+    if version not in (4, 5):
         raise RuntimeError(f"{path} is an older feature recipe. Train again.")
-    if int(bundle.get("node_dim", 0)) != recipe.NODE_DIM:
+    if int(bundle.get("node_dim", 0)) != recipe.node_dim_for(version):
         raise RuntimeError(f"{path} does not match this trainer.")
     bases = np.asarray(bundle["baselines"], dtype=np.float64)
     if bases.shape != (len(recipe.NODE_IDS), recipe.N_SC):
@@ -101,8 +102,18 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
             "role": "best",
             "score": bundle.get("best_score"),
             "trained_at": bundle.get("trained_at"),
+            "feature_version": version,
         },
     )
+
+
+def _feature_version(model_pack) -> int:
+    if not model_pack or len(model_pack) < 4:
+        return recipe.FEATURE_VERSION
+    try:
+        return int(model_pack[3].get("feature_version", recipe.FEATURE_VERSION))
+    except (TypeError, ValueError):
+        return recipe.FEATURE_VERSION
 
 
 def score_packets(
@@ -111,15 +122,18 @@ def score_packets(
     bases: np.ndarray,
     *,
     min_nodes: int = 2,
+    feature_version: int = recipe.FEATURE_VERSION,
 ) -> dict | None:
     """Score the newest complete seconds. Majority of the last few windows."""
-    x, y, _rssi = recipe.fuse_session(by_node, min_nodes=min_nodes)
+    x, y, _rssi = recipe.fuse_session(
+        by_node, min_nodes=min_nodes, feature_version=feature_version
+    )
     if x.shape[0] == 0:
         return None
     n = min(VOTE_WINDOWS, x.shape[0])
     xs = x[-n:]
     ys = y[-n:]
-    scored = recipe.with_baseline(xs, bases)
+    scored = recipe.with_baseline(xs, bases, version=feature_version)
     pred = model.predict(scored).astype(int)
     newest = int(pred[-1])
     ones = int(np.sum(pred == 1))
@@ -134,10 +148,11 @@ def score_packets(
         classes = [int(c) for c in model.classes_]
         if held in classes:
             confidence = float(np.mean(proba[:, classes.index(held)]))
+    width = recipe.node_dim_for(feature_version)
     nodes = [
         node
         for node in recipe.NODE_IDS
-        if x[-1, node * recipe.NODE_DIM + recipe.PRESENT_AT] > 0.5
+        if x[-1, node * width + width - 1] > 0.5
     ]
     return {
         "model": held,
@@ -206,7 +221,9 @@ def _fetch(url: str, tag: str | None) -> dict:
     }
 
 
-def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
+def state_from_rows(
+    tag: str | None, rows: list, model_pack, visit_bases: dict | None = None
+) -> dict:
     """Build one dashboard snapshot from a few seconds of CSI rows."""
     latest_ts = None
     latest_seq = -1
@@ -237,10 +254,22 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
     age = None if latest_ts is None else max(0.0, time.time() - latest_ts)
     scored = None
     model_error = None
+    version = _feature_version(model_pack)
+    bases = None if model_pack is None else model_pack[1]
+    if (
+        version >= 5
+        and bases is not None
+        and visit_bases is not None
+    ):
+        bases = recipe.refresh_visit_bases(rows, bases, visit_bases)
     if model_pack is not None and any(by_node.values()):
         try:
             scored = score_packets(
-                by_node, model_pack[0], model_pack[1], min_nodes=1
+                by_node,
+                model_pack[0],
+                bases,
+                min_nodes=1,
+                feature_version=version,
             )
         except Exception as exc:
             model_error = str(exc)
@@ -421,6 +450,7 @@ class Live:
         self._printed_key = None
         self._printed_at = 0.0
         self._last_pair_at = 0.0
+        self._visit_bases: dict[int, np.ndarray] = {}
         self.state: dict = {
             "tag": tag,
             "camera": "waiting",
@@ -487,6 +517,7 @@ class Live:
         self._last_model = None
         self._last_confidence = None
         self._last_pair_at = 0.0
+        self._visit_bases = {}
 
     def _show_pair(self, snap: dict, camera, model, confidence) -> bool:
         """Publish both cards from one moment.
@@ -627,6 +658,7 @@ class Live:
         self._last_confidence = None
         self.last_stamp = None
         if source == "collect":
+            self._visit_bases = {}
             self.stop_csi()
             self.stop_camera()
             print("live follows the collect", flush=True)
@@ -638,9 +670,19 @@ class Live:
             return None
         by_node = self.ear.recent()
         self._ear_counts = {node: len(rows) for node, rows in by_node.items()}
+        version = _feature_version(self.model_pack)
+        bases = self.model_pack[1]
+        if version >= 5 and self._visit_bases:
+            bases = np.array(bases, dtype=np.float64, copy=True)
+            for node, median in self._visit_bases.items():
+                bases[node] = median
         try:
             scored = score_packets(
-                by_node, self.model_pack[0], self.model_pack[1], min_nodes=1
+                by_node,
+                self.model_pack[0],
+                bases,
+                min_nodes=1,
+                feature_version=version,
             )
         except Exception as exc:
             self._score_error = str(exc)
@@ -722,7 +764,9 @@ class Live:
                 "history": list(self.history),
             }
         else:
-            snap = state_from_rows(fetched["tag"], fetched["rows"], self.model_pack)
+            snap = state_from_rows(
+                fetched["tag"], fetched["rows"], self.model_pack, self._visit_bases
+            )
             snap["open"] = True
             snap["started_age_sec"] = fetched.get("started_age_sec")
             snap["error"] = None

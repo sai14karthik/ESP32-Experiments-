@@ -10,15 +10,17 @@ Session tags named empty_* or occupied_* choose which runs to load.
 pipeline_test and every other tag are ignored. The label on each row is the
 camera value cv_occupied, not the session name.
 
-Each window carries gain-normalized amplitude, sanitized phase, how far the
-amplitude shape sits from the camera-empty median, and the short correlation
-and slope terms from csi_pipeline_new version 4. Raw phase and RSSI are not
-features. The score is leave-one-session-out, weighted by how many windows
-each session has. Results include unoccupied accuracy and occupied accuracy
-separately. A class that was not in the held-out windows is reported as n/a. Live inference loads tools/models/room_presence.joblib.
-A new fit replaces that file only when it tested both camera labels and its
-score is higher, or when the saved file never tested both and this one did.
-A train that never held out occupied does not replace the file.
+Each window carries motion, how much the second varies, and how far the
+amplitude shape sits from that visit's empty room. The raw amplitude shape,
+raw phase, and RSSI are not features. A visit's empty room is the empty
+windows in that session, or the nearest session that has them. The score is
+leave-one-session-out, weighted by how many windows each session has.
+Results include unoccupied accuracy and occupied accuracy separately. A class
+that was not in the held-out windows is reported as n/a. Live inference loads
+tools/models/room_presence.joblib. A new fit replaces that file only when it
+tested both labels, the empty-versus-empty score is near 0.5, and both class
+accuracies are higher than the saved file. A train that never held out
+occupied does not replace the file.
 """
 
 from __future__ import annotations
@@ -48,15 +50,37 @@ MIN_SPAN_SEC = 0.5
 # inside the second is larger.
 MAX_GAP_SEC = 0.75
 NODE_IDS = (0, 1, 2)
-# Per receiver, before the empty-room delta is appended:
+# Version 4, kept so a saved model from that recipe still scores:
 # amp mean, amp std, amp end-start, sanitized phase mean, sanitized phase std,
-# then energy slope, motion, adjacent-tap correlation, frame correlation,
-# center-band ratio, and a present flag.
-_SCALARS = 6
-NODE_DIM = N_SC * 5 + _SCALARS
+# then six scalars ending in a present flag.
+_V4_SCALARS = 6
+_V4_NODE_DIM = N_SC * 5 + _V4_SCALARS
+# Version 5, per receiver, before the empty-room delta replaces the mean:
+# amplitude mean (used only to build the delta), variation, motion,
+# energy slope, and a present flag.
+_V5_SCALARS = 4
+_V5_NODE_DIM = N_SC + _V5_SCALARS
+FEATURE_VERSION = 5
+NODE_DIM = _V5_NODE_DIM
 PRESENT_AT = NODE_DIM - 1
-FEATURE_VERSION = 4
+# An empty median needs this many windows before it can stand for the visit.
+MIN_VISIT_EMPTY = 30
+# Live updates a visit baseline from this many camera-empty packets per receiver.
+MIN_LIVE_EMPTY_PACKETS = 30
+# The saved file is replaced only when empty-versus-empty lands in this band
+# and both class accuracies beat the file already on disk. These are the
+# bars when that file has no stored class accuracies.
+NEG_CONTROL_LO = 0.35
+NEG_CONTROL_HI = 0.65
+BAR_UNOCCUPIED = 0.705
+BAR_OCCUPIED = 0.260
 _EPS = 1e-6
+
+
+def node_dim_for(version: int) -> int:
+    if int(version) >= 5:
+        return _V5_NODE_DIM
+    return _V4_NODE_DIM
 
 
 def _hampel(x: np.ndarray, half: int = 3) -> np.ndarray:
@@ -127,11 +151,8 @@ def _packet(iq) -> tuple[np.ndarray, np.ndarray] | None:
     return amp, phase
 
 
-def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
-    """One receiver, one second. Baseline delta is added later, from empty windows only."""
-    mean = amps.mean(axis=0)
-    std = amps.std(axis=0)
-    delta = amps[-1] - amps[0]
+def _motion_terms(amps: np.ndarray) -> tuple[float, float, float]:
+    """Variation across the second, motion, and the slope of total energy."""
     energy = amps.sum(axis=1)
     t = np.arange(amps.shape[0], dtype=np.float64)
     if amps.shape[0] > 1 and float(np.std(t)) > _EPS:
@@ -140,6 +161,16 @@ def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
     else:
         energy_slope = 0.0
         motion = 0.0
+    variation = float(amps.std(axis=0).mean())
+    return variation, motion, energy_slope
+
+
+def node_features_v4(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
+    """Version 4 window. The raw shape and sanitized phase stay in the vector."""
+    mean = amps.mean(axis=0)
+    std = amps.std(axis=0)
+    delta = amps[-1] - amps[0]
+    _variation, motion, energy_slope = _motion_terms(amps)
     adjacent = float(
         np.mean(
             [
@@ -170,16 +201,35 @@ def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
             ),
         ]
     )
-    assert feat.shape == (NODE_DIM,)
+    assert feat.shape == (_V4_NODE_DIM,)
     return feat
 
 
-def empty_baselines(x: np.ndarray, empty: np.ndarray) -> np.ndarray:
+def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
+    """Version 5 window. The mean is kept only so the empty-room delta can replace it."""
+    del phases
+    mean = amps.mean(axis=0)
+    variation, motion, energy_slope = _motion_terms(amps)
+    feat = np.concatenate(
+        [
+            mean,
+            np.array([variation, motion, energy_slope, 1.0], dtype=np.float64),
+        ]
+    )
+    assert feat.shape == (_V5_NODE_DIM,)
+    return feat
+
+
+def empty_baselines(
+    x: np.ndarray, empty: np.ndarray, *, version: int = FEATURE_VERSION
+) -> np.ndarray:
     """Median amplitude shape per receiver, from camera-empty windows only."""
+    width = node_dim_for(version)
+    present_at = width - 1
     bases = []
     for node in NODE_IDS:
-        start = node * NODE_DIM
-        present = x[:, start + PRESENT_AT] > 0.5
+        start = node * width
+        present = x[:, start + present_at] > 0.5
         use = present & empty
         if not np.any(use):
             bases.append(np.ones(N_SC, dtype=np.float64))
@@ -188,21 +238,63 @@ def empty_baselines(x: np.ndarray, empty: np.ndarray) -> np.ndarray:
     return np.stack(bases)
 
 
-def with_baseline(x: np.ndarray, bases: np.ndarray) -> np.ndarray:
-    """Append how far each receiver's amplitude shape sits from the empty room."""
+def with_baseline(
+    x: np.ndarray, bases: np.ndarray, *, version: int = FEATURE_VERSION
+) -> np.ndarray:
+    """Turn each receiver's amplitude mean into its change from the empty room.
+
+    Version 5 replaces the mean, so the raw shape is not a model input.
+    Version 4 keeps the old vector and appends the change.
+    """
+    width = node_dim_for(version)
+    present_at = width - 1
+    if int(version) >= 5:
+        out = np.array(x, dtype=np.float64, copy=True)
+    else:
+        out = None
     deltas = []
     for node in NODE_IDS:
-        start = node * NODE_DIM
+        start = node * width
         mean = x[:, start : start + N_SC]
-        present = x[:, start + PRESENT_AT] > 0.5
+        present = x[:, start + present_at] > 0.5
         delta = (mean - bases[node]) / (bases[node] + _EPS)
         delta[~present] = 0.0
-        deltas.append(delta)
+        if out is not None:
+            out[:, start : start + N_SC] = delta
+        else:
+            deltas.append(delta)
+    if out is not None:
+        return out
     return np.hstack([x, *deltas])
+
+
+def refresh_visit_bases(rows, fallback, cache: dict[int, np.ndarray]) -> np.ndarray:
+    """Remember the empty room from camera-empty packets and reuse it later.
+
+    Occupied packets do not move the memory. A receiver with too few empty
+    packets keeps the saved median.
+    """
+    buckets: dict[int, list[np.ndarray]] = {node: [] for node in NODE_IDS}
+    for node, _ts, _rssi, iq, cv, _seq in rows:
+        if cv is None or int(cv) != 0 or int(node) not in NODE_IDS:
+            continue
+        parsed = _packet(iq)
+        if parsed is None:
+            continue
+        buckets[int(node)].append(parsed[0])
+    for node, amps in buckets.items():
+        if len(amps) >= MIN_LIVE_EMPTY_PACKETS:
+            cache[node] = np.median(np.stack(amps, axis=0), axis=0)
+    bases = np.array(fallback, dtype=np.float64, copy=True)
+    for node, median in cache.items():
+        bases[node] = median
+    return bases
 
 
 def _windows_for_node(
     packets: list[tuple[float, np.ndarray, np.ndarray, float, int]],
+    *,
+    feature_version: int = FEATURE_VERSION,
 ) -> dict[int, tuple[np.ndarray, int, float]]:
     """Map hop-bin -> (features, camera label, mean rssi). Packets are time-sorted."""
     if not packets:
@@ -244,7 +336,8 @@ def _windows_for_node(
         amps = np.stack([row[1] for row in chunk], axis=0)
         phases = np.stack([row[2] for row in chunk], axis=0)
         rssi = float(np.mean([row[3] for row in chunk]))
-        out[b] = (node_features(amps, phases), next(iter(labels)), rssi)
+        build = node_features if int(feature_version) >= 5 else node_features_v4
+        out[b] = (build(amps, phases), next(iter(labels)), rssi)
     return out
 
 
@@ -252,16 +345,21 @@ def fuse_session(
     by_node: dict[int, list[tuple[float, np.ndarray, np.ndarray, float, int]]],
     *,
     min_nodes: int = 2,
+    feature_version: int = FEATURE_VERSION,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Concatenate receivers that share a 1-second bin. Training needs two."""
-    per_node = {node: _windows_for_node(rows) for node, rows in by_node.items()}
+    width = node_dim_for(feature_version)
+    per_node = {
+        node: _windows_for_node(rows, feature_version=feature_version)
+        for node, rows in by_node.items()
+    }
     bins: set[int] = set()
     for windows in per_node.values():
         bins.update(windows)
     xs: list[np.ndarray] = []
     ys: list[int] = []
     rssi: list[float] = []
-    missing = np.zeros(NODE_DIM, dtype=np.float64)
+    missing = np.zeros(width, dtype=np.float64)
     for b in sorted(bins):
         parts: list[np.ndarray] = []
         labels: set[int] = set()
@@ -284,7 +382,7 @@ def fuse_session(
         rssi.append(float(np.mean(rssis)))
     if not xs:
         return (
-            np.zeros((0, NODE_DIM * len(NODE_IDS))),
+            np.zeros((0, width * len(NODE_IDS))),
             np.zeros(0, dtype=np.int64),
             np.zeros(0, dtype=np.float64),
         )
@@ -302,7 +400,9 @@ def train_tag(tag: str | None) -> bool:
     return tag.startswith("empty_") or tag.startswith("occupied_")
 
 
-def load_sessions(url: str, tags: list[str] | None) -> list[tuple[str, dict]]:
+def load_sessions(
+    url: str, tags: list[str] | None
+) -> list[tuple[str, datetime, dict]]:
     import psycopg
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:
@@ -333,7 +433,7 @@ def load_sessions(url: str, tags: list[str] | None) -> list[tuple[str, dict]]:
                 """
             )
         sessions = cur.fetchall()
-        loaded: list[tuple[str, datetime, dict]] = []
+        loaded: list[tuple[str, datetime, dict]] = []  # name, started, packets
         for sid, tag, started in sessions:
             if not train_tag(tag):
                 continue
@@ -363,12 +463,12 @@ def load_sessions(url: str, tags: list[str] | None) -> list[tuple[str, dict]]:
         for name, _started, _rows in loaded:
             counts[name] += 1
         seen: dict[str, int] = defaultdict(int)
-        unique: list[tuple[str, dict]] = []
-        for name, _started, rows in loaded:
+        unique: list[tuple[str, datetime, dict]] = []
+        for name, started, rows in loaded:
             seen[name] += 1
             if counts[name] > 1:
                 name = f"{name}#{seen[name]}"
-            unique.append((name, rows))
+            unique.append((name, started, rows))
         return unique
 
 
@@ -481,9 +581,8 @@ def _leave_one_session_out(blocks: list[Block], seed: int) -> list[dict]:
             reports.append({"tag": tag, "skipped": True, "labels": labels})
             continue
         x_tr = np.vstack([b[1] for b in rest])
-        bases = empty_baselines(x_tr, y_tr == 0)
-        model = _fit(with_baseline(x_tr, bases), y_tr, seed)
-        pred = model.predict(with_baseline(x_te, bases))
+        model = _fit(x_tr, y_tr, seed)
+        pred = model.predict(x_te)
         score = _cv_score(y_te, pred)
         empty_acc = _class_accuracy(y_te, pred, 0)
         occupied_acc = _class_accuracy(y_te, pred, 1)
@@ -545,10 +644,8 @@ def _negative_control(blocks: list[Block], seed: int) -> float | None:
     yte = np.concatenate(y_te)
     if len(set(ytr.tolist())) < 2 or len(set(yte.tolist())) < 2:
         return None
-    xtr = np.vstack(x_tr)
-    bases = empty_baselines(xtr, np.ones(xtr.shape[0], dtype=bool))
-    model = _fit(with_baseline(xtr, bases), ytr, seed)
-    return _balanced_accuracy(yte, model.predict(with_baseline(np.vstack(x_te), bases)))
+    model = _fit(np.vstack(x_tr), ytr, seed)
+    return _balanced_accuracy(yte, model.predict(np.vstack(x_te)))
 
 
 def _tested_both(loo: object) -> bool:
@@ -567,33 +664,37 @@ def _tested_both(loo: object) -> bool:
     return 0 in labels and 1 in labels
 
 
-def _previous(path: Path) -> tuple[float | None, bool]:
-    """Score of the file live is using, and whether that score tested both labels."""
+def _finite(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
+def _previous(path: Path) -> dict | None:
+    """The file live is using, including a recipe this code no longer trains."""
     if not path.is_file():
-        return None, False
+        return None
     import joblib
 
     try:
         previous = joblib.load(path)
     except Exception:
-        return None, False
+        return None
     if not isinstance(previous, dict) or previous.get("role") != "best":
-        return None, False
-    if int(previous.get("feature_version", 0)) != FEATURE_VERSION:
-        return None, False
-    if int(previous.get("node_dim", 0)) != NODE_DIM:
-        return None, False
-    both = _tested_both(previous.get("loo"))
-    try:
-        raw = previous.get("best_score")
-        if raw is None:
-            raw = previous.get("loo_mean_recall")
-        score = float(raw)
-    except (TypeError, ValueError):
-        return None, both
-    if score != score:
-        return None, both
-    return score, both
+        return None
+    score = _finite(previous.get("best_score"))
+    if score is None:
+        score = _finite(previous.get("loo_mean_recall"))
+    return {
+        "score": score,
+        "tested_both": _tested_both(previous.get("loo")),
+        "unoccupied": _finite(previous.get("unoccupied_accuracy")),
+        "occupied": _finite(previous.get("occupied_accuracy")),
+    }
 
 
 def _save_best(
@@ -602,40 +703,56 @@ def _save_best(
     score: float,
     trustworthy: bool,
     tested_both: bool,
+    unoccupied: float,
+    occupied: float,
+    neg: float | None,
 ) -> None:
     """Replace the live file only when this train is the better presence test.
 
-    A score that never held out occupied cannot replace a file, and it cannot
-    block a later train that did test both labels. Live loads this one file.
+    Both labels must have been held out. Empty recordings must not be separable
+    from each other. Each class accuracy must beat the saved file.
     """
-    previous, previous_both = _previous(path)
+    previous = _previous(path)
     shown = f"{score:.3f}" if score == score else "n/a"
-    keep = False
-    if previous is not None and previous_both and not tested_both:
-        keep = True
-        print(
-            f"kept previous best  score={previous:.3f}  "
-            "this train did not test occupied"
+    reasons: list[str] = []
+    if not tested_both:
+        reasons.append("this train did not test both labels")
+    neg_value = _finite(neg)
+    if neg_value is None or not (NEG_CONTROL_LO <= neg_value <= NEG_CONTROL_HI):
+        shown_neg = "n/a" if neg_value is None else f"{neg_value:.3f}"
+        reasons.append(f"negative_control={shown_neg}  want about 0.5")
+    bar_empty = BAR_UNOCCUPIED
+    bar_occupied = BAR_OCCUPIED
+    if previous is not None and previous["unoccupied"] is not None:
+        bar_empty = previous["unoccupied"]
+    if previous is not None and previous["occupied"] is not None:
+        bar_occupied = previous["occupied"]
+    empty_now = _finite(unoccupied)
+    occupied_now = _finite(occupied)
+    if empty_now is None or empty_now <= bar_empty:
+        reasons.append(
+            f"unoccupied={_fmt_acc(unoccupied)} did not beat {bar_empty:.3f}"
         )
-    elif previous is not None and previous_both == tested_both:
-        if not (score == score and score > previous):
-            keep = True
-            print(
-                f"kept previous best  score={previous:.3f}  this train scored {shown}  "
-                f"evaluation_trustworthy={trustworthy}"
-            )
-    if keep:
-        print(f"live inference still uses {path}")
+    if occupied_now is None or occupied_now <= bar_occupied:
+        reasons.append(
+            f"occupied={_fmt_acc(occupied)} did not beat {bar_occupied:.3f}"
+        )
+    if reasons:
+        print("kept previous best  " + "  ".join(reasons))
+        if path.is_file():
+            print(f"live inference still uses {path}")
+        else:
+            print("no model saved")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     import joblib
 
     joblib.dump(bundle, path)
-    if previous is None:
+    if previous is None or previous["score"] is None:
         print(f"saved {path}  score={shown}  evaluation_trustworthy={trustworthy}")
     else:
         print(
-            f"saved {path}  score={shown}  previous={previous:.3f}  "
+            f"saved {path}  score={shown}  previous={previous['score']:.3f}  "
             f"evaluation_trustworthy={trustworthy}"
         )
     print("live inference uses this file")
@@ -652,15 +769,43 @@ def train(
         print("no empty_* or occupied_* sessions in postgres")
         return 1
 
-    blocks: list[Block] = []
+    print("feature recipe 5  motion, variation, delta from this visit's empty room")
+    raw: list[tuple[str, datetime | None, np.ndarray, np.ndarray, np.ndarray]] = []
     print("sessions")
-    for tag, by_node in loaded:
+    for tag, started, by_node in loaded:
         x, y, rssi = fuse_session(by_node)
         n0 = int(np.sum(y == 0)) if y.size else 0
         n1 = int(np.sum(y == 1)) if y.size else 0
         print(f"  {tag}  windows={y.size}  empty={n0}  occupied={n1}")
         if y.size:
-            blocks.append((tag, x, y, rssi))
+            raw.append((tag, started, x, y, rssi))
+
+    if not raw:
+        print("no usable 1-second windows (need cv label 0 or 1 and two receivers)")
+        return 1
+
+    donors: list[tuple[float, str, np.ndarray]] = []
+    for tag, started, x, y, _rssi in raw:
+        if int(np.sum(y == 0)) < MIN_VISIT_EMPTY:
+            continue
+        when = started.timestamp() if started is not None else 0.0
+        donors.append((when, tag, empty_baselines(x, y == 0)))
+    blocks = []
+    for tag, started, x, y, rssi in raw:
+        own = int(np.sum(y == 0)) >= MIN_VISIT_EMPTY
+        if own:
+            bases = empty_baselines(x, y == 0)
+        elif donors:
+            when = started.timestamp() if started is not None else 0.0
+            _stamp, donor, bases = min(donors, key=lambda item: abs(item[0] - when))
+            print(f"  {tag}  empty room from {donor}")
+        else:
+            bases = empty_baselines(x, y == 0)
+        blocks.append((tag, with_baseline(x, bases), y, rssi))
+    saved_bases = empty_baselines(
+        np.vstack([item[2] for item in raw]),
+        np.concatenate([item[3] for item in raw]) == 0,
+    )
 
     if not blocks:
         print("no usable 1-second windows (need cv label 0 or 1 and two receivers)")
@@ -774,12 +919,11 @@ def train(
 
     x_fit = np.vstack([b[1] for b in fit_blocks])
     y_fit = np.concatenate([b[2] for b in fit_blocks])
-    bases = empty_baselines(x_fit, y_fit == 0)
-    model = _fit(with_baseline(x_fit, bases), y_fit, seed)
+    model = _fit(x_fit, y_fit, seed)
 
     exam_recall = None
     if exam is not None:
-        exam_pred = model.predict(with_baseline(exam[1], bases))
+        exam_pred = model.predict(exam[1])
         exam_recall = _cv_score(exam[2], exam_pred)
         exam_empty = _class_accuracy(exam[2], exam_pred, 0)
         exam_occupied = _class_accuracy(exam[2], exam_pred, 1)
@@ -811,7 +955,7 @@ def train(
         "node_ids": NODE_IDS,
         "node_dim": NODE_DIM,
         "feature_version": FEATURE_VERSION,
-        "baselines": bases.tolist(),
+        "baselines": saved_bases.tolist(),
         "iq_len": IQ_LEN,
         "min_packets": MIN_PACKETS,
         "max_gap_sec": MAX_GAP_SEC,
@@ -838,6 +982,9 @@ def train(
         mean_recall,
         trustworthy,
         bool(tested_empty and tested_occupied),
+        unoccupied_accuracy,
+        occupied_accuracy,
+        neg,
     )
     return 0
 
