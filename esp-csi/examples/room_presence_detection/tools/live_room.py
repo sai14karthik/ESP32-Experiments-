@@ -48,6 +48,9 @@ PORT = 9070
 # 5 minutes before that. Live reads only inside the kept tail, so that delete
 # cannot remove a row this page is showing.
 LOOKBACK_SEC = FLIP_HOLD_SEC - 0.1
+# A collect that has not stored a row for this long is in a device stall.
+# The page must not keep showing the last label from before the stall.
+COLLECT_STALE_SEC = 15.0
 VOTE_WINDOWS = 4
 HISTORY = 40
 
@@ -616,6 +619,17 @@ class Live:
         self._use_source(collect)
         if collect:
             self.stop_csi()
+            age = snap.get("age_sec")
+            if isinstance(age, (int, float)) and age > COLLECT_STALE_SEC:
+                self._last_camera = None
+                self._last_model = None
+                self._last_confidence = None
+                snap["camera"] = "waiting"
+                snap["model"] = None
+                snap["confidence"] = None
+                snap["agree"] = None
+                snap["error"] = "collect is waiting. A device is not sending."
+                return
             cam_now = snap.get("camera")
             if (
                 cam_now in ("empty", "occupied")
