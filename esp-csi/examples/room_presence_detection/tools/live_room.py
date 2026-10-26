@@ -519,7 +519,14 @@ class Live:
     def _lens_word(self) -> str:
         if self.camera_error or self.camera_labeler is None:
             return "waiting"
-        return _word(camera_label(self.camera_labeler, window_sec=WINDOW_SEC, min_hits=2)) or "waiting"
+        return (
+            _word(
+                camera_label(
+                    self.camera_labeler, window_sec=recipe.WINDOW_SEC, min_hits=2
+                )
+            )
+            or "waiting"
+        )
 
     def _publish_note(self) -> None:
         with self.lock:
@@ -879,7 +886,10 @@ def make_handler(live: Live):
 def serve(live: Live, host: str, port: int) -> None:
     def loop() -> None:
         while True:
-            live.poll_once()
+            try:
+                live.poll_once()
+            except Exception as exc:
+                print(f"live poll error: {exc}", flush=True)
             time.sleep(0.4)
 
     threading.Thread(target=loop, daemon=True).start()
