@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Live camera label next to the trained room model.
 
-Run this on the Mini. The two cards always share one source.
+Run this on the Mini. The two cards always share one source and one moment.
+The camera word is only the camera. The model word is only the CSI score.
+A new pair is shown when both are ready for that moment. Until then the
+previous pair stays, so one card cannot move ahead of the other.
 
 While a collect is open, both cards read that collect: the Camera card is the
-cv_occupied stored on the newest rows, and the Model card scores the CSI
-stored with that same label. This process lets go of port 9057 so the
-collector can take the boards.
+cv_occupied on the newest row, and the Model card scores the CSI that ends at
+that same row. This process lets go of port 9057 so the collector can take
+the boards.
 
 With no collect open, neither card reads stored rows. The Camera card is the
-RTSP lens and the Model card scores CSI arriving now on port 9057.
+RTSP lens for that same second and the Model card scores CSI arriving now
+on port 9057.
 
   ./tools/live_room.sh
 
@@ -214,21 +218,20 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
             latest_ts = ts
             latest_seq = int(seq or 0)
             latest_cv = cv_i
-        if node not in recipe.NODE_IDS or iq is None or cv_i is None:
+        if node not in recipe.NODE_IDS or iq is None:
             continue
         parsed = recipe._packet(iq)
         if parsed is None:
             continue
         amp, phase = parsed
         kept.append((ts, int(node), amp, phase, float(rssi or 0), cv_i))
-    # Score only packets stored with the label on the newest row, so the
-    # model second is the same moment as the Camera card.
+    # Same end time as the camera row. The label is not a model input.
+    if latest_ts is not None:
+        start = latest_ts - LOOKBACK_SEC
+        kept = [row for row in kept if row[0] >= start]
     by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
-    if latest_cv is not None:
-        for ts, node, amp, phase, rssi, cv_i in kept:
-            if cv_i != latest_cv:
-                continue
-            by_node[node].append((ts, amp, phase, rssi, cv_i))
+    for ts, node, amp, phase, rssi, _cv_i in kept:
+        by_node[node].append((ts, amp, phase, rssi, 0))
 
     age = None if latest_ts is None else max(0.0, time.time() - latest_ts)
     scored = None
@@ -241,17 +244,13 @@ def state_from_rows(tag: str | None, rows: list, model_pack) -> dict:
         except Exception as exc:
             model_error = str(exc)
     camera_now = _word(latest_cv) or "waiting"
-    window_camera = _word(scored["window_camera"]) if scored else None
     model_word = _word(scored["model"]) if scored else None
-    agree = None
-    if scored is not None:
-        agree = scored["model"] == scored["window_camera"]
     return {
         "tag": tag,
         "camera": camera_now,
-        "window_camera": window_camera,
+        "window_camera": None,
         "model": model_word,
-        "agree": agree,
+        "agree": None,
         "confidence": None if scored is None else scored["confidence"],
         "nodes": [] if scored is None else scored["nodes"],
         "age_sec": age,
@@ -309,7 +308,7 @@ class CsiEar:
                 pass
 
     def recent(self) -> dict[int, list]:
-        cutoff = time.time() - 3.0
+        cutoff = time.time() - LOOKBACK_SEC
         by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
         with self._lock:
             rows = [row for row in self._buf if row[0] >= cutoff]
@@ -330,7 +329,7 @@ class CsiEar:
             self.lines += 1
             first = self.lines == 1
             self._buf.append((now, node, sample["iq"], float(sample["rssi"])))
-            cutoff = now - 3.0
+            cutoff = now - LOOKBACK_SEC
             while self._buf and self._buf[0][0] < cutoff:
                 self._buf.popleft()
         if first:
@@ -479,9 +478,48 @@ class Live:
         self._publish_note()
 
     def _forget_model_score(self) -> None:
-        """Drop a cached call so the next word comes from the file just loaded."""
+        """Drop a cached pair so the next words come from the file just loaded."""
+        self._last_camera = None
         self._last_model = None
         self._last_confidence = None
+
+    def _show_pair(self, snap: dict, camera, model, confidence) -> bool:
+        """Publish both cards from one moment.
+
+        A camera word without a model score from that same moment stays off
+        the page, and the reverse. The last complete pair stays until the next
+        one is ready.
+        """
+        if camera in ("empty", "occupied") and model in ("empty", "occupied"):
+            self._last_camera = camera
+            self._last_model = model
+            self._last_confidence = (
+                float(confidence) if isinstance(confidence, (int, float)) else None
+            )
+            snap["camera"] = camera
+            snap["model"] = model
+            snap["confidence"] = self._last_confidence
+            snap["agree"] = camera == model
+            return True
+        if self._last_camera in ("empty", "occupied") and self._last_model in (
+            "empty",
+            "occupied",
+        ):
+            snap["camera"] = self._last_camera
+            snap["model"] = self._last_model
+            snap["confidence"] = self._last_confidence
+            snap["agree"] = self._last_camera == self._last_model
+            return True
+        snap["camera"] = "waiting"
+        snap["model"] = None
+        snap["confidence"] = None
+        snap["agree"] = None
+        return False
+
+    def _lens_word(self) -> str:
+        if self.camera_error or self.camera_labeler is None:
+            return "waiting"
+        return _word(camera_label(self.camera_labeler, window_sec=WINDOW_SEC, min_hits=2)) or "waiting"
 
     def _publish_note(self) -> None:
         with self.lock:
@@ -592,27 +630,6 @@ class Live:
         self._score_error = None
         return _word(scored["model"]), scored["confidence"]
 
-    def _remember(self, snap: dict) -> None:
-        """Keep the last real words. A failed score must not erase them."""
-        camera = snap.get("camera")
-        model = snap.get("model")
-        if camera in ("empty", "occupied"):
-            self._last_camera = camera
-        elif self._last_camera in ("empty", "occupied"):
-            snap["camera"] = self._last_camera
-        if self.model_pack is None:
-            snap["model"] = None
-            snap["confidence"] = None
-            return
-        if model in ("empty", "occupied"):
-            self._last_model = model
-            if isinstance(snap.get("confidence"), (int, float)):
-                self._last_confidence = float(snap["confidence"])
-        elif self._last_model in ("empty", "occupied"):
-            snap["model"] = self._last_model
-            if snap.get("confidence") is None and self._last_confidence is not None:
-                snap["confidence"] = self._last_confidence
-
     def _apply_sources(self, snap: dict) -> None:
         """One source for both cards. Collect rows, or the room right now."""
         collect = self._session_is_live(snap)
@@ -630,21 +647,12 @@ class Live:
                 snap["agree"] = None
                 snap["error"] = "collect is waiting. A device is not sending."
                 return
-            cam_now = snap.get("camera")
-            if (
-                cam_now in ("empty", "occupied")
-                and self._last_camera in ("empty", "occupied")
-                and cam_now != self._last_camera
-            ):
-                self._last_model = None
-                self._last_confidence = None
-            self._remember(snap)
-            cam = snap.get("camera")
-            model = snap.get("model")
-            if cam in ("empty", "occupied") and model in ("empty", "occupied"):
-                snap["agree"] = cam == model
-            else:
-                snap["agree"] = None
+            self._show_pair(
+                snap,
+                snap.get("camera"),
+                snap.get("model"),
+                snap.get("confidence"),
+            )
             return
         snap["camera"] = "waiting"
         snap["model"] = None
@@ -652,67 +660,25 @@ class Live:
         snap["agree"] = None
         snap["window_camera"] = None
         self.ear.start()
+        self.start_camera()
         heard = self._score_ear()
-        if heard is not None:
-            snap["model"], snap["confidence"] = heard
-            self._last_model = heard[0]
-            if heard[1] is not None:
-                self._last_confidence = heard[1]
-        elif self.model_pack is not None and self._last_model in ("empty", "occupied"):
-            snap["model"] = self._last_model
-            if self._last_confidence is not None:
-                snap["confidence"] = self._last_confidence
+        model = heard[0] if heard else None
+        confidence = heard[1] if heard else None
+        camera = self._lens_word()
+        if self._show_pair(snap, camera, model, confidence):
+            return
+        if self.camera_error:
+            snap["error"] = self.camera_error
         elif self.model_pack is None:
-            snap["model"] = None
-            snap["confidence"] = None
             snap["error"] = self.model_note
         elif not self.ear.running:
-            snap["model"] = None
-            snap["confidence"] = None
             snap["error"] = "model is waiting. Port 9057 is busy."
         elif self.ear.lines == 0 and self.ear.clients == 0:
-            snap["model"] = None
-            snap["confidence"] = None
             snap["error"] = "model is waiting for CSI from the boards."
         elif self.ear.lines == 0:
-            snap["model"] = None
-            snap["confidence"] = None
             snap["error"] = "boards are connected. Waiting for a CSI line."
         else:
-            snap["model"] = None
-            snap["confidence"] = None
-            snap["error"] = "model is waiting for one full second of CSI."
-        self.start_camera()
-        self._apply_live_camera(snap)
-        self._remember(snap)
-        cam = snap.get("camera")
-        model = snap.get("model")
-        if cam in ("empty", "occupied") and model in ("empty", "occupied"):
-            snap["agree"] = cam == model
-        else:
-            snap["agree"] = None
-
-    def _apply_live_camera(self, snap: dict) -> None:
-        """Camera card follows the lens. Model card stays the CSI score."""
-        if self.camera_error:
-            snap["error"] = snap.get("error") or self.camera_error
-            return
-        if self.camera_url and self.camera_url != "off" and self.camera_labeler is None:
-            snap["camera"] = "waiting"
-            snap["agree"] = None
-            return
-        if self.camera_labeler is None:
-            return
-        # Two agreeing frames are enough for the page. Collection still waits
-        # longer before it writes a training label.
-        word = _word(camera_label(self.camera_labeler, window_sec=0.8, min_hits=2))
-        if word is None:
-            snap["camera"] = "waiting"
-            snap["agree"] = None
-            return
-        snap["camera"] = word
-        model = snap.get("model")
-        snap["agree"] = word == model if model in ("empty", "occupied") else None
+            snap["error"] = "waiting for the camera and the model from the same second."
 
     def poll_once(self) -> None:
         self._score_error = None
