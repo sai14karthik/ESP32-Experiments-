@@ -87,7 +87,7 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     if bundle.get("role") != "best" or "model" not in bundle:
         raise RuntimeError("room_presence.joblib is not the saved model")
     version = int(bundle.get("feature_version", 0))
-    if version not in (4, 5):
+    if version not in (4, 5, 6):
         raise RuntimeError(f"{path} is an older feature recipe. Train again.")
     if int(bundle.get("node_dim", 0)) != recipe.node_dim_for(version):
         raise RuntimeError(f"{path} does not match this trainer.")

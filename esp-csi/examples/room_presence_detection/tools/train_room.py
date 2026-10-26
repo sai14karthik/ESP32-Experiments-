@@ -10,17 +10,20 @@ Session tags named empty_* or occupied_* choose which runs to load.
 pipeline_test and every other tag are ignored. The label on each row is the
 camera value cv_occupied, not the session name.
 
-Each window carries motion, how much the second varies, and how far the
-amplitude shape sits from that visit's empty room. The raw amplitude shape,
-raw phase, and RSSI are not features. A visit's empty room is the empty
-windows in that session, or the nearest session that has them. The score is
+Each window carries motion from the real time between packets, how much the
+second varies, and how far the amplitude shape sits from that visit's empty
+room. Packets that share one database timestamp are averaged first, then the
+motion band is measured on that clock. The raw amplitude shape, raw phase,
+and RSSI are not features. A visit's empty room is the empty windows in that
+session, or the nearest session that has them. The score is
 leave-one-session-out, weighted by how many windows each session has.
 Results include unoccupied accuracy and occupied accuracy separately. A class
 that was not in the held-out windows is reported as n/a. Live inference loads
 tools/models/room_presence.joblib. A new fit replaces that file only when it
-tested both labels, the empty-versus-empty score is near 0.5, and both class
-accuracies are higher than the saved file. A train that never held out
-occupied does not replace the file.
+tested both labels, empty-versus-empty is near 0.5, occupied accuracy beats
+the saved file by a clear margin, unoccupied accuracy stays high, and the
+balanced accuracy is higher. A train that never held out occupied does not
+replace the file.
 """
 
 from __future__ import annotations
@@ -60,8 +63,12 @@ _V4_NODE_DIM = N_SC * 5 + _V4_SCALARS
 # energy slope, and a present flag.
 _V5_SCALARS = 4
 _V5_NODE_DIM = N_SC + _V5_SCALARS
-FEATURE_VERSION = 5
-NODE_DIM = _V5_NODE_DIM
+# Version 6 adds the real-time speed beside the motion band. The mean is
+# still replaced by the empty-room delta. The last value is the present flag.
+_V6_SCALARS = 5
+_V6_NODE_DIM = N_SC + _V6_SCALARS
+FEATURE_VERSION = 6
+NODE_DIM = _V6_NODE_DIM
 PRESENT_AT = NODE_DIM - 1
 # An empty median needs this many windows before it can stand for the visit.
 MIN_VISIT_EMPTY = 30
@@ -74,11 +81,26 @@ NEG_CONTROL_LO = 0.35
 NEG_CONTROL_HI = 0.65
 BAR_UNOCCUPIED = 0.705
 BAR_OCCUPIED = 0.260
+# The saved file already calls empty windows correctly almost every time.
+# A new file may miss a few of those and still be the better presence test.
+UNOCCUPIED_FLOOR = 0.90
+# One extra occupied window is not a new model. 0.02 on this set is about
+# 140 windows.
+OCCUPIED_MARGIN = 0.02
+BAR_BALANCED = 0.630
+# Human motion and breathing, in hertz. A one-second window mainly resolves
+# the upper part of this band. Slower change is the real-time slope.
+MOTION_LO_HZ = 0.3
+MOTION_HI_HZ = 3.0
+_CLUMP_SEC = 1e-3
 _EPS = 1e-6
 
 
 def node_dim_for(version: int) -> int:
-    if int(version) >= 5:
+    ver = int(version)
+    if ver >= 6:
+        return _V6_NODE_DIM
+    if ver >= 5:
         return _V5_NODE_DIM
     return _V4_NODE_DIM
 
@@ -205,8 +227,8 @@ def node_features_v4(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
     return feat
 
 
-def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
-    """Version 5 window. The mean is kept only so the empty-room delta can replace it."""
+def node_features_v5(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
+    """Version 5 window. Motion is the jump from one packet to the next."""
     del phases
     mean = amps.mean(axis=0)
     variation, motion, energy_slope = _motion_terms(amps)
@@ -217,6 +239,91 @@ def node_features(amps: np.ndarray, phases: np.ndarray) -> np.ndarray:
         ]
     )
     assert feat.shape == (_V5_NODE_DIM,)
+    return feat
+
+
+def _collapse_clumps(
+    times: np.ndarray, amps: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Average packets that share one commit timestamp.
+
+    Postgres stamps every row in a transaction with the same time, so a burst
+    is not a 100 Hz clock.
+    """
+    t = np.asarray(times, dtype=np.float64)
+    a = np.asarray(amps, dtype=np.float64)
+    if t.size == 0:
+        return t, a
+    order = np.argsort(t, kind="mergesort")
+    t = t[order]
+    a = a[order]
+    kept_t: list[float] = []
+    kept_a: list[np.ndarray] = []
+    start = 0
+    for i in range(1, int(t.size) + 1):
+        if i == t.size or float(t[i] - t[start]) > _CLUMP_SEC:
+            kept_t.append(float(np.mean(t[start:i])))
+            kept_a.append(np.mean(a[start:i], axis=0))
+            start = i
+    return np.asarray(kept_t, dtype=np.float64), np.stack(kept_a, axis=0)
+
+
+def _timed_motion(times: np.ndarray, amps: np.ndarray) -> tuple[float, float, float]:
+    """Band power, speed, and energy slope on the real packet clock.
+
+    The series is placed on a grid at the median gap. The band is 0.3–3 Hz.
+    Speed is the average size of the energy change divided by the real gap.
+    """
+    if times.size < 8 or float(times[-1] - times[0]) < MIN_SPAN_SEC:
+        return 0.0, 0.0, 0.0
+    energy = amps.sum(axis=1)
+    gaps = np.diff(times)
+    gaps = gaps[gaps > _CLUMP_SEC]
+    if gaps.size == 0:
+        return 0.0, 0.0, 0.0
+    dt = float(np.median(gaps))
+    if dt <= _EPS:
+        return 0.0, 0.0, 0.0
+    speed = float(np.mean(np.abs(np.diff(energy)) / np.maximum(np.diff(times), _EPS)))
+    slope = 0.0
+    t0 = times - float(times[0])
+    if float(np.std(t0)) > _EPS:
+        slope = float(np.polyfit(t0, energy, 1)[0])
+    span = float(times[-1] - times[0])
+    n = int(math.floor(span / dt)) + 1
+    if n < 8:
+        return 0.0, speed, slope
+    grid = float(times[0]) + np.arange(n, dtype=np.float64) * dt
+    grid = grid[grid <= float(times[-1]) + 1e-9]
+    if grid.size < 8:
+        return 0.0, speed, slope
+    series = np.interp(grid, times, energy)
+    series = series - float(series.mean())
+    spec = np.fft.rfft(series)
+    freqs = np.fft.rfftfreq(series.size, d=dt)
+    band = (freqs >= MOTION_LO_HZ) & (freqs <= MOTION_HI_HZ)
+    if not np.any(band):
+        return 0.0, speed, slope
+    power = float(np.sum(np.abs(spec[band]) ** 2) / series.size)
+    return power, speed, slope
+
+
+def node_features(
+    amps: np.ndarray, phases: np.ndarray, times: np.ndarray
+) -> np.ndarray:
+    """Version 6 window. Motion uses the real time between packets."""
+    del phases
+    collapsed_t, collapsed = _collapse_clumps(times, amps)
+    mean = collapsed.mean(axis=0)
+    variation = float(collapsed.std(axis=0).mean()) if collapsed.shape[0] else 0.0
+    band, speed, slope = _timed_motion(collapsed_t, collapsed)
+    feat = np.concatenate(
+        [
+            mean,
+            np.array([variation, band, speed, slope, 1.0], dtype=np.float64),
+        ]
+    )
+    assert feat.shape == (_V6_NODE_DIM,)
     return feat
 
 
@@ -336,8 +443,14 @@ def _windows_for_node(
         amps = np.stack([row[1] for row in chunk], axis=0)
         phases = np.stack([row[2] for row in chunk], axis=0)
         rssi = float(np.mean([row[3] for row in chunk]))
-        build = node_features if int(feature_version) >= 5 else node_features_v4
-        out[b] = (build(amps, phases), next(iter(labels)), rssi)
+        ver = int(feature_version)
+        if ver >= 6:
+            feat = node_features(amps, phases, np.asarray(times, dtype=np.float64))
+        elif ver >= 5:
+            feat = node_features_v5(amps, phases)
+        else:
+            feat = node_features_v4(amps, phases)
+        out[b] = (feat, next(iter(labels)), rssi)
     return out
 
 
@@ -694,6 +807,7 @@ def _previous(path: Path) -> dict | None:
         "tested_both": _tested_both(previous.get("loo")),
         "unoccupied": _finite(previous.get("unoccupied_accuracy")),
         "occupied": _finite(previous.get("occupied_accuracy")),
+        "balanced": _finite(previous.get("balanced_accuracy")),
     }
 
 
@@ -705,12 +819,14 @@ def _save_best(
     tested_both: bool,
     unoccupied: float,
     occupied: float,
+    balanced: float,
     neg: float | None,
 ) -> None:
     """Replace the live file only when this train is the better presence test.
 
     Both labels must have been held out. Empty recordings must not be separable
-    from each other. Each class accuracy must beat the saved file.
+    from each other. Occupied accuracy must beat the saved file by a clear
+    margin, unoccupied accuracy must stay high, and balanced accuracy must rise.
     """
     previous = _previous(path)
     shown = f"{score:.3f}" if score == score else "n/a"
@@ -721,21 +837,27 @@ def _save_best(
     if neg_value is None or not (NEG_CONTROL_LO <= neg_value <= NEG_CONTROL_HI):
         shown_neg = "n/a" if neg_value is None else f"{neg_value:.3f}"
         reasons.append(f"negative_control={shown_neg}  want about 0.5")
-    bar_empty = BAR_UNOCCUPIED
     bar_occupied = BAR_OCCUPIED
-    if previous is not None and previous["unoccupied"] is not None:
-        bar_empty = previous["unoccupied"]
+    bar_balanced = BAR_BALANCED
     if previous is not None and previous["occupied"] is not None:
         bar_occupied = previous["occupied"]
+    if previous is not None and previous["balanced"] is not None:
+        bar_balanced = previous["balanced"]
     empty_now = _finite(unoccupied)
     occupied_now = _finite(occupied)
-    if empty_now is None or empty_now <= bar_empty:
+    balanced_now = _finite(balanced)
+    occupied_need = bar_occupied + OCCUPIED_MARGIN
+    if empty_now is None or empty_now < UNOCCUPIED_FLOOR:
         reasons.append(
-            f"unoccupied={_fmt_acc(unoccupied)} did not beat {bar_empty:.3f}"
+            f"unoccupied={_fmt_acc(unoccupied)} fell below {UNOCCUPIED_FLOOR:.2f}"
         )
-    if occupied_now is None or occupied_now <= bar_occupied:
+    if occupied_now is None or occupied_now <= occupied_need:
         reasons.append(
-            f"occupied={_fmt_acc(occupied)} did not beat {bar_occupied:.3f}"
+            f"occupied={_fmt_acc(occupied)} did not beat {occupied_need:.3f}"
+        )
+    if balanced_now is None or balanced_now <= bar_balanced:
+        reasons.append(
+            f"balanced={_fmt_acc(balanced)} did not beat {bar_balanced:.3f}"
         )
     if reasons:
         print("kept previous best  " + "  ".join(reasons))
@@ -769,7 +891,10 @@ def train(
         print("no empty_* or occupied_* sessions in postgres")
         return 1
 
-    print("feature recipe 5  motion, variation, delta from this visit's empty room")
+    print(
+        "feature recipe 6  motion from real packet time, variation, "
+        "delta from this visit's empty room"
+    )
     raw: list[tuple[str, datetime | None, np.ndarray, np.ndarray, np.ndarray]] = []
     print("sessions")
     for tag, started, by_node in loaded:
@@ -870,6 +995,7 @@ def train(
     confusion = None
     unoccupied_accuracy = float("nan")
     occupied_accuracy = float("nan")
+    balanced_accuracy = float("nan")
     pooled_true = [r["y_true"] for r in scored if "y_true" in r]
     if pooled_true:
         from sklearn.metrics import (
@@ -883,6 +1009,7 @@ def train(
         y_pred = np.concatenate([r["y_pred"] for r in scored if "y_pred" in r])
         unoccupied_accuracy = _class_accuracy(y_true, y_pred, 0)
         occupied_accuracy = _class_accuracy(y_true, y_pred, 1)
+        balanced_accuracy = float(balanced_accuracy_score(y_true, y_pred))
         confusion = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
         print(
             f"unoccupied_accuracy={_fmt_acc(unoccupied_accuracy)}  "
@@ -892,7 +1019,7 @@ def train(
         )
         print(
             f"accuracy={accuracy_score(y_true, y_pred):.3f}  "
-            f"balanced_accuracy={balanced_accuracy_score(y_true, y_pred):.3f}"
+            f"balanced_accuracy={balanced_accuracy:.3f}"
         )
         print("confusion matrix  rows=true camera label, cols=predicted  [unoccupied, occupied]")
         print(f"  {confusion}")
@@ -969,6 +1096,7 @@ def train(
         "best_score": mean_recall,
         "unoccupied_accuracy": _stored_acc(unoccupied_accuracy),
         "occupied_accuracy": _stored_acc(occupied_accuracy),
+        "balanced_accuracy": _stored_acc(balanced_accuracy),
         "tested_both": bool(tested_empty and tested_occupied),
         "rssi_only": mean_rssi,
         "negative_control": neg,
@@ -984,6 +1112,7 @@ def train(
         bool(tested_empty and tested_occupied),
         unoccupied_accuracy,
         occupied_accuracy,
+        balanced_accuracy,
         neg,
     )
     return 0
