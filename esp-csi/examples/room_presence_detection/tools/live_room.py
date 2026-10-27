@@ -8,8 +8,8 @@ previous pair stays, so one card cannot move ahead of the other.
 
 While a collect is open, both cards read that collect: the Camera card is the
 cv_occupied on the newest row, and the Model card scores the CSI that ends at
-that same row. This process lets go of port 9057 so the collector can take
-the boards.
+that same row. Recipe 7 uses the last four seconds ending there. This process
+lets go of port 9057 so the collector can take the boards.
 
 With no collect open, neither card reads stored rows. The Camera card is the
 RTSP lens for that same second and the Model card scores CSI arriving now
@@ -53,6 +53,18 @@ PORT = 9070
 # 5 minutes before that. Live reads only inside the kept tail, so that delete
 # cannot remove a row this page is showing.
 LOOKBACK_SEC = FLIP_HOLD_SEC - 0.1
+
+
+def _lookback(version: int) -> float:
+    """How many seconds of CSI a score needs.
+
+    The saved one-second model stays inside the short tail. Recipe 7 needs the
+    whole four-second window plus the votes that follow it.
+    """
+    need = recipe.window_sec_for(version) + (VOTE_WINDOWS - 1) * recipe.HOP_SEC
+    return max(LOOKBACK_SEC, need)
+
+
 # A collect that has not stored a row for this long is in a device stall.
 # The page must not keep showing the last label from before the stall.
 COLLECT_STALE_SEC = 15.0
@@ -87,7 +99,7 @@ def load_model(path: Path) -> tuple[object, np.ndarray, bool] | None:
     if bundle.get("role") != "best" or "model" not in bundle:
         raise RuntimeError("room_presence.joblib is not the saved model")
     version = int(bundle.get("feature_version", 0))
-    if version not in (4, 5, 6):
+    if version not in (4, 5, 6, 7):
         raise RuntimeError(f"{path} is an older feature recipe. Train again.")
     if int(bundle.get("node_dim", 0)) != recipe.node_dim_for(version):
         raise RuntimeError(f"{path} does not match this trainer.")
@@ -163,7 +175,7 @@ def score_packets(
     }
 
 
-def _fetch(url: str, tag: str | None) -> dict:
+def _fetch(url: str, tag: str | None, lookback: float) -> dict:
     """The open collect, if one is running. A finished session is not the live page."""
     import psycopg
 
@@ -209,7 +221,7 @@ def _fetch(url: str, tag: str | None) -> dict:
                   )
             ORDER BY node_id, host_ts, seq
             """,
-            (sid, LOOKBACK_SEC, sid),
+            (sid, lookback, sid),
         )
         rows = cur.fetchall()
     return {
@@ -244,8 +256,10 @@ def state_from_rows(
         amp, phase = parsed
         kept.append((ts, int(node), amp, phase, float(rssi or 0), cv_i))
     # Same end time as the camera row. The label is not a model input.
+    # Recipe 7 reaches four seconds back from that row.
+    version = _feature_version(model_pack)
     if latest_ts is not None:
-        start = latest_ts - LOOKBACK_SEC
+        start = latest_ts - _lookback(version)
         kept = [row for row in kept if row[0] >= start]
     by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
     for ts, node, amp, phase, rssi, _cv_i in kept:
@@ -254,7 +268,6 @@ def state_from_rows(
     age = None if latest_ts is None else max(0.0, time.time() - latest_ts)
     scored = None
     model_error = None
-    version = _feature_version(model_pack)
     bases = None if model_pack is None else model_pack[1]
     if (
         version >= 5
@@ -337,8 +350,8 @@ class CsiEar:
             except OSError:
                 pass
 
-    def recent(self) -> dict[int, list]:
-        cutoff = time.time() - LOOKBACK_SEC
+    def recent(self, lookback: float) -> dict[int, list]:
+        cutoff = time.time() - lookback
         by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
         with self._lock:
             rows = [row for row in self._buf if row[0] >= cutoff]
@@ -359,7 +372,7 @@ class CsiEar:
             self.lines += 1
             first = self.lines == 1
             self._buf.append((now, node, sample["iq"], float(sample["rssi"])))
-            cutoff = now - LOOKBACK_SEC
+            cutoff = now - _lookback(recipe.FEATURE_VERSION)
             while self._buf and self._buf[0][0] < cutoff:
                 self._buf.popleft()
         if first:
@@ -668,9 +681,9 @@ class Live:
     def _score_ear(self) -> tuple[str, float | None] | None:
         if self.model_pack is None or not self.ear.running:
             return None
-        by_node = self.ear.recent()
-        self._ear_counts = {node: len(rows) for node, rows in by_node.items()}
         version = _feature_version(self.model_pack)
+        by_node = self.ear.recent(_lookback(version))
+        self._ear_counts = {node: len(rows) for node, rows in by_node.items()}
         bases = self.model_pack[1]
         if version >= 5 and self._visit_bases:
             bases = np.array(bases, dtype=np.float64, copy=True)
@@ -746,7 +759,9 @@ class Live:
         self._score_error = None
         self.refresh_model()
         try:
-            fetched = _fetch(self.url, self.tag)
+            fetched = _fetch(
+                self.url, self.tag, _lookback(_feature_version(self.model_pack))
+            )
         except Exception as exc:
             with self.lock:
                 self.state["error"] = str(exc)

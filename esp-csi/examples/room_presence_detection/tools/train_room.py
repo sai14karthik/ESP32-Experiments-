@@ -10,10 +10,11 @@ Session tags named empty_* or occupied_* choose which runs to load.
 pipeline_test and every other tag are ignored. The label on each row is the
 camera value cv_occupied, not the session name.
 
-Each window carries motion from the real time between packets, how much the
-second varies, and how far the amplitude shape sits from that visit's empty
-room. Packets that share one database timestamp are averaged first, then the
-motion band is measured on that clock. The raw amplitude shape, raw phase,
+Each window is 4 seconds. It carries motion from the real time between
+packets, how much that stretch varies, and how far the amplitude shape sits
+from that visit's empty room. Packets that share one database timestamp are
+averaged first, then the motion band is measured on that clock. A one-second
+window cannot see a person sitting still. The raw amplitude shape, raw phase,
 and RSSI are not features. A visit's empty room is the empty windows in that
 session, or the nearest session that has them. The score is
 leave-one-session-out, weighted by how many windows each session has.
@@ -45,6 +46,10 @@ IQ_LEN = N_SC * 2
 # removed, leaving 28 lower tones and 28 upper tones.
 HALF = N_SC // 2
 WINDOW_SEC = 1.0
+# A person sitting still breathes near 0.3 Hz. That cycle is about 3 seconds,
+# so the motion window has to cover it. Older recipes stay on one second.
+LONG_WINDOW_SEC = 4.0
+LONG_MIN_SPAN_SEC = 3.0
 HOP_SEC = 0.25
 MIN_PACKETS = 30
 MIN_SPAN_SEC = 0.5
@@ -67,7 +72,7 @@ _V5_NODE_DIM = N_SC + _V5_SCALARS
 # still replaced by the empty-room delta. The last value is the present flag.
 _V6_SCALARS = 5
 _V6_NODE_DIM = N_SC + _V6_SCALARS
-FEATURE_VERSION = 6
+FEATURE_VERSION = 7
 NODE_DIM = _V6_NODE_DIM
 PRESENT_AT = NODE_DIM - 1
 # An empty median needs this many windows before it can stand for the visit.
@@ -88,8 +93,9 @@ UNOCCUPIED_FLOOR = 0.90
 # 140 windows.
 OCCUPIED_MARGIN = 0.02
 BAR_BALANCED = 0.630
-# Human motion and breathing, in hertz. A one-second window mainly resolves
-# the upper part of this band. Slower change is the real-time slope.
+# Human motion and breathing, in hertz. Recipe 7 measures this on a 4-second
+# window, so the slow end of the band is a real cycle. Slower change is the
+# real-time slope.
 MOTION_LO_HZ = 0.3
 MOTION_HI_HZ = 3.0
 _CLUMP_SEC = 1e-3
@@ -103,6 +109,20 @@ def node_dim_for(version: int) -> int:
     if ver >= 5:
         return _V5_NODE_DIM
     return _V4_NODE_DIM
+
+
+def window_sec_for(version: int) -> float:
+    """Recipe 7 scores four seconds. Older saved models stay on one second."""
+    if int(version) >= 7:
+        return LONG_WINDOW_SEC
+    return WINDOW_SEC
+
+
+def min_span_for(version: int) -> float:
+    """Packets must cover most of the window, or the slow band is not there."""
+    if int(version) >= 7:
+        return LONG_MIN_SPAN_SEC
+    return MIN_SPAN_SEC
 
 
 def _hampel(x: np.ndarray, half: int = 3) -> np.ndarray:
@@ -408,15 +428,17 @@ def _windows_for_node(
         return {}
     t_min = packets[0][0]
     t_max = packets[-1][0]
+    window = window_sec_for(feature_version)
+    min_span = min_span_for(feature_version)
     first = math.floor(t_min / HOP_SEC)
-    last = math.floor((t_max - WINDOW_SEC) / HOP_SEC)
+    last = math.floor((t_max - window) / HOP_SEC)
     out: dict[int, tuple[np.ndarray, int, float]] = {}
     i = 0
     j = 0
     n = len(packets)
     for b in range(first, last + 1):
         start = b * HOP_SEC
-        end = start + WINDOW_SEC
+        end = start + window
         while i < n and packets[i][0] < start:
             i += 1
         if j < i:
@@ -428,7 +450,7 @@ def _windows_for_node(
             continue
         times = [row[0] for row in chunk]
         span = times[-1] - times[0]
-        if span < MIN_SPAN_SEC:
+        if span < min_span:
             continue
         gaps = [
             times[k + 1] - times[k]
@@ -460,7 +482,7 @@ def fuse_session(
     min_nodes: int = 2,
     feature_version: int = FEATURE_VERSION,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Concatenate receivers that share a 1-second bin. Training needs two."""
+    """Concatenate receivers that share a window. Training needs two."""
     width = node_dim_for(feature_version)
     per_node = {
         node: _windows_for_node(rows, feature_version=feature_version)
@@ -892,8 +914,8 @@ def train(
         return 1
 
     print(
-        "feature recipe 6  motion from real packet time, variation, "
-        "delta from this visit's empty room"
+        "feature recipe 7  4 second window, motion from real packet time, "
+        "variation, delta from this visit's empty room"
     )
     raw: list[tuple[str, datetime | None, np.ndarray, np.ndarray, np.ndarray]] = []
     print("sessions")
@@ -1077,7 +1099,7 @@ def train(
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "holdout": holdout,
         "train_tags": [b[0] for b in fit_blocks],
-        "window_sec": WINDOW_SEC,
+        "window_sec": window_sec_for(FEATURE_VERSION),
         "hop_sec": HOP_SEC,
         "node_ids": NODE_IDS,
         "node_dim": NODE_DIM,
