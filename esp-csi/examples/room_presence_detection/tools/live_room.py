@@ -68,6 +68,11 @@ def _lookback(version: int) -> float:
 # A collect that has not stored a row for this long is in a device stall.
 # The page must not keep showing the last label from before the stall.
 COLLECT_STALE_SEC = 15.0
+# YOLO on this Mini is often slower than two frames a second. A one-second
+# window then has no word, and both cards go blank. Two frames in four
+# seconds still means the camera is alive.
+LENS_WINDOW_SEC = 4.0
+LENS_MIN_HITS = 2
 VOTE_WINDOWS = 4
 HISTORY = 40
 
@@ -350,6 +355,15 @@ class CsiEar:
             except OSError:
                 pass
 
+    def since(self, after: float) -> list[tuple[float, int, object]]:
+        """Packets newer than ``after``. The caller decides which ones are empty."""
+        with self._lock:
+            return [
+                (ts, node, iq)
+                for ts, node, iq, _rssi in self._buf
+                if ts > after
+            ]
+
     def recent(self, lookback: float) -> dict[int, list]:
         cutoff = time.time() - lookback
         by_node: dict[int, list] = {node: [] for node in recipe.NODE_IDS}
@@ -464,6 +478,9 @@ class Live:
         self._printed_at = 0.0
         self._last_pair_at = 0.0
         self._visit_bases: dict[int, np.ndarray] = {}
+        self._empty_bucket: dict[int, list] = {}
+        self._empty_after = 0.0
+        self._empty_locked = False
         self.state: dict = {
             "tag": tag,
             "camera": "waiting",
@@ -531,6 +548,42 @@ class Live:
         self._last_confidence = None
         self._last_pair_at = 0.0
         self._visit_bases = {}
+        self._empty_bucket = {}
+        self._empty_after = 0.0
+        self._empty_locked = False
+
+    def _note_empty_room(self, camera: str) -> None:
+        """Lock this visit's empty room from packets the camera calls empty.
+
+        The saved file is the median of older sessions. Scoring the live room
+        against that median looks like a person. Once each receiver has enough
+        empty packets, the median stays put. Later packets do not move it.
+        """
+        if _feature_version(self.model_pack) < 5 or self._empty_locked:
+            rows = self.ear.since(self._empty_after)
+            if rows:
+                self._empty_after = max(row[0] for row in rows)
+            return
+        rows = self.ear.since(self._empty_after)
+        if rows:
+            self._empty_after = max(row[0] for row in rows)
+        if camera != "empty":
+            return
+        for _ts, node, iq in rows:
+            if node not in recipe.NODE_IDS or node in self._visit_bases:
+                continue
+            parsed = recipe._packet(iq)
+            if parsed is None:
+                continue
+            bucket = self._empty_bucket.setdefault(node, [])
+            bucket.append(parsed[0])
+            if len(bucket) < recipe.MIN_LIVE_EMPTY_PACKETS:
+                continue
+            self._visit_bases[node] = np.median(np.stack(bucket[-recipe.MIN_LIVE_EMPTY_PACKETS :]), axis=0)
+            self._empty_bucket.pop(node, None)
+        if all(node in self._visit_bases for node in recipe.NODE_IDS):
+            self._empty_locked = True
+            print("empty room locked for this visit", flush=True)
 
     def _show_pair(self, snap: dict, camera, model, confidence) -> bool:
         """Publish both cards from one moment.
@@ -579,7 +632,9 @@ class Live:
         return (
             _word(
                 camera_label(
-                    self.camera_labeler, window_sec=recipe.WINDOW_SEC, min_hits=2
+                    self.camera_labeler,
+                    window_sec=LENS_WINDOW_SEC,
+                    min_hits=LENS_MIN_HITS,
                 )
             )
             or "waiting"
@@ -672,6 +727,9 @@ class Live:
         self.last_stamp = None
         if source == "collect":
             self._visit_bases = {}
+            self._empty_bucket = {}
+            self._empty_after = 0.0
+            self._empty_locked = False
             self.stop_csi()
             self.stop_camera()
             print("live follows the collect", flush=True)
@@ -736,10 +794,11 @@ class Live:
         snap["window_camera"] = None
         self.ear.start()
         self.start_camera()
+        camera = self._lens_word()
+        self._note_empty_room(camera)
         heard = self._score_ear()
         model = heard[0] if heard else None
         confidence = heard[1] if heard else None
-        camera = self._lens_word()
         if self._show_pair(snap, camera, model, confidence):
             return
         if self.camera_error:
@@ -752,6 +811,10 @@ class Live:
             snap["error"] = "model is waiting for CSI from the boards."
         elif self.ear.lines == 0:
             snap["error"] = "boards are connected. Waiting for a CSI line."
+        elif camera not in ("empty", "occupied"):
+            snap["error"] = "camera is catching up."
+        elif model not in ("empty", "occupied"):
+            snap["error"] = "model is waiting for a full CSI window."
         else:
             snap["error"] = "waiting for the camera and the model from the same second."
 
