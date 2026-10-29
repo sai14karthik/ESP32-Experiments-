@@ -16,13 +16,14 @@ services:
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
 
+  # Host network: Docker Desktop on the Mini cannot open LAN camera
+  # ports from the bridge. MediaMTX stays published on :8554 / :8888.
   cameras:
     build: .
+    network_mode: host
     restart: unless-stopped
-    ports:
-      - "8090:8090"
     environment:
-      MTX_HOST: mediamtx
+      MTX_HOST: host.docker.internal
       RTSP_PORT: "8554"
       MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
       API_PORT: "8090"

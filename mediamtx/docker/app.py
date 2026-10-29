@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -76,10 +77,14 @@ def host_of(raw: str) -> str:
     return host
 
 
+_USERINFO = re.compile(r"(://[^/\s:@]+):([^@\s/]+)@")
+
+
 def redact(raw: str) -> str:
     if "|" in raw:
         return "|".join(redact(part) for part in raw.split("|"))
-    if "://" not in raw:
+    raw = _USERINFO.sub(r"\1:***@", raw)
+    if "://" not in raw or " " in raw:
         return raw
     parsed = urlparse(raw)
     if not parsed.username and not parsed.password:
@@ -504,11 +509,27 @@ class Supervisor:
     def _start_locked(self, spec: dict, gen: int) -> None:
         cmd = ffmpeg_cmd(spec)
         log(f"start {spec['path']} {redact(spec['source'])} ({spec['kind']})")
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
         self._procs[spec["source"]] = proc
+        threading.Thread(
+            target=self._log_stderr, args=(spec["path"], proc), daemon=True
+        ).start()
         threading.Thread(
             target=self._watch, args=(spec, gen, proc), daemon=True
         ).start()
+
+    def _log_stderr(self, path: str, proc: subprocess.Popen) -> None:
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            text = line.decode("utf-8", "replace").rstrip()
+            if text:
+                log(f"{path} {redact(text)}")
 
     def _watch(self, spec: dict, gen: int, proc: subprocess.Popen) -> None:
         code = proc.wait()

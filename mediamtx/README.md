@@ -33,7 +33,7 @@ Flash each board with **CameraWebServerWiFiSense** so both the picture and the m
 
 ## Always-on server (Docker)
 
-`mediamtx/docker/` runs MediaMTX and the camera publisher until you stop them. Both containers restart after a Mini reboot. Post any number of cameras. The list is saved and published again on startup. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
+`mediamtx/docker/` runs MediaMTX and the camera publisher until you stop them. The publisher uses the Mini's own network so it can open camera addresses on the LAN. MediaMTX stays on `:8554` and `:8888`. Both containers restart after a Mini reboot. Post any number of cameras. The list is saved and published again on startup. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
 
 ```bash
 cd mediamtx/docker
