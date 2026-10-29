@@ -3,16 +3,22 @@
 # MediaMTX stays in Docker. This process uses the Mini's network, restarts
 # if it exits, and starts again at login. No terminal.
 set -euo pipefail
-DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "$(dirname "$0")" && pwd)"
+# LaunchAgents cannot read ~/Desktop. Run the copy under Application Support.
+DIR="${HOME}/Library/Application Support/mediamtx-cameras"
 LABEL="com.lakenona.mediamtx-cameras"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
 
-mkdir -p "${HOME}/Library/LaunchAgents" "${DIR}/data"
+mkdir -p "${HOME}/Library/LaunchAgents" "${DIR}/data" "${SRC}/data"
+cp "${SRC}/app.py" "${SRC}/run_publisher.sh" "${DIR}/"
+if [[ -f "${SRC}/data/cameras.json" ]]; then
+  cp "${SRC}/data/cameras.json" "${DIR}/data/cameras.json"
+fi
 chmod +x "${DIR}/run_publisher.sh"
 
-(cd "${DIR}" && docker compose stop cameras >/dev/null 2>&1 || true)
-(cd "${DIR}" && docker compose up -d mediamtx)
+(cd "${SRC}" && docker compose stop cameras >/dev/null 2>&1 || true)
+(cd "${SRC}" && docker compose up -d mediamtx)
 
 python3 - "${PLIST}" "${LABEL}" "${DIR}" <<'PY'
 import os, plistlib, sys
