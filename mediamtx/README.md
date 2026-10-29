@@ -33,22 +33,34 @@ Flash each board with **CameraWebServerWiFiSense** so both the picture and the m
 
 ## Always-on server (Docker)
 
-`mediamtx/docker/` runs MediaMTX and the camera publisher until you stop them. Both containers restart after a Mini reboot. Post any number of board addresses; the list is saved and published again on startup.
+`mediamtx/docker/` runs MediaMTX and the camera publisher until you stop them. Both containers restart after a Mini reboot. Post any number of cameras. The list is saved and published again on startup. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
 
 ```bash
 cd mediamtx/docker
 docker compose up -d --build
 ```
 
-Replace the whole set (first IP is `cam_sense`, then `cam_sense2`, …):
+An entry is an ESP address or another camera's stream URL. A bare address is checked on the Mini: `http://<ip>/audio` publishes picture and mic, and `:81/stream` publishes video. An RTSP or HTTP URL is pulled as given and republished as H.264. Audio is included when that camera sends it.
+
+```bash
+# two Sense boards
+curl -s -X POST http://127.0.0.1:8090/cameras \
+  -H 'content-type: application/json' \
+  -d '{"ips":["10.128.93.15","10.128.93.24"]}'
+
+# ESP boards plus any other camera
+curl -s -X POST http://127.0.0.1:8090/cameras \
+  -H 'content-type: application/json' \
+  -d '{"ips":["10.128.93.15","10.128.93.24","rtsp://10.1.2.3:554/stream1"]}'
+```
+
+A camera that needs a login:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8090/cameras \
   -H 'content-type: application/json' \
-  -d '{"ips":["10.128.93.15","10.128.93.24"]}'
+  -d '{"cameras":[{"url":"rtsp://10.1.2.3:554/stream1","user":"admin","password":"secret"}]}'
 ```
-
-Each path carries **video and audio**. The publisher reads `http://<ip>:81/stream` and `http://<ip>/audio`.
 
 See what is live:
 

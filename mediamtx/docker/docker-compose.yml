@@ -1,10 +1,9 @@
-# Forever-on MediaMTX for ESP cameras.
-# From this directory on the Mini:
+# Forever-on MediaMTX. From this directory on the Mini:
 #   docker compose up -d --build
-# Then post the board addresses:
+# Post ESP addresses or any camera stream URL (order is cam_sense, cam_sense2, …):
 #   curl -s -X POST http://127.0.0.1:8090/cameras \
 #     -H 'content-type: application/json' \
-#     -d '{"ips":["10.128.93.15","10.128.93.24"]}'
+#     -d '{"ips":["10.128.93.15","rtsp://10.1.2.3:554/stream1"]}'
 
 services:
   mediamtx:

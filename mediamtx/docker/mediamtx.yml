@@ -1,6 +1,6 @@
 ###############################################
-# ESP cameras only. ffmpeg in the cameras service
-# publishes each board; this server just serves it.
+# ffmpeg in the cameras service publishes each
+# source. This server only serves the paths.
 ###############################################
 
 logLevel: info
@@ -38,7 +38,7 @@ authInternalUsers:
       - action: playback
 
 paths:
-  # cam_sense, cam_sense2, … each path is H.264 + AAC.
+  # cam_sense, cam_sense2, … H.264, plus AAC when the camera has audio.
   "~^cam_sense[0-9]*$":
     source: publisher
     overridePublisher: true

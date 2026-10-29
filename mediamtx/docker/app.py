@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""ESP camera publisher for MediaMTX.
+"""Camera publisher for MediaMTX.
 
-POST /cameras  {"ips": ["10.128.93.15", "10.128.93.24"]}
-GET  /cameras
+POST /cameras replaces the whole set. Each entry is an ESP board address
+or any camera stream URL (rtsp://, rtsps://, http://, https://).
+
+  {"ips": ["10.128.93.15", "rtsp://10.1.2.3:554/stream1"]}
+
+A bare address is probed: /audio means ESP Sense (picture + mic),
+:81/stream means ESP video. Anything else must be a stream URL.
 The list is saved and republished after a restart.
 """
 
@@ -14,8 +19,10 @@ import signal
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urlunparse
 
 MTX_HOST = os.environ.get("MTX_HOST", "mediamtx")
 RTSP_PORT = os.environ.get("RTSP_PORT", "8554")
@@ -24,46 +31,203 @@ API_PORT = int(os.environ.get("API_PORT", "8090"))
 DATA_PATH = os.environ.get("DATA_PATH", "/data/cameras.json")
 FPS = os.environ.get("SENSE_AV_FPS", "8")
 AUDIO_DELAY_S = os.environ.get("SENSE_AV_AUDIO_DELAY_S", "0.300")
+KINDS = ("sense", "mjpeg", "rtsp", "http")
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def normalize_ip(raw: str) -> str:
+def host_of(raw: str) -> str:
     text = raw.strip()
-    if "://" in text:
-        text = urlparse(text).netloc or urlparse(text).path
-    text = text.split("/")[0]
-    if text.startswith("[") and "]" in text:
-        text = text[1 : text.index("]")]
-    else:
-        text = text.split(":")[0]
-    if not text:
+    if "://" not in text:
+        text = "http://" + text
+    host = urlparse(text).hostname
+    if not host:
         raise ValueError(f"empty camera address: {raw!r}")
-    return text
+    return host
+
+
+def redact(raw: str) -> str:
+    if "|" in raw:
+        return "|".join(redact(part) for part in raw.split("|"))
+    if "://" not in raw:
+        return raw
+    parsed = urlparse(raw)
+    if not parsed.username and not parsed.password:
+        return raw
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    user = quote(parsed.username or "", safe="")
+    return urlunparse(parsed._replace(netloc=f"{user}:***@{host}{port}"))
+
+
+def with_auth(url: str, user: str | None, password: str | None) -> str:
+    if not user or "://" not in url:
+        return url
+    parsed = urlparse(url)
+    if parsed.username:
+        return url
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{quote(user, safe='')}:{quote(password or '', safe='')}@{host}{port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def looks_mjpeg(url: str) -> bool:
+    parsed = urlparse(url if "://" in url else "http://" + url)
+    path = (parsed.path or "").lower().rstrip("/")
+    if (parsed.port == 81 or parsed.netloc.endswith(":81")) and path.endswith("/stream"):
+        return True
+    return path.endswith((".mjpg", ".mjpeg")) or path.endswith("/mjpeg")
+
+
+def probe_http(url: str, timeout: float = 3.0) -> bool:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) >= 400:
+                return False
+            resp.read(1)
+            return True
+    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def sense_spec(ip: str, video: str | None = None, audio: str | None = None) -> dict:
+    video = video or f"http://{ip}:81/stream"
+    audio = audio or f"http://{ip}/audio"
+    default = video == f"http://{ip}:81/stream" and audio == f"http://{ip}/audio"
+    return {
+        "source": ip if default else f"{video}|{audio}",
+        "kind": "sense",
+        "ip": ip,
+        "video": video,
+        "audio": audio,
+        "url": None,
+    }
+
+
+def stream_spec(url: str, host: str, kind: str) -> dict:
+    return {
+        "source": url,
+        "kind": kind,
+        "ip": host,
+        "video": None,
+        "audio": None,
+        "url": url,
+    }
+
+
+def classify_host(ip: str, probe) -> dict:
+    if probe(f"http://{ip}/audio"):
+        return sense_spec(ip)
+    if probe(f"http://{ip}:81/stream"):
+        return stream_spec(f"http://{ip}:81/stream", ip, "mjpeg")
+    raise ValueError(
+        f"{ip} did not answer as an ESP camera. "
+        f"Post its stream URL, for example rtsp://{ip}:554/stream1"
+    )
+
+
+def classify(raw: str, probe=None) -> dict:
+    probe = probe or probe_http
+    text = raw.strip()
+    if not text:
+        raise ValueError("empty camera address")
+    if "://" not in text:
+        return classify_host(text, probe)
+    parsed = urlparse(text)
+    scheme = (parsed.scheme or "").lower()
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"empty camera address: {raw!r}")
+    path = parsed.path or ""
+    if scheme in ("rtsp", "rtsps"):
+        return stream_spec(text, host, "rtsp")
+    if scheme in ("http", "https"):
+        if path in ("", "/"):
+            return classify_host(host, probe)
+        if path.rstrip("/") == "/audio":
+            return sense_spec(host)
+        if looks_mjpeg(text):
+            return stream_spec(text, host, "mjpeg")
+        return stream_spec(text, host, "http")
+    raise ValueError(f"unsupported camera URL: {text}")
+
+
+def parse_item(item, probe=None) -> dict:
+    if isinstance(item, str):
+        return classify(item, probe)
+    if not isinstance(item, dict):
+        raise ValueError("each camera must be a string or an object")
+    user = item.get("user") or item.get("username")
+    password = item.get("password")
+    kind = str(item.get("kind") or item.get("type") or "").lower()
+    if (
+        kind in KINDS
+        and not user
+        and not password
+        and (item.get("url") or (item.get("video") and item.get("audio")))
+    ):
+        if kind == "sense":
+            video = str(item["video"])
+            return sense_spec(str(item.get("ip") or host_of(video)), video, str(item["audio"]))
+        url = str(item["url"])
+        return stream_spec(url, str(item.get("ip") or host_of(url)), kind)
+    if item.get("video"):
+        video = with_auth(str(item["video"]), user, password)
+        ip = str(item.get("ip") or host_of(video))
+        if item.get("audio"):
+            return sense_spec(ip, video, with_auth(str(item["audio"]), user, password))
+        if video.lower().startswith(("rtsp://", "rtsps://")):
+            return stream_spec(video, ip, "rtsp")
+        return stream_spec(video, ip, "mjpeg" if looks_mjpeg(video) else "http")
+    raw = item.get("url") or item.get("source") or item.get("ip")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("camera needs an ip or a url")
+    raw = raw.strip()
+    if kind == "sense":
+        return sense_spec(host_of(raw))
+    if kind == "mjpeg":
+        url = raw if "://" in raw else f"http://{raw}:81/stream"
+        return stream_spec(with_auth(url, user, password), host_of(url), "mjpeg")
+    if kind == "rtsp":
+        url = raw if raw.lower().startswith(("rtsp://", "rtsps://")) else f"rtsp://{raw}"
+        return stream_spec(with_auth(url, user, password), host_of(url), "rtsp")
+    if "://" in raw:
+        return classify(with_auth(raw, user, password), probe)
+    return classify_host(host_of(raw), probe or probe_http)
 
 
 def path_name(index: int) -> str:
     return "cam_sense" if index == 1 else f"cam_sense{index}"
 
 
-def describe(ip: str, name: str) -> dict:
-    return {
-        "ip": ip,
-        "kind": "sense",
+def public_spec(spec: dict, name: str) -> dict:
+    out = {
+        "source": spec["source"],
+        "ip": spec["ip"],
+        "kind": spec["kind"],
         "path": name,
-        "video": f"http://{ip}:81/stream",
-        "audio": f"http://{ip}/audio",
         "rtsp": f"rtsp://{LAN_IP}:8554/{name}",
         "hls": f"http://{LAN_IP}:8888/{name}/",
     }
+    if spec["kind"] == "sense":
+        out["video"] = spec["video"]
+        out["audio"] = spec["audio"]
+    else:
+        out["url"] = spec["url"]
+    return out
 
 
-def ffmpeg_cmd(spec: dict) -> list[str]:
-    """H.264 video + AAC audio into one RTSP path."""
+def ffmpeg_sense(spec: dict) -> list[str]:
+    """ESP Sense: MJPEG :81/stream plus PCM /audio → H.264 + AAC."""
     out = f"rtsp://{MTX_HOST}:{RTSP_PORT}/{spec['path']}"
-    video = spec["video"]
     gop = str(int(FPS) * 2)
     filt = (
         f"[0:v]fps={FPS},format=yuv420p,setpts=N/({FPS}*TB)[v];"
@@ -78,7 +242,7 @@ def ffmpeg_cmd(spec: dict) -> list[str]:
         "-rw_timeout", "15000000",
         "-probesize", "512k", "-analyzeduration", "500000",
         "-thread_queue_size", "8",
-        "-f", "mjpeg", "-framerate", FPS, "-i", video,
+        "-f", "mjpeg", "-framerate", FPS, "-i", spec["video"],
         "-itsoffset", AUDIO_DELAY_S,
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
         "-rw_timeout", "15000000",
@@ -97,6 +261,42 @@ def ffmpeg_cmd(spec: dict) -> list[str]:
     ]
 
 
+def ffmpeg_stream(spec: dict) -> list[str]:
+    """Any RTSP or HTTP camera → H.264, plus AAC when the source has audio."""
+    out = f"rtsp://{MTX_HOST}:{RTSP_PORT}/{spec['path']}"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-fflags", "+genpts+discardcorrupt",
+    ]
+    if spec["kind"] == "rtsp":
+        cmd += ["-rtsp_transport", "tcp", "-timeout", "15000000"]
+    else:
+        cmd += [
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+            "-rw_timeout", "15000000",
+        ]
+        if spec["kind"] == "mjpeg":
+            cmd += ["-f", "mjpeg"]
+    cmd += [
+        "-i", spec["url"],
+        "-vf", "format=yuv420p",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
+        "-pix_fmt", "yuv420p", "-bf", "0", "-g", "30", "-keyint_min", "30",
+        "-tune", "zerolatency", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-f", "rtsp", "-rtsp_transport", "tcp", out,
+    ]
+    return cmd
+
+
+def ffmpeg_cmd(spec: dict) -> list[str]:
+    if spec.get("kind") == "sense":
+        return ffmpeg_sense(spec)
+    return ffmpeg_stream(spec)
+
+
 class Supervisor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -108,8 +308,8 @@ class Supervisor:
         with self._lock:
             return list(self._specs)
 
-    def replace(self, ips: list[str]) -> list[dict]:
-        specs = self._build(ips)
+    def replace(self, items: list) -> tuple[list[dict], list[str]]:
+        specs, skipped = self._build(items)
         with self._lock:
             self._generation += 1
             gen = self._generation
@@ -117,19 +317,26 @@ class Supervisor:
         self._wait_procs(procs)
         with self._lock:
             if gen != self._generation:
-                return list(self._specs)
+                return list(self._specs), []
             self._specs = specs
             self._save_locked()
             for spec in specs:
                 self._start_locked(spec, gen)
-        log("cameras: " + ", ".join(f"{s['ip']}->{s['path']}" for s in specs) or "(none)")
-        return specs
+        log(
+            "cameras: "
+            + (", ".join(f"{redact(s['source'])}->{s['path']}" for s in specs) or "(none)")
+        )
+        return specs, skipped
 
     def restore(self) -> None:
-        ips = self._load()
-        if ips:
-            log(f"restore {len(ips)} camera(s)")
-            self.replace(ips)
+        items = self._load()
+        if not items:
+            return
+        log(f"restore {len(items)} camera(s)")
+        try:
+            self.replace(items)
+        except ValueError as exc:
+            log(f"restore skipped: {exc}")
 
     def stop(self) -> None:
         with self._lock:
@@ -137,22 +344,31 @@ class Supervisor:
             procs = self._take_procs_locked()
         self._wait_procs(procs)
 
-    def _build(self, ips: list[str]) -> list[dict]:
-        specs = []
-        seen = set()
-        for raw in ips:
-            ip = normalize_ip(raw)
-            if ip in seen:
+    def _build(self, items: list, probe=None) -> tuple[list[dict], list[str]]:
+        specs: list[dict] = []
+        skipped: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            try:
+                parsed = parse_item(item, probe)
+            except ValueError as exc:
+                skipped.append(str(exc))
                 continue
-            seen.add(ip)
-            specs.append(describe(ip, path_name(len(specs) + 1)))
-        return specs
+            if parsed["source"] in seen:
+                continue
+            seen.add(parsed["source"])
+            specs.append(public_spec(parsed, path_name(len(specs) + 1)))
+        for err in skipped:
+            log(f"skip {err}")
+        if skipped and not specs:
+            raise ValueError("; ".join(skipped))
+        return specs, skipped
 
     def _start_locked(self, spec: dict, gen: int) -> None:
         cmd = ffmpeg_cmd(spec)
-        log(f"start {spec['path']} {spec['ip']} ({spec['kind']})")
+        log(f"start {spec['path']} {redact(spec['source'])} ({spec['kind']})")
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-        self._procs[spec["ip"]] = proc
+        self._procs[spec["source"]] = proc
         threading.Thread(
             target=self._watch, args=(spec, gen, proc), daemon=True
         ).start()
@@ -164,9 +380,9 @@ class Supervisor:
         with self._lock:
             if gen != self._generation:
                 return
-            if not any(s["ip"] == spec["ip"] for s in self._specs):
+            if not any(s["source"] == spec["source"] for s in self._specs):
                 return
-            current = self._procs.get(spec["ip"])
+            current = self._procs.get(spec["source"])
             if current is not None and current is not proc and current.poll() is None:
                 return
             self._start_locked(spec, gen)
@@ -193,19 +409,26 @@ class Supervisor:
             os.makedirs(parent, exist_ok=True)
         tmp = DATA_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"ips": [s["ip"] for s in self._specs]}, fh)
+            json.dump({"cameras": self._specs}, fh)
         os.replace(tmp, DATA_PATH)
 
-    def _load(self) -> list[str]:
+    def _load(self) -> list:
         try:
             with open(DATA_PATH, encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, json.JSONDecodeError):
             return []
-        ips = data.get("ips") if isinstance(data, dict) else data
-        if not isinstance(ips, list):
+        if isinstance(data, dict):
+            cams = data.get("cameras")
+            if isinstance(cams, list) and cams:
+                return cams
+            ips = data.get("ips") or data.get("sources") or data.get("urls")
+            if isinstance(ips, list):
+                return [str(ip) for ip in ips]
             return []
-        return [str(ip) for ip in ips]
+        if isinstance(data, list):
+            return data
+        return []
 
 
 SUPER = Supervisor()
@@ -243,7 +466,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._json(400, {"ok": False, "error": "bad content-length"})
             return
-        if length < 0 or length > 65536:
+        if length < 0 or length > 262144:
             self._json(400, {"ok": False, "error": "body too large"})
             return
         raw = self.rfile.read(length) if length else b""
@@ -252,18 +475,32 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, {"ok": False, "error": "body must be JSON"})
             return
-        ips = data.get("ips") if isinstance(data, dict) else data
-        if ips is None and isinstance(data, dict):
-            ips = data.get("urls")
-        if not isinstance(ips, list) or not all(isinstance(x, str) for x in ips):
-            self._json(400, {"ok": False, "error": 'send {"ips": ["10.128.93.15"]}'})
+        items = None
+        if isinstance(data, dict):
+            for key in ("ips", "urls", "cameras", "sources"):
+                if key in data:
+                    items = data[key]
+                    break
+        elif isinstance(data, list):
+            items = data
+        if not isinstance(items, list):
+            self._json(
+                400,
+                {
+                    "ok": False,
+                    "error": 'send {"ips": ["10.128.93.15", "rtsp://camera/stream1"]}',
+                },
+            )
             return
         try:
-            cams = SUPER.replace(ips)
+            cams, skipped = SUPER.replace(items)
         except ValueError as exc:
             self._json(400, {"ok": False, "error": str(exc)})
             return
-        self._json(200, {"ok": True, "cameras": cams})
+        payload = {"ok": True, "cameras": cams}
+        if skipped:
+            payload["skipped"] = skipped
+        self._json(200, payload)
 
 
 def main() -> None:
