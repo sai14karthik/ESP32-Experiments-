@@ -1,8 +1,10 @@
+# Static ffmpeg: the Mini cannot reach deb.debian.org, so do not apt-get install ffmpeg.
+FROM mwader/static-ffmpeg:7.1 AS ffmpeg-base
+
 FROM python:3.12-slim-bookworm
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
-  && rm -rf /var/lib/apt/lists/*
+COPY --from=ffmpeg-base /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-base /ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
 COPY app.py /app/app.py
