@@ -20,16 +20,42 @@ chmod +x "${DIR}/run_publisher.sh"
 (cd "${SRC}" && docker compose stop cameras >/dev/null 2>&1 || true)
 (cd "${SRC}" && docker compose up -d mediamtx)
 
-python3 - "${PLIST}" "${LABEL}" "${DIR}" <<'PY'
+# A bare LaunchAgent cannot see the LAN. An app bundle can, after one Allow.
+BUNDLE="${HOME}/Applications/MediaMTX Cameras.app"
+mkdir -p "${BUNDLE}/Contents/MacOS"
+cat > "${BUNDLE}/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>publisher</string>
+<key>CFBundleIdentifier</key><string>com.lakenona.mediamtx-cameras</string>
+<key>CFBundleName</key><string>MediaMTX Cameras</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSBackgroundOnly</key><true/>
+<key>NSLocalNetworkUsageDescription</key>
+<string>Publishes lab cameras to MediaMTX.</string>
+</dict></plist>
+EOF
+cat > "${BUNDLE}/Contents/MacOS/publisher" <<EOF
+#!/bin/bash
+cd "${DIR}" || exit 1
+exec /bin/bash ./run_publisher.sh
+EOF
+chmod 755 "${BUNDLE}/Contents/MacOS/publisher"
+codesign --force --sign - "${BUNDLE}" >/dev/null
+
+python3 - "${PLIST}" "${LABEL}" "${DIR}" "${BUNDLE}" <<'PY'
 import os, plistlib, sys
-plist_path, label, directory = sys.argv[1:]
+plist_path, label, directory, bundle = sys.argv[1:]
 os.makedirs(os.path.dirname(plist_path), exist_ok=True)
 os.makedirs(os.path.join(directory, "data"), exist_ok=True)
+exe = os.path.join(bundle, "Contents", "MacOS", "publisher")
 with open(plist_path, "wb") as fh:
     plistlib.dump({
         "Label": label,
         "WorkingDirectory": directory,
-        "ProgramArguments": ["/bin/bash", os.path.join(directory, "run_publisher.sh")],
+        "ProgramArguments": [exe],
         "RunAtLoad": True,
         "KeepAlive": True,
         "StandardOutPath": os.path.join(directory, "data", "publisher.log"),
