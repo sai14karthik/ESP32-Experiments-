@@ -1,0 +1,65 @@
+####################################################################################################
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+####################################################################################################
+
+name: "bls_hpe"
+backend: "python"
+max_batch_size: 1
+input [
+  {
+    name: "image"
+    data_type: TYPE_UINT8
+    dims: [ 540, 960, 3]
+  },
+  {
+    name: "bbox"
+    data_type: TYPE_FP32
+    dims: [ 4096 ]
+  },
+  {
+    name: "tracked_id"
+    data_type: TYPE_INT32
+    dims: [ 1024 ]
+  }
+]
+output [
+{
+    name: "poses"
+    data_type: TYPE_FP32
+    dims: [-1, 18, 3 ]
+}
+]
+
+output [
+{
+    name: "bbox"
+    data_type: TYPE_FP32
+    dims: [ -1 ]
+}
+]
+
+output [
+{
+    name: "tracked_id"
+    data_type: TYPE_INT32
+    dims: [ -1 ]
+}
+]
+
+
+instance_group [{ count: 1 kind: KIND_GPU gpus:[0]}]
+
+parameters: { key: "FORCE_CPU_ONLY_INPUT_TENSORS" value: {string_value:"no"}}
+
+
+response_cache {
+  enable: true
+}

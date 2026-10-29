@@ -1,34 +1,13 @@
-###############################################
-# ffmpeg in the cameras service publishes each
-# source. This server only serves the paths.
-###############################################
-
-logLevel: info
-logDestinations: [stdout]
-
-readTimeout: 30s
-writeTimeout: 30s
-writeQueueSize: 8192
-
+# Same server settings as mycareapp-main/mediamtx.yml.
+# auth stays open so a GPU and the Mini publisher can use the
+# published ports, not only 127.0.0.1 inside the container.
+api: yes
+apiAddress: :9997
 rtsp: yes
+rtspTransports:
+  - tcp
 rtspAddress: :8554
-rtspTransports: [tcp]
 
-hls: yes
-hlsAddress: :8888
-hlsAlwaysRemux: yes
-hlsVariant: lowLatency
-hlsSegmentCount: 7
-hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
-hlsSegmentMaxSize: 10M
-
-webrtc: no
-rtmp: no
-srt: no
-
-# The publisher runs in another container, so anonymous publish/read
-# must be allowed from the Docker network, not only from localhost.
 authMethod: internal
 authInternalUsers:
   - user: any
@@ -36,9 +15,9 @@ authInternalUsers:
       - action: publish
       - action: read
       - action: playback
+      - action: api
 
 paths:
-  # cam_sense, cam_sense2, … H.264, plus AAC when the camera has audio.
-  "~^cam_sense[0-9]*$":
+  all_others:
     source: publisher
     overridePublisher: true

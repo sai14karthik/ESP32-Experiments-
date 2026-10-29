@@ -1,0 +1,10 @@
+[project]
+name = "mycareapp-tests"
+version = "0.1.0"
+description = "Local test dependencies for mycareapp"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "Pillow",
+    "tritonclient[http]",
+]

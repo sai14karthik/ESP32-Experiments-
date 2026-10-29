@@ -1,0 +1,8 @@
+FROM alpine:3.21
+
+RUN apk add --no-cache ffmpeg bash
+
+COPY scripts/publish_videos.sh /usr/local/bin/publish_videos.sh
+RUN chmod +x /usr/local/bin/publish_videos.sh
+
+ENTRYPOINT ["/usr/local/bin/publish_videos.sh"]

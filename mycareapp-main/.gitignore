@@ -1,0 +1,13 @@
+.env
+__pycache__/
+.venv/
+*.pyc
+*.o
+*.plan
+deepstream_mycare_app/deepstream_mycare_app
+videos/
+annotated_recovered.h264
+annotated_recovered.mp4
+first_frame.jpg
+triton_model/.trt10_8-built
+tests/results/

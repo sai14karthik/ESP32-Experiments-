@@ -1,0 +1,33 @@
+name: "hpe"
+platform: "tensorrt_plan"
+max_batch_size: 1
+input [
+  {
+    name: "input"
+    data_type: TYPE_FP32
+    dims: [ 3, 256, 256 ]
+  }
+]
+output [
+  {
+    name: "scores"
+    data_type: TYPE_FP32
+    dims: [ 17, 1 ]
+  }
+]
+output [
+  {
+    name: "preds"
+    data_type: TYPE_FP32
+    dims: [ 17, 2 ]
+  }
+]
+
+instance_group [{ count: 1 kind: KIND_GPU gpus:[0]}]
+
+parameters: { key: "FORCE_CPU_ONLY_INPUT_TENSORS" value: {string_value:"no"}}
+
+
+response_cache {
+  enable: true
+}

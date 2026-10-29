@@ -33,7 +33,7 @@ Flash each board with **CameraWebServerWiFiSense** so both the picture and the m
 
 ## Always-on server (Docker)
 
-MediaMTX runs in Docker and stays up after a reboot. The publisher is a Mac login service: Docker Desktop on this Mini cannot open `10.128.93.x`, so the publisher runs on the Mini itself, restarts if it exits, and starts again at login. No terminal. MediaMTX stays on `:8554` and `:8888`. The camera list in `mediamtx/docker/data/` is saved and published again when the service starts. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
+MediaMTX runs in Docker and stays up after a reboot. The publisher is a Mac login service: Docker Desktop on this Mini cannot open `10.128.93.x`, so the publisher runs on the Mini itself, restarts if it exits, and starts again at login. No terminal. MediaMTX stays on RTSP `:8554`, with its API on `:9997`. The camera list in `mediamtx/docker/data/` is saved and published again when the service starts. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
 
 ```bash
 cd mediamtx/docker
@@ -66,15 +66,18 @@ See what is live:
 
 ```bash
 curl -s http://127.0.0.1:8090/cameras
+curl -s http://127.0.0.1:9997/v3/paths/list
 ```
+
+`:8090` is the publisher. `:9997` is the MediaMTX API (path list and ready state). From a GPU, use `http://10.128.93.13:9997/v3/paths/list`.
 
 GPU (or VLC) over TCP:
 
-| Camera | RTSP | HLS |
-|--------|------|-----|
-| `10.128.93.15` | `rtsp://10.128.93.13:8554/cam_sense` | `http://10.128.93.13:8888/cam_sense/` |
-| `10.128.93.24` | `rtsp://10.128.93.13:8554/cam_sense2` | `http://10.128.93.13:8888/cam_sense2/` |
-| camera N | `rtsp://10.128.93.13:8554/cam_senseN` | `http://10.128.93.13:8888/cam_senseN/` |
+| Camera | RTSP |
+|--------|------|
+| `10.128.93.15` | `rtsp://10.128.93.13:8554/cam_sense` |
+| `10.128.93.24` | `rtsp://10.128.93.13:8554/cam_sense2` |
+| camera N | `rtsp://10.128.93.13:8554/cam_senseN` |
 
 ```bash
 ffplay -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense

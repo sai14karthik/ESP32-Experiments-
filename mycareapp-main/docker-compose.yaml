@@ -1,0 +1,88 @@
+services:
+  deepstream:
+    image: ${DEV_IMAGE}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE}
+    profiles: ["deepstream"]
+    container_name: ${PROJECT_NAME}
+    network_mode: "host"
+    entrypoint: []
+    command: ["/bin/bash", "-lc", "source /rpm/scripts/install_trt_blackwell.sh && exec /rpm/scripts/start_project.sh"]
+    environment:
+      CUDA_CACHE_DISABLE: "0"
+      LD_PRELOAD: ""
+      TRITON_EXTERNAL: ${TRITON_EXTERNAL:-1}
+      TRITON_HTTP_PORT: ${TRITON_HTTP_PORT}
+      TRITON_GRPC_PORT: ${TRITON_GRPC_PORT}
+      TRITON_METRICS_PORT: ${TRITON_METRICS_PORT}
+    deploy:
+      restart_policy:
+        condition: always
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              device_ids: ["${GPU_ID}"]
+    volumes:
+      - .:/rpm
+      - ${MDX_DATA_DIR}/models:/models
+
+  video-stream:
+    image: ${PROJECT_NAME}-video-stream
+    profiles: ["video-stream"]
+    build:
+      context: .
+      dockerfile: Dockerfile.video-stream
+    container_name: ${PROJECT_NAME}-video-stream
+    network_mode: "host"
+    restart: always
+    environment:
+      RTSP_HOST: ${RTSP_HOST:-127.0.0.1}
+      RTSP_PORT: ${RTSP_PORT:-8554}
+      STREAM_PREFIX: ${STREAM_PREFIX:-test}
+    volumes:
+      - ./videos:/rpm/videos:ro
+
+  triton:
+    image: ${DEV_IMAGE}
+    profiles: ["triton"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE}
+    container_name: ${PROJECT_NAME}-triton
+    network_mode: "host"
+    entrypoint: []
+    command: ["/bin/bash", "-lc", "exec /rpm/scripts/start_triton.sh"]
+    environment:
+      CUDA_CACHE_DISABLE: "0"
+      LD_PRELOAD: ""
+      TRITON_HTTP_PORT: ${TRITON_HTTP_PORT}
+      TRITON_GRPC_PORT: ${TRITON_GRPC_PORT}
+      TRITON_METRICS_PORT: ${TRITON_METRICS_PORT}
+    deploy:
+      restart_policy:
+        condition: always
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              device_ids: ["${GPU_ID}"]
+    volumes:
+      - .:/rpm
+      - ${MDX_DATA_DIR}/models:/models
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: ${PROJECT_NAME}-mediamtx
+    network_mode: "host"
+    restart: always
+    profiles: ["mediamtx"]
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    environment:
+      MTX_API: "yes"
