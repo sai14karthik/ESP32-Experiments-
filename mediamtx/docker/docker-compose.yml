@@ -1,8 +1,6 @@
-# MediaMTX only. On the Mac Mini, Docker cannot open LAN camera ports.
-# Start the server here, then run the publisher on the Mini itself:
-#   docker compose up -d
-#   ./run_publisher.sh
-
+# Both stay up without a terminal (restart: unless-stopped).
+# The publisher uses the Mini's network so it can open LAN cameras.
+#   docker compose up -d --build
 services:
   mediamtx:
     image: bluenviron/mediamtx:1.21.0
@@ -14,24 +12,17 @@ services:
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
 
-  # Optional. Docker Desktop on the Mini cannot reach 10.128.93.x,
-  # so the lab publisher is ./run_publisher.sh on the host.
   cameras:
-    profiles: ["in-container"]
     build: .
+    network_mode: host
     restart: unless-stopped
-    ports:
-      - "8090:8090"
     environment:
-      MTX_HOST: mediamtx
+      MTX_HOST: 127.0.0.1
       RTSP_PORT: "8554"
       MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
       API_PORT: "8090"
       DATA_PATH: /data/cameras.json
     volumes:
-      - camdata:/data
+      - ./data:/data
     depends_on:
       - mediamtx
-
-volumes:
-  camdata:
