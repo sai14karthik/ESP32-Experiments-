@@ -14,40 +14,31 @@ chmod +x "${DIR}/run_publisher.sh"
 (cd "${DIR}" && docker compose stop cameras >/dev/null 2>&1 || true)
 (cd "${DIR}" && docker compose up -d mediamtx)
 
-cat > "${PLIST}" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${LABEL}</string>
-  <key>WorkingDirectory</key>
-  <string>${DIR}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>${DIR}/run_publisher.sh</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${DIR}/data/publisher.log</string>
-  <key>StandardErrorPath</key>
-  <string>${DIR}/data/publisher.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-</dict>
-</plist>
-EOF
+python3 - "${PLIST}" "${LABEL}" "${DIR}" <<'PY'
+import os, plistlib, sys
+plist_path, label, directory = sys.argv[1:]
+os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+os.makedirs(os.path.join(directory, "data"), exist_ok=True)
+with open(plist_path, "wb") as fh:
+    plistlib.dump({
+        "Label": label,
+        "WorkingDirectory": directory,
+        "ProgramArguments": ["/bin/bash", os.path.join(directory, "run_publisher.sh")],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": os.path.join(directory, "data", "publisher.log"),
+        "StandardErrorPath": os.path.join(directory, "data", "publisher.log"),
+        "EnvironmentVariables": {
+            "PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+    }, fh)
+os.chmod(plist_path, 0o644)
+PY
 
 launchctl bootout "gui/${UID_NUM}" "${PLIST}" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/${UID_NUM}" "${PLIST}"
-launchctl enable "gui/${UID_NUM}/${LABEL}"
-launchctl kickstart -k "gui/${UID_NUM}/${LABEL}"
+if ! launchctl bootstrap "gui/${UID_NUM}" "${PLIST}"; then
+  launchctl load -w "${PLIST}"
+fi
+launchctl kickstart -k "gui/${UID_NUM}/${LABEL}" || true
 echo "publisher service loaded: ${LABEL}"
 echo "log: ${DIR}/data/publisher.log"
