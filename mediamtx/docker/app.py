@@ -424,6 +424,7 @@ def ffmpeg_stream(spec: dict) -> list[str]:
         "-vf", "format=yuv420p",
         "-map", "0:v:0",
         "-map", "0:a:0?",
+        "-dn",
         "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
         "-pix_fmt", "yuv420p", "-bf", "0", "-g", "30", "-keyint_min", "30",
         "-tune", "zerolatency", "-crf", "23",

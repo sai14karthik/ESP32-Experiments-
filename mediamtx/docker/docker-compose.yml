@@ -1,9 +1,7 @@
-# Forever-on MediaMTX. From this directory on the Mini:
-#   docker compose up -d --build
-# Post ESP addresses or any camera stream URL (order is cam_sense, cam_sense2, …):
-#   curl -s -X POST http://127.0.0.1:8090/cameras \
-#     -H 'content-type: application/json' \
-#     -d '{"ips":["10.128.93.15","192.168.1.50"]}'
+# MediaMTX only. On the Mac Mini, Docker cannot open LAN camera ports.
+# Start the server here, then run the publisher on the Mini itself:
+#   docker compose up -d
+#   ./run_publisher.sh
 
 services:
   mediamtx:
@@ -16,14 +14,16 @@ services:
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
 
-  # Host network: Docker Desktop on the Mini cannot open LAN camera
-  # ports from the bridge. MediaMTX stays published on :8554 / :8888.
+  # Optional. Docker Desktop on the Mini cannot reach 10.128.93.x,
+  # so the lab publisher is ./run_publisher.sh on the host.
   cameras:
+    profiles: ["in-container"]
     build: .
-    network_mode: host
     restart: unless-stopped
+    ports:
+      - "8090:8090"
     environment:
-      MTX_HOST: host.docker.internal
+      MTX_HOST: mediamtx
       RTSP_PORT: "8554"
       MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
       API_PORT: "8090"

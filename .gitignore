@@ -79,6 +79,7 @@ presence_detection/models/*.joblib
 mediamtx/mediamtx.runtime.yml
 mediamtx/run_xiao_publish.sh
 mediamtx/hanwha.url
+mediamtx/docker/data/
 
 # Local RTSP recordings (record_rtsp.py)
 /recordings/
