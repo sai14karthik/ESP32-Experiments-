@@ -33,11 +33,12 @@ Flash each board with **CameraWebServerWiFiSense** so both the picture and the m
 
 ## Always-on server (Docker)
 
-`mediamtx/docker/` runs MediaMTX and the camera publisher in Docker. Both restart after a Mini reboot, with no terminal left open. The publisher uses the Mini's network so it can open camera addresses. MediaMTX stays on `:8554` and `:8888`. The camera list in `mediamtx/docker/data/` is saved and published again on startup. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
+MediaMTX runs in Docker and stays up after a reboot. The publisher is a Mac login service: Docker Desktop on this Mini cannot open `10.128.93.x`, so the publisher runs on the Mini itself, restarts if it exits, and starts again at login. No terminal. MediaMTX stays on `:8554` and `:8888`. The camera list in `mediamtx/docker/data/` is saved and published again when the service starts. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
 
 ```bash
 cd mediamtx/docker
-docker compose up -d --build
+docker compose up -d
+./install_service.sh
 ```
 
 Each entry is a camera IP or a stream URL. For an IP, the Mini looks for a working picture: common RTSP paths (port 554), common HTTP picture paths, and an ESP Sense board (`:81/stream` plus `/audio`). A posted `rtsp://` or `http://` URL is used as given. The stream is republished as H.264, with audio when the camera sends it.

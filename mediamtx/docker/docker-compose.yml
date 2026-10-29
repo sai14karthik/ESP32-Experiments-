@@ -1,6 +1,7 @@
-# Both stay up without a terminal (restart: unless-stopped).
-# The publisher uses the Mini's network so it can open LAN cameras.
-#   docker compose up -d --build
+# MediaMTX stays up without a terminal (restart: unless-stopped).
+# The publisher is a Mac login service (./install_service.sh). Docker Desktop
+# on this Mini cannot open 10.128.93.x, including with network_mode: host.
+#   docker compose up -d
 services:
   mediamtx:
     image: bluenviron/mediamtx:1.21.0
@@ -12,19 +13,23 @@ services:
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
 
+  # Not used on the Mini. `docker compose --profile in-container up` only.
   cameras:
+    profiles: ["in-container"]
     build: .
-    network_mode: host
     restart: unless-stopped
+    ports:
+      - "8090:8090"
     environment:
-      # MediaMTX is published on the Mini's LAN address. 127.0.0.1 inside
-      # this container is not that port.
-      MTX_HOST: 10.128.93.13
+      MTX_HOST: mediamtx
       RTSP_PORT: "8554"
       MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
       API_PORT: "8090"
       DATA_PATH: /data/cameras.json
     volumes:
-      - ./data:/data
+      - camdata:/data
     depends_on:
       - mediamtx
+
+volumes:
+  camdata:
