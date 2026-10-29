@@ -17,7 +17,9 @@ services:
     network_mode: host
     restart: unless-stopped
     environment:
-      MTX_HOST: 127.0.0.1
+      # MediaMTX is published on the Mini's LAN address. 127.0.0.1 inside
+      # this container is not that port.
+      MTX_HOST: 10.128.93.13
       RTSP_PORT: "8554"
       MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
       API_PORT: "8090"
