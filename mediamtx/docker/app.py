@@ -171,11 +171,11 @@ def probe_url(url: str, timeout: float = 2.5) -> bool:
     return probe_http(url, timeout)
 
 
-def urls_that_answer(urls: list[str], probe, budget: float = 8.0) -> set[str]:
+def urls_that_answer(urls: list[str], probe, budget: float = 4.0, workers: int = 8) -> set[str]:
     ok: set[str] = set()
     if not urls:
         return ok
-    pool = ThreadPoolExecutor(max_workers=8)
+    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(urls))))
     futs = {pool.submit(probe, url): url for url in urls}
     try:
         for fut in as_completed(futs, timeout=budget):
@@ -225,27 +225,33 @@ def classify_host(ip: str, probe=None, user: str | None = None, password: str | 
     rtsp_urls = [
         with_auth(f"rtsp://{host}:554{path}", user, password) for path in RTSP_PATHS
     ]
-    http_urls = [sense_video]
+    # Picture ports first. A closed RTSP port that drops packets would otherwise
+    # occupy every worker until the deadline, and the ESP streams would never be checked.
+    found = urls_that_answer([sense_audio, sense_video], probe, budget=3.0, workers=2)
+    if sense_audio in found and sense_video in found:
+        return sense_spec(host)
+    if sense_video in found:
+        return stream_spec(sense_video, ip, "mjpeg")
+    http_urls: list[str] = []
     for tmpl in HTTP_STREAMS:
         url = tmpl.format(host=host)
+        if url == sense_video:
+            continue
         if user:
             url = with_auth(url, user, password)
         if url not in http_urls:
             http_urls.append(url)
-    found = urls_that_answer([sense_audio, sense_video, *rtsp_urls, *http_urls], probe)
-    if sense_audio in found and sense_video in found:
-        return sense_spec(host)
-    for url in rtsp_urls:
-        if url in found:
-            return stream_spec(url, ip, "rtsp")
+    found = urls_that_answer(http_urls, probe, budget=4.0, workers=len(http_urls) or 1)
     for url in http_urls:
         if url in found:
             return stream_spec(url, ip, "mjpeg" if looks_mjpeg(url) else "http")
+    found = urls_that_answer(rtsp_urls, probe, budget=5.0, workers=len(rtsp_urls) or 1)
+    for url in rtsp_urls:
+        if url in found:
+            return stream_spec(url, ip, "rtsp")
     hint = f"rtsp://{ip}:554/profile2/media.smp"
     extra = " Check the username and password." if user or password else ""
-    raise ValueError(
-        f"no video stream found at {ip}. Post the camera URL, for example {hint}.{extra}"
-    )
+    raise ValueError(f"no video stream found at {ip}. Post the camera URL, for example {hint}.{extra}")
 
 
 def classify(raw: str, probe=None) -> dict:
@@ -316,6 +322,23 @@ def parse_item(item, probe=None) -> dict:
     if "://" in raw:
         return classify(with_auth(raw, user, password), probe)
     return classify_host(host_of(raw), probe or probe_url, user, password)
+
+
+def camera_items(data) -> list:
+    """Accept a list of IPs, URLs, and {ip, user, password} objects."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("ips", "urls", "cameras", "sources"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        if any(data.get(key) for key in ("ip", "url", "video", "source")):
+            return [data]
+    raise ValueError(
+        'send {"ips": ["10.128.93.15"]} or '
+        '{"cameras": [{"ip": "192.168.1.50", "user": "admin", "password": "secret"}]}'
+    )
 
 
 def path_name(index: int) -> str:
@@ -589,24 +612,8 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, {"ok": False, "error": "body must be JSON"})
             return
-        items = None
-        if isinstance(data, dict):
-            for key in ("ips", "urls", "cameras", "sources"):
-                if key in data:
-                    items = data[key]
-                    break
-        elif isinstance(data, list):
-            items = data
-        if not isinstance(items, list):
-            self._json(
-                400,
-                {
-                    "ok": False,
-                    "error": 'send {"ips": ["10.128.93.15", "192.168.1.50"]} or a stream URL',
-                },
-            )
-            return
         try:
+            items = camera_items(data)
             cams, skipped = SUPER.replace(items)
         except ValueError as exc:
             self._json(400, {"ok": False, "error": str(exc)})
