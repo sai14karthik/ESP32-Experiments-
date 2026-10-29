@@ -69,7 +69,7 @@ curl -s http://127.0.0.1:8090/cameras
 curl -s http://127.0.0.1:9997/v3/paths/list
 ```
 
-`:8090` is the publisher. `:9997` is the MediaMTX API (path list and ready state). From a GPU, use `http://10.128.93.13:9997/v3/paths/list`.
+`:8090` is the publisher. `:9997` is the MediaMTX API (path list and ready state) on the Mini: `http://10.128.93.13:9997/v3/paths/list`. A GPU on `10.128.81.x` can pull RTSP on `:8554`. That network does not reach `:9997`.
 
 GPU (or VLC) over TCP:
 

@@ -357,7 +357,6 @@ def public_spec(spec: dict, name: str) -> dict:
         "kind": spec["kind"],
         "path": name,
         "rtsp": f"rtsp://{LAN_IP}:8554/{name}",
-        "hls": f"http://{LAN_IP}:8888/{name}/",
     }
     if spec["kind"] == "sense":
         out["video"] = spec["video"]
