@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Camera publisher for MediaMTX.
 
-POST /cameras replaces the whole set. Each entry is an ESP board address
-or any camera stream URL (rtsp://, rtsps://, http://, https://).
+POST /cameras replaces the whole set. Each entry is any camera IP, or a
+stream URL (rtsp://, rtsps://, http://, https://).
 
-  {"ips": ["10.128.93.15", "rtsp://10.1.2.3:554/stream1"]}
+  {"ips": ["10.128.93.15", "192.168.1.50"]}
+  {"cameras": [{"ip": "192.168.1.50", "user": "admin", "password": "secret"}]}
 
-A bare address is probed: /audio means ESP Sense (picture + mic),
-:81/stream means ESP video. Anything else must be a stream URL.
-The list is saved and republished after a restart.
+A bare IP is searched for a real stream: common RTSP paths, common HTTP
+picture paths, and the ESP Sense mic+picture pair. A full URL is used as
+given. The list is saved and republished after a restart.
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 MTX_HOST = os.environ.get("MTX_HOST", "mediamtx")
 RTSP_PORT = os.environ.get("RTSP_PORT", "8554")
@@ -32,6 +34,32 @@ DATA_PATH = os.environ.get("DATA_PATH", "/data/cameras.json")
 FPS = os.environ.get("SENSE_AV_FPS", "8")
 AUDIO_DELAY_S = os.environ.get("SENSE_AV_AUDIO_DELAY_S", "0.300")
 KINDS = ("sense", "mjpeg", "rtsp", "http")
+# Tried in this order when the caller only has an IP. First hit with video wins
+# after the ESP Sense pair (picture on :81 plus /audio).
+RTSP_PATHS = (
+    "/profile2/media.smp",
+    "/profile1/media.smp",
+    "/onvif/profile2/media.smp",
+    "/onvif/profile1/media.smp",
+    "/Streaming/Channels/101",
+    "/cam/realmonitor?channel=1&subtype=0",
+    "/stream1",
+    "/live/ch00_0",
+    "/h264Preview_01_main",
+    "/axis-media/media.amp",
+    "/media/video1",
+    "/h264",
+    "/live",
+    "/",
+)
+HTTP_STREAMS = (
+    "http://{host}:81/stream",
+    "http://{host}/mjpg/video.mjpg",
+    "http://{host}/video.mjpg",
+    "http://{host}/cgi-bin/mjpg/video.cgi",
+    "http://{host}/mjpeg",
+    "http://{host}/stream",
+)
 
 
 def log(msg: str) -> None:
@@ -86,16 +114,81 @@ def looks_mjpeg(url: str) -> bool:
     return path.endswith((".mjpg", ".mjpeg")) or path.endswith("/mjpeg")
 
 
-def probe_http(url: str, timeout: float = 3.0) -> bool:
+def host_literal(ip: str) -> str:
+    if ":" in ip and not ip.startswith("["):
+        return f"[{ip}]"
+    return ip
+
+
+def probe_http(url: str, timeout: float = 2.5) -> bool:
+    parsed = urlparse(url)
+    handlers: list = []
+    if parsed.username:
+        mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        mgr.add_password(None, url, unquote(parsed.username), unquote(parsed.password or ""))
+        handlers.append(urllib.request.HTTPDigestAuthHandler(mgr))
+        handlers.append(urllib.request.HTTPBasicAuthHandler(mgr))
+    opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             if getattr(resp, "status", 200) >= 400:
+                return False
+            ctype = (resp.headers.get("content-type") or "").lower()
+            if "text/html" in ctype or "application/json" in ctype:
                 return False
             resp.read(1)
             return True
     except (OSError, urllib.error.URLError, TimeoutError, ValueError):
         return False
+
+
+def probe_rtsp(url: str, timeout: float = 2.5) -> bool:
+    micros = str(int(timeout * 1_000_000))
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-rtsp_transport", "tcp",
+                "-timeout", micros,
+                "-select_streams", "v",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and "video" in proc.stdout
+
+
+def probe_url(url: str, timeout: float = 2.5) -> bool:
+    if url.lower().startswith(("rtsp://", "rtsps://")):
+        return probe_rtsp(url, timeout)
+    return probe_http(url, timeout)
+
+
+def urls_that_answer(urls: list[str], probe, budget: float = 8.0) -> set[str]:
+    ok: set[str] = set()
+    if not urls:
+        return ok
+    pool = ThreadPoolExecutor(max_workers=8)
+    futs = {pool.submit(probe, url): url for url in urls}
+    try:
+        for fut in as_completed(futs, timeout=budget):
+            try:
+                if fut.result():
+                    ok.add(futs[fut])
+            except Exception:
+                continue
+    except TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return ok
 
 
 def sense_spec(ip: str, video: str | None = None, audio: str | None = None) -> dict:
@@ -123,19 +216,40 @@ def stream_spec(url: str, host: str, kind: str) -> dict:
     }
 
 
-def classify_host(ip: str, probe) -> dict:
-    if probe(f"http://{ip}/audio"):
-        return sense_spec(ip)
-    if probe(f"http://{ip}:81/stream"):
-        return stream_spec(f"http://{ip}:81/stream", ip, "mjpeg")
+def classify_host(ip: str, probe=None, user: str | None = None, password: str | None = None) -> dict:
+    """Find a stream for any camera that is identified only by its address."""
+    probe = probe or probe_url
+    host = host_literal(ip)
+    sense_audio = f"http://{host}/audio"
+    sense_video = f"http://{host}:81/stream"
+    rtsp_urls = [
+        with_auth(f"rtsp://{host}:554{path}", user, password) for path in RTSP_PATHS
+    ]
+    http_urls = [sense_video]
+    for tmpl in HTTP_STREAMS:
+        url = tmpl.format(host=host)
+        if user:
+            url = with_auth(url, user, password)
+        if url not in http_urls:
+            http_urls.append(url)
+    found = urls_that_answer([sense_audio, sense_video, *rtsp_urls, *http_urls], probe)
+    if sense_audio in found and sense_video in found:
+        return sense_spec(host)
+    for url in rtsp_urls:
+        if url in found:
+            return stream_spec(url, ip, "rtsp")
+    for url in http_urls:
+        if url in found:
+            return stream_spec(url, ip, "mjpeg" if looks_mjpeg(url) else "http")
+    hint = f"rtsp://{ip}:554/profile2/media.smp"
+    extra = " Check the username and password." if user or password else ""
     raise ValueError(
-        f"{ip} did not answer as an ESP camera. "
-        f"Post its stream URL, for example rtsp://{ip}:554/stream1"
+        f"no video stream found at {ip}. Post the camera URL, for example {hint}.{extra}"
     )
 
 
 def classify(raw: str, probe=None) -> dict:
-    probe = probe or probe_http
+    probe = probe or probe_url
     text = raw.strip()
     if not text:
         raise ValueError("empty camera address")
@@ -151,7 +265,7 @@ def classify(raw: str, probe=None) -> dict:
         return stream_spec(text, host, "rtsp")
     if scheme in ("http", "https"):
         if path in ("", "/"):
-            return classify_host(host, probe)
+            return classify_host(host, probe, parsed.username, parsed.password)
         if path.rstrip("/") == "/audio":
             return sense_spec(host)
         if looks_mjpeg(text):
@@ -201,7 +315,7 @@ def parse_item(item, probe=None) -> dict:
         return stream_spec(with_auth(url, user, password), host_of(url), "rtsp")
     if "://" in raw:
         return classify(with_auth(raw, user, password), probe)
-    return classify_host(host_of(raw), probe or probe_http)
+    return classify_host(host_of(raw), probe or probe_url, user, password)
 
 
 def path_name(index: int) -> str:
@@ -488,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
                 400,
                 {
                     "ok": False,
-                    "error": 'send {"ips": ["10.128.93.15", "rtsp://camera/stream1"]}',
+                    "error": 'send {"ips": ["10.128.93.15", "192.168.1.50"]} or a stream URL',
                 },
             )
             return

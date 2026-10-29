@@ -40,26 +40,25 @@ cd mediamtx/docker
 docker compose up -d --build
 ```
 
-An entry is an ESP address or another camera's stream URL. A bare address is checked on the Mini: `http://<ip>/audio` publishes picture and mic, and `:81/stream` publishes video. An RTSP or HTTP URL is pulled as given and republished as H.264. Audio is included when that camera sends it.
+Each entry is a camera IP or a stream URL. For an IP, the Mini looks for a working picture: common RTSP paths (port 554), common HTTP picture paths, and an ESP Sense board (`:81/stream` plus `/audio`). A posted `rtsp://` or `http://` URL is used as given. The stream is republished as H.264, with audio when the camera sends it.
 
 ```bash
-# two Sense boards
+# any cameras, by IP
 curl -s -X POST http://127.0.0.1:8090/cameras \
   -H 'content-type: application/json' \
-  -d '{"ips":["10.128.93.15","10.128.93.24"]}'
-
-# ESP boards plus any other camera
-curl -s -X POST http://127.0.0.1:8090/cameras \
-  -H 'content-type: application/json' \
-  -d '{"ips":["10.128.93.15","10.128.93.24","rtsp://10.1.2.3:554/stream1"]}'
+  -d '{"ips":["10.128.93.15","10.128.93.24","192.168.1.50"]}'
 ```
 
-A camera that needs a login:
+A camera that needs a login, or a custom path the search does not know:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8090/cameras \
   -H 'content-type: application/json' \
-  -d '{"cameras":[{"url":"rtsp://10.1.2.3:554/stream1","user":"admin","password":"secret"}]}'
+  -d '{"cameras":[
+    "10.128.93.15",
+    {"ip":"192.168.1.50","user":"admin","password":"secret"},
+    "rtsp://192.168.1.50:554/profile2/media.smp"
+  ]}'
 ```
 
 See what is live:
