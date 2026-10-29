@@ -5,8 +5,8 @@
 #
 #   ./scripts/mediamtx_run.sh
 #   ./scripts/mediamtx_run.sh http://10.128.93.25:81/stream http://10.128.93.34:81/stream
-#   SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40 ./scripts/mediamtx_run.sh
-#   SENSE_AV_URL=http://10.128.93.40 ./scripts/mediamtx_run.sh   # single (alias)
+#   SENSE_AV_URLS=http://10.128.93.15,http://10.128.93.24 ./scripts/mediamtx_run.sh
+#   SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh   # single (alias)
 #
 set -euo pipefail
 
@@ -40,7 +40,7 @@ if [[ -n "${SENSE_AV_URL:-}" ]]; then
 fi
 
 # Collect MJPEG URLs: CLI args > XIAO_MJPEG_URLS > defaults (lab two boards).
-# If any Sense A/V is set and no CLI/URLS env, skip video-only defaults.
+# If Sense A/V is set and no CLI/URLS env, skip video-only defaults.
 URLS=()
 if [[ $# -gt 0 ]]; then
   URLS=("$@")
@@ -160,7 +160,7 @@ emit_av_path() {
 EOF
 }
 
-# Base config without empty paths:{} — replace with generated paths.
+# Base config without empty paths:{} — replace with generated ESP paths.
 {
   grep -v '^paths:' "$CONF_SRC" | grep -v '^$'
   echo
@@ -179,14 +179,6 @@ EOF
     emit_av_path "$name" "$b"
     i=$((i + 1))
   done
-  # Pull DeepStream annotated RTSP (GPU sink2 :8664) into MediaMTX for viewers.
-  # DS is an RTSP server — do not change its port to 8554; MediaMTX pulls it.
-  cat <<'EOF'
-  deepstream:
-    source: rtsp://10.128.81.10:8664/ds-test
-    sourceOnDemand: yes
-    rtspTransport: tcp
-EOF
 } >"$CONF_RT"
 
 echo "N=${#URLS[@]} video-only camera(s)" >&2
@@ -215,11 +207,6 @@ for b in "${SENSE_BASES[@]+"${SENSE_BASES[@]}"}"; do
   i=$((i + 1))
 done
 
-echo "DeepStream MediaMTX relay (pull from GPU :8664):" >&2
-echo "  rtsp://127.0.0.1:8554/deepstream" >&2
-echo "  rtsp://${HOST_LAN}:8554/deepstream" >&2
-echo "  MacBook via GPU jump: ssh -N -L 18554:10.128.93.13:8554 ojl1977@10.128.81.10" >&2
-echo "  then ffplay -rtsp_transport tcp rtsp://127.0.0.1:18554/deepstream" >&2
-
+echo "GPU reads the rtsp://${HOST_LAN}:8554/<path> URLs above, RTSP over TCP." >&2
 
 exec mediamtx "$CONF_RT"

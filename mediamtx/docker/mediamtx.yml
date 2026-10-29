@@ -1,0 +1,44 @@
+###############################################
+# ESP cameras only. ffmpeg in the cameras service
+# publishes each board; this server just serves it.
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+
+readTimeout: 30s
+writeTimeout: 30s
+writeQueueSize: 8192
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 10M
+
+webrtc: no
+rtmp: no
+srt: no
+
+# The publisher runs in another container, so anonymous publish/read
+# must be allowed from the Docker network, not only from localhost.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+
+paths:
+  # cam_sense, cam_sense2, … each path is H.264 + AAC.
+  "~^cam_sense[0-9]*$":
+    source: publisher
+    overridePublisher: true

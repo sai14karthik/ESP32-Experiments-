@@ -1,0 +1,37 @@
+# Forever-on MediaMTX for ESP cameras.
+# From this directory on the Mini:
+#   docker compose up -d --build
+# Then post the board addresses:
+#   curl -s -X POST http://127.0.0.1:8090/cameras \
+#     -H 'content-type: application/json' \
+#     -d '{"ips":["10.128.93.15","10.128.93.24"]}'
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.0
+    restart: unless-stopped
+    ports:
+      - "8554:8554"
+      - "8888:8888"
+    command: ["/mediamtx.yml"]
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+  cameras:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      MTX_HOST: mediamtx
+      RTSP_PORT: "8554"
+      MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
+      API_PORT: "8090"
+      DATA_PATH: /data/cameras.json
+    volumes:
+      - camdata:/data
+    depends_on:
+      - mediamtx
+
+volumes:
+  camdata:

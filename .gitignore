@@ -78,6 +78,7 @@ presence_detection/models/*.joblib
 # MediaMTX generated at runtime (do not commit)
 mediamtx/mediamtx.runtime.yml
 mediamtx/run_xiao_publish.sh
+mediamtx/hanwha.url
 
 # Local RTSP recordings (record_rtsp.py)
 /recordings/
@@ -90,7 +91,6 @@ mediamtx/run_xiao_publish.sh
 /whisper/
 /whisper-diarization/
 /WhisperLiveKitDiarization/
-/luma-esp32-ai-assistant/
 
 # Whisper model cache / weights (never commit)
 **/.cache/whisper/

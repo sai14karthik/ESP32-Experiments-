@@ -1,25 +1,19 @@
-# MediaMTX (N× XIAO → Mini → RTSP)
+# MediaMTX (N× ESP camera → Mini → RTSP)
+
+ESP32-S3 boards publish MJPEG and PCM. The Mini remuxes each board to **H.264 + AAC** and MediaMTX serves it. Players and GPUs open the RTSP URL over **TCP**.
 
 ```
-N× CameraWebServerWiFi  http://<ip>:81/stream
+N× CameraWebServerWiFiSense
+  http://<ip>:81/stream   (MJPEG)
+  http://<ip>/audio       (s16le 16 kHz)
         │
-        ▼  ffmpeg on Mini (H.264)
-MediaMTX :8554/cam_xiao, cam_xiao2, … cam_xiaoN
+        ▼  ffmpeg on the Mini
+MediaMTX :8554/cam_sense, cam_sense2, …
         │
         ▼
-rtsp://10.128.93.13:8554/cam_xiao
-rtsp://10.128.93.13:8554/cam_xiao2
-…
-
-N× Sense A/V (CameraWebServerWiFiSense):
-  :81/stream (MJPEG) + :80/audio (s16le 16 kHz)
-        │
-        ▼  ffmpeg_sense_av on Mini
-        ├─► H.264 + AAC → MediaMTX :8554/cam_sense… → VLC
-        └─► raw PCM UDP :19055 → sense_whisper_live (captions; no RTSP lag)
+rtsp://10.128.93.13:8554/cam_sense
+rtsp://10.128.93.13:8554/cam_sense2
 ```
-
-ESP32-S3 has no HW H.264. Mini remuxes MJPEG (± PCM). Prefer **TCP** on LabPSK.
 
 ![Architecture](esp32-mediamtx-architecture.png)
 
@@ -27,114 +21,95 @@ ESP32-S3 has no HW H.264. Mini remuxes MJPEG (± PCM). Prefer **TCP** on LabPSK.
 
 | Role | Address |
 |------|---------|
-| Mini (Ethernet / LabPSK) | `10.128.93.13` |
-| XIAO (examples) | `10.128.93.25`, `10.128.93.34`, … |
+| Mini (Ethernet) | `10.128.93.13` |
+| Sense camera 1 | `10.128.93.15` → `cam_sense` |
+| Sense camera 2 | `10.128.93.24` → `cam_sense2` |
 
-## Prerequisites (Mini)
-
-```bash
-brew install mediamtx ffmpeg
-```
-
-Firmware:
-
-- Video-only: **CameraWebServerWiFi** (`./scripts/flash_camera_webserver.sh /dev/cu.usbmodem…`)
-- A/V Sense: **CameraWebServerWiFiSense** (`./scripts/flash_camera_sense.sh /dev/cu.usbmodem…`)
-
-## Run (Mini) — N cameras (video-only)
+Flash each board with **CameraWebServerWiFiSense** so both the picture and the mic are on:
 
 ```bash
-# defaults (2 lab boards):
-./scripts/mediamtx_run.sh
-
-# any N — pass MJPEG URLs:
-./scripts/mediamtx_run.sh \
-  http://10.128.93.25:81/stream \
-  http://10.128.93.34:81/stream \
-  http://10.128.93.40:81/stream
-
-# or comma list:
-XIAO_MJPEG_URLS=http://10.128.93.25:81/stream,http://10.128.93.34:81/stream \
-  ./scripts/mediamtx_run.sh
+./scripts/flash_camera_sense.sh /dev/cu.usbmodem…
 ```
 
-Paths are named `cam_xiao`, `cam_xiao2`, `cam_xiao3`, …
+## Always-on server (Docker)
 
-## Run (Mini) — N× Sense audio + video
-
-Flash each board with **CameraWebServerWiFiSense**. Then:
+`mediamtx/docker/` runs MediaMTX and the camera publisher until you stop them. Both containers restart after a Mini reboot. Post any number of board addresses; the list is saved and published again on startup.
 
 ```bash
-# N Sense A/V only:
-SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40,http://10.128.93.41 \
-  ./scripts/mediamtx_run.sh
-
-# single Sense (alias):
-SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh
-
-# Sense A/V + video-only cams together:
-SENSE_AV_URLS=http://10.128.93.25,http://10.128.93.40 \
-  ./scripts/mediamtx_run.sh \
-  http://10.128.93.34:81/stream
+cd mediamtx/docker
+docker compose up -d --build
 ```
 
-Paths: `cam_sense`, `cam_sense2`, `cam_sense3`, …  
-VLC: `rtsp://10.128.93.13:8554/cam_sense` (TCP; enable **Audio track**).
-
-### Live captions (Whisper)
-
-While Sense A/V is up, `ffmpeg_sense_av` also tees speech-processed PCM to **`udp://127.0.0.1:19055`**. Whisper uses that tee — **not** MediaMTX RTSP — so captions skip AAC remux delay. VLC is unchanged. Collar/wearable: board soft AGC + ffmpeg speech band/compressor (see Sense README).
+Replace the whole set (first IP is `cam_sense`, then `cam_sense2`, …):
 
 ```bash
-uv sync --group whisper   # once
-# restart mediamtx_run after pulling so the tee exists
-./scripts/sense_whisper_live.sh                  # UDP :19055, mlx Metal turbo
-./scripts/sense_whisper_live.sh --model large-v3 # max accuracy
-./scripts/sense_whisper_live.sh --vad-db -52      # quieter speech
+curl -s -X POST http://127.0.0.1:8090/cameras \
+  -H 'content-type: application/json' \
+  -d '{"ips":["10.128.93.15","10.128.93.24"]}'
 ```
 
-Full pipeline, models, VAD, latency: [`firmware/CameraWebServerWiFiSense/README.md`](../firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini).
+Each path carries **video and audio**. The publisher reads `http://<ip>:81/stream` and `http://<ip>/audio`.
 
-Stop: **Ctrl+C**. Busy port: `pkill -f mediamtx`.
+See what is live:
+
+```bash
+curl -s http://127.0.0.1:8090/cameras
+```
+
+GPU (or VLC) over TCP:
+
+| Camera | RTSP | HLS |
+|--------|------|-----|
+| `10.128.93.15` | `rtsp://10.128.93.13:8554/cam_sense` | `http://10.128.93.13:8888/cam_sense/` |
+| `10.128.93.24` | `rtsp://10.128.93.13:8554/cam_sense2` | `http://10.128.93.13:8888/cam_sense2/` |
+| camera N | `rtsp://10.128.93.13:8554/cam_senseN` | `http://10.128.93.13:8888/cam_senseN/` |
+
+```bash
+ffplay -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense
+ffplay -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense2
+```
+
+Stop the server: `docker compose down` from `mediamtx/docker`.
+
+## One-shot script
+
+Same ESP paths, in the foreground, without Docker. Needs `brew install mediamtx ffmpeg` on the Mini.
+
+```bash
+# both live Sense boards (audio + video)
+SENSE_AV_URLS=http://10.128.93.15,http://10.128.93.24 ./scripts/mediamtx_run.sh
+
+# one board
+SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh
+
+# video-only firmware (CameraWebServerWiFi, no /audio) → cam_xiao, cam_xiao2, …
+./scripts/mediamtx_run.sh http://10.128.93.25:81/stream
+```
+
+Sense paths are `cam_sense`, `cam_sense2`, …. Video-only paths are `cam_xiao`, `cam_xiao2`, …. Stop with Ctrl+C. If port 8554 is busy: `pkill -f mediamtx`.
+
+The shell publisher also tees speech PCM to `udp://127.0.0.1:19055` for Whisper. The Docker publisher does not; it only serves H.264 + AAC on RTSP. Whisper setup: [`firmware/CameraWebServerWiFiSense/README.md`](../firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini).
 
 ## Watch
 
-| Cam | RTSP (LabPSK) | HLS |
-|-----|---------------|-----|
-| video 1 | `rtsp://10.128.93.13:8554/cam_xiao` | `http://10.128.93.13:8888/cam_xiao/` |
-| video N | `rtsp://10.128.93.13:8554/cam_xiaoN` | `http://10.128.93.13:8888/cam_xiaoN/` |
-| Sense A/V 1 | `rtsp://10.128.93.13:8554/cam_sense` | `http://10.128.93.13:8888/cam_sense/` |
-| Sense A/V N | `rtsp://10.128.93.13:8554/cam_senseN` | `http://10.128.93.13:8888/cam_senseN/` |
+VLC: Open Network → the RTSP URL → **RTP over RTSP (TCP)**, and turn the audio track on.
 
-WebRTC (browser): `http://10.128.93.13:8889/cam_xiao/` or `…/cam_sense/`  
-(Also opens UDP **:8189** for ICE.)
+## Record
 
-WebRTC (browser): `http://10.128.93.13:8889/cam_xiao/` or `…/cam_sense/`  
-(Also opens UDP **:8189** for ICE — allow that on the client network if WebRTC fails.)
-
-VLC: Open Network → URL → **TCP**; caching ~50–100 ms.
-
-## Record (video + audio)
-
-While MediaMTX is publishing, save a clip with both tracks (Sense A/V) or video-only (`cam_xiao`):
+While a path is publishing:
 
 ```bash
-# Sense (H.264 + AAC) — until Ctrl-C → recordings/rtsp-….mp4
-./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_sense
-
-# timed + named file
 ./scripts/record_rtsp.py rtsp://10.128.93.13:8554/cam_sense \
   -o recordings/sense-demo.mp4 -t 120
-
-# video-only path
-./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_xiao --no-audio
 ```
 
-Default is **stream-copy** (no re-encode). Use `--reencode` if the player needs H.264/yuv420p. Ctrl-C finishes a playable MP4. See `scripts/record_rtsp.py -h`.
+Default is stream-copy (H.264 + AAC). Ctrl-C finishes a playable MP4.
 
-## Config notes
+## Files
 
-- Base: `mediamtx/mediamtx.yml`; runtime paths: `mediamtx.runtime.yml` (gitignored).
-- Encode defaults: Sense A/V CFR ~8 fps, CRF 18, AAC 96 kb/s; **A/V sync** via CFR video PTS + ~300 ms audio delay + soft `aresample=async` + 2 s mux preload (delay OK, smooth play). Override delay with `SENSE_AV_AUDIO_DELAY_MS` (raise if lips behind speech, lower if audio lags).
-- Sense publish (`ffmpeg_sense_av.sh`): also tees raw s16le to `udp://127.0.0.1:19055` for Whisper (`SENSE_PCM_UDP_PORT` to override).
-- Board defaults (video-only): HVGA 480×320, JPEG q8, 12 fps.
+| File | Role |
+|------|------|
+| `mediamtx/docker/` | Always-on MediaMTX + `POST /cameras` |
+| `mediamtx/mediamtx.yml` | Base config for `./scripts/mediamtx_run.sh` |
+| `mediamtx/mediamtx.runtime.yml` | Generated by the script (not committed) |
+| `scripts/ffmpeg_sense_av.sh` | Shell remux used by `mediamtx_run.sh` |
