@@ -26,7 +26,10 @@ rtsp://10.128.93.13:8554/cam_sense
 | Sense camera 1 | `10.128.93.15` → `cam_sense` (H.264 480×320 + AAC) |
 | Sense camera 2 | `10.128.93.24` → `cam_sense2` (H.264 480×320 + AAC) |
 | IP camera | `10.128.93.60` → `cam_sense3` (H.264 1920×1080, video only) |
-| GPU node | `10.128.81.10` (`lnmcltappgke01`; nodes `.10`–`.13`) |
+| GPU `lnmcltappgke01` | `10.128.81.10` |
+| GPU `lnmcltappgke02` | `10.128.81.11` |
+| GPU `lnmcltappgke03` | `10.128.81.12` |
+| GPU `lnmcltappgke04` | `10.128.81.13` |
 
 Flash each board with **CameraWebServerWiFiSense** so both the picture and the mic are on:
 
@@ -92,7 +95,11 @@ curl -s -X POST http://127.0.0.1:8090/cameras \
 | `9997` | Mini | MediaMTX API. Live or dead for the paths that are publishing. `GET /v3/paths/list` is every path. `GET /v3/paths/get/<name>` is one path. |
 | `8090` | Mini localhost | Publisher. `POST /cameras` replaces the camera list. `GET /cameras` shows what was posted. |
 
-On the Mini, one camera is live when `"online": true`. Not found means that path is down:
+MediaMTX listens on the Mini, `10.128.93.13`. A curl to `10.128.81.10`–`.13` port `9997` fails immediately: those addresses are GPUs, and nothing is listening there. From a GPU, port `9997` on the Mini times out. Port `8554` on the Mini is open. To use the path list from a GPU, allow TCP from `10.128.81.10`–`10.128.81.13` to `10.128.93.13` port `9997`.
+
+`GET /v3/paths/list` is every live path (name, online, codecs). `GET /v3/paths/get/<name>` is one path. That is the same MediaMTX call as mycareapp (`http://127.0.0.1:9997/v3/paths/list` on the machine where MediaMTX runs). Adding cameras is port `8090`, Mini only.
+
+On the Mini, one camera is live when the call returns `200` and `"online": true`. `404` means that path is not publishing:
 
 ```bash
 curl -s http://127.0.0.1:9997/v3/paths/get/cam_sense
@@ -100,7 +107,7 @@ curl -s http://127.0.0.1:9997/v3/paths/list
 curl -s http://127.0.0.1:8090/cameras
 ```
 
-From a GPU, port `9997` times out. Check the stream on `8554`. A live camera prints video. A dead one returns 404:
+From a GPU, check the stream on `8554`. A live camera prints video. A dead one returns 404:
 
 ```bash
 ffprobe -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense
@@ -111,8 +118,6 @@ From a laptop that can SSH to the Mini:
 ```bash
 ssh dtilakenonalab@10.128.93.13 'curl -s http://127.0.0.1:9997/v3/paths/get/cam_sense'
 ```
-
-A GPU on `10.128.81.10`–`10.128.81.13` can open TCP `8554`. TCP `9997` to the Mini times out from those hosts. To use the path list there, allow TCP from `10.128.81.10`–`10.128.81.13` to `10.128.93.13` port `9997` (same path that already allows `8554`).
 
 | Camera | RTSP |
 |--------|------|
@@ -134,7 +139,9 @@ ssh -N -L 18554:10.128.93.13:8554 ojl1977@10.128.81.10
 ffplay -rtsp_transport tcp rtsp://127.0.0.1:18554/cam_sense
 ```
 
-Same host and local port for `cam_sense2`, `cam_sense3`, and `cam_sense4`. VLC: open that URL and set RTP over RTSP (TCP).
+Same host and local port for `cam_sense2`, `cam_sense3`, and `cam_sense4`. Leave the `ssh -N` terminal open while you play. `18554` exists only on the laptop. On the Mini, play `rtsp://127.0.0.1:8554/<path>`. VLC: open that URL and set RTP over RTSP (TCP).
+
+mycareapp’s file publisher uses `rtsp://127.0.0.1:8554/test/video1`. These lab cameras are the live sources instead. DeepStream on a GPU registers `rtsp://10.128.93.13:8554/cam_sense` (and `cam_sense2`, `cam_sense3`) as `camera_url`.
 
 ## If one path is down
 
@@ -152,7 +159,21 @@ nc -vz -w 3 CAMERA_IP PORT
 
 If `nc` fails, the camera is off the network. Plug it back in and wait. The same path comes back with no new POST.
 
-If `nc` succeeds and the path is still `404`, that camera’s `ffmpeg` is stuck. Stop only that process. The publisher starts a new one. The other cameras stay up:
+If nothing is listening on `8090`, the publisher is stopped. The log is `~/Library/Application Support/mediamtx-cameras/data/publisher.log`. Start it again and do not POST:
+
+```bash
+lsof -nP -iTCP:8090 -sTCP:LISTEN
+open -g -a "$HOME/Applications/MediaMTX Cameras.app"
+```
+
+If that app is already stuck, start the script in the SSH session and leave it running:
+
+```bash
+cd "$HOME/Library/Application Support/mediamtx-cameras"
+./run_publisher.sh
+```
+
+If `nc` succeeds, port `8090` is open, and the path is still `404`, that camera’s `ffmpeg` is stuck. Stop only that process. The publisher starts a new one. The other cameras stay up:
 
 ```bash
 pgrep -lf PATH
