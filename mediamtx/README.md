@@ -135,7 +135,7 @@ ffplay -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense
 Laptop, tunnel through the GPU, then play the local port:
 
 ```bash
-ssh -N -L 18554:10.128.93.13:8554 ojl1977@10.128.81.10
+ssh -N -L 18554:10.128.93.13:8554 USER@10.128.81.10
 ffplay -rtsp_transport tcp rtsp://127.0.0.1:18554/cam_sense
 ```
 

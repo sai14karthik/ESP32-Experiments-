@@ -46,7 +46,7 @@ SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh
 On the laptop, start the SSH local forward and leave it running. One session carries both the Mini video and Nemotron, which lives on the cluster:
 
 ```bash
-ssh -N -L 18554:10.128.93.13:8554 -L 18000:10.43.41.152:8000 ojl1977@10.128.81.10
+ssh -N -L 18554:10.128.93.13:8554 -L 18000:10.43.41.152:8000 USER@10.128.81.10
 ```
 
 Then run `./run_live.sh rtsp://127.0.0.1:18554/cam_sense`. Video comes from `127.0.0.1:18554`. Nemotron is asked at `http://127.0.0.1:18000/v1` (`NEMOTRON_ENDPOINT`). `--audio` uses the same video tunnel for `ffplay`.

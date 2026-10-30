@@ -12,7 +12,7 @@
 # Lab laptop path (Nemotron is on by default through the same SSH session):
 #   Mini:  SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh
 #   Laptop tunnel, leave it open:
-#     ssh -N -L 18554:10.128.93.13:8554 -L 18000:10.43.41.152:8000 ojl1977@10.128.81.10
+#     ssh -N -L 18554:10.128.93.13:8554 -L 18000:10.43.41.152:8000 USER@10.128.81.10
 #   Laptop: ./run_live.sh rtsp://127.0.0.1:18554/cam_sense
 #   --no-nemotron turns the vision read off. Press n to ask, q to quit.
 #

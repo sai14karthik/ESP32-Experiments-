@@ -588,7 +588,7 @@ def main() -> None:
                 "nemotron: tunnel is not open, so fall reads will fail until it is. "
                 "Pose labels still run. Leave this SSH session up:\n"
                 "  ssh -N -L 18554:10.128.93.13:8554 "
-                "-L 18000:10.43.41.152:8000 ojl1977@10.128.81.10",
+                "-L 18000:10.43.41.152:8000 USER@10.128.81.10",
                 flush=True,
             )
 
