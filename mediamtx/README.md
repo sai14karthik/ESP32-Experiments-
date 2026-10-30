@@ -16,7 +16,7 @@ rtsp://10.128.93.13:8554/cam_sense
 
 `mediamtx/docker/mediamtx.yml` follows `mycareapp-main/mediamtx.yml`: API on, `apiAddress: :9997`, RTSP TCP `:8554`, paths `all_others`. mycareapp calls the list on `http://127.0.0.1:9997/v3/paths/list` because MediaMTX runs on that machine. Here the same call is `http://10.128.93.13:9997/v3/paths/list`.
 
-![Architecture](esp32-mediamtx-architecture.png)
+
 
 ## Lab IPs
 
@@ -57,7 +57,7 @@ Path names follow the order of that POST:
 
 `POST /cameras` replaces the saved list. Adding a 4th camera means sending all 4, new one last. Sending only the new IP drops the others. The same order next time keeps the same paths. The list is saved, so a restart publishes it again with no new POST.
 
-An unplugged camera keeps its path. The publisher retries it. The other cameras stay up. Plug it back in and the same RTSP URL returns. No new POST.
+An unplugged camera keeps its path. The other cameras stay up. Plug it back in and the same RTSP URL returns. No new POST. If the path stays down after the camera is reachable again, follow [If one path is down](#if-one-path-is-down).
 
 ```bash
 # ESP Sense is http://IP/audio (picture + mic). A login camera is its rtsp:// URL.
@@ -136,6 +136,31 @@ ffplay -rtsp_transport tcp rtsp://127.0.0.1:18554/cam_sense
 
 Same host and local port for `cam_sense2`, `cam_sense3`, and `cam_sense4`. VLC: open that URL and set RTP over RTSP (TCP).
 
+## If one path is down
+
+Do not POST the camera list again. Do not stop MediaMTX. Check that one path on the Mini (`200` is live, `404` is not publishing):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9997/v3/paths/get/PATH
+```
+
+`PATH` is `cam_sense`, `cam_sense2`, and so on. If it is `404`, check the camera from the Mini. An ESP Sense board is port `81`. An RTSP camera is port `554`:
+
+```bash
+nc -vz -w 3 CAMERA_IP PORT
+```
+
+If `nc` fails, the camera is off the network. Plug it back in and wait. The same path comes back with no new POST.
+
+If `nc` succeeds and the path is still `404`, that camera’s `ffmpeg` is stuck. Stop only that process. The publisher starts a new one. The other cameras stay up:
+
+```bash
+pgrep -lf PATH
+kill PID
+```
+
+Wait a few seconds and curl the path again. `200` means it is publishing. On the Mini, play `rtsp://127.0.0.1:8554/PATH`. On a laptop, play `rtsp://127.0.0.1:18554/PATH` only while the SSH tunnel is open. A GPU plays `rtsp://10.128.93.13:8554/PATH`.
+
 Stop the server: `docker compose down` from `mediamtx/docker`. Do not stop it just to add or replug a camera.
 
 ## One-shot script
@@ -167,7 +192,9 @@ VLC: Open Network → that RTSP URL → **RTP over RTSP (TCP)**, and turn the au
 
 ## Record
 
-While a path is publishing, `mediamtx/record.sh` saves video and audio (stream-copy H.264 + AAC). Ctrl-C finishes a playable MP4.
+While a path is publishing, save it with stream-copy (H.264, plus AAC when the camera has audio). Any machine that can open port `8554` can record. That includes the Mini and a GPU node. Ctrl-C finishes a playable MP4.
+
+On the Mini, from this repo:
 
 ```bash
 # cam_sense, 120 seconds, recordings/cam_sense-<time>.mp4
@@ -179,6 +206,15 @@ While a path is publishing, `mediamtx/record.sh` saves video and audio (stream-c
 # second camera
 ./mediamtx/record.sh cam_sense2 -t 60
 ```
+
+On a GPU, `ffmpeg` is enough. The file is written on that GPU:
+
+```bash
+ffmpeg -rtsp_transport tcp -i rtsp://10.128.93.13:8554/cam_sense \
+  -t 120 -map 0:v:0 -map 0:a:0? -c copy cam_sense.mp4
+```
+
+Use `cam_sense2` or `cam_sense3` the same way. `cam_sense3` has no audio; the optional audio map still writes a video file.
 
 ## Files
 
