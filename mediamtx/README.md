@@ -116,7 +116,7 @@ ffprobe -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense
 From a laptop that can SSH to the Mini:
 
 ```bash
-ssh dtilakenonalab@10.128.93.13 'curl -s http://127.0.0.1:9997/v3/paths/get/cam_sense'
+ssh USER@10.128.93.13 'curl -s http://127.0.0.1:9997/v3/paths/get/cam_sense'
 ```
 
 | Camera | RTSP |

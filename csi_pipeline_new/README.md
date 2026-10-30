@@ -187,11 +187,11 @@ pkill -f 'ingest_serial.py --listen-tcp'
 From another LabPSK laptop:
 
 ```bash
-ssh dtilakenonalab@10.128.93.13
+ssh USER@10.128.93.13
 # then same start/stop commands on the Mini
 
 # or one-shot stop:
-ssh dtilakenonalab@10.128.93.13 "pkill -f 'ingest_serial.py --listen-tcp'"
+ssh USER@10.128.93.13 "pkill -f 'ingest_serial.py --listen-tcp'"
 ```
 
 Mini must stay **powered on and awake**. Enable **Remote Login** on the Mini for SSH.
