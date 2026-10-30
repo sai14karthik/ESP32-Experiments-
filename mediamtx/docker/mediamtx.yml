@@ -1,6 +1,5 @@
-# Same server settings as mycareapp-main/mediamtx.yml.
-# auth stays open so a GPU and the Mini publisher can use the
-# published ports, not only 127.0.0.1 inside the container.
+# RTSP reads are public to clients that can reach port 8554. Publishing and
+# control API access require credentials supplied by the installer.
 api: yes
 apiAddress: :9997
 rtsp: yes
@@ -12,12 +11,18 @@ authMethod: internal
 authInternalUsers:
   - user: any
     permissions:
-      - action: publish
       - action: read
       - action: playback
+  - user: publisher
+    pass:
+    permissions:
+      - action: publish
+  - user: admin
+    pass:
+    permissions:
       - action: api
 
 paths:
   all_others:
     source: publisher
-    overridePublisher: true
+    overridePublisher: false

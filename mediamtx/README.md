@@ -1,6 +1,6 @@
 # MediaMTX (cameras → Mini → GPU)
 
-The Mini pulls each camera, remuxes it, and MediaMTX serves it. A GPU pulls the RTSP URL over **TCP**. MediaMTX does not push.
+The Mini reads each camera and sends its video to MediaMTX. A GPU then reads the video from MediaMTX over RTSP/TCP. MediaMTX does not send video to the GPU by itself. RTSP viewing is read-only without a login; restrict port `8554` to trusted GPU and operator machines with the lab firewall.
 
 ```
 camera (ESP Sense, or any IP camera)
@@ -14,9 +14,7 @@ MediaMTX on 10.128.93.13
 rtsp://10.128.93.13:8554/cam_sense
 ```
 
-`mediamtx/docker/mediamtx.yml` follows `mycareapp-main/mediamtx.yml`: API on, `apiAddress: :9997`, RTSP TCP `:8554`, paths `all_others`. mycareapp calls the list on `http://127.0.0.1:9997/v3/paths/list` because MediaMTX runs on that machine. Here the same call is `http://10.128.93.13:9997/v3/paths/list`.
-
-
+The existing [root MediaMTX config](../mediamtx.yml) is used by the main Compose setup for local test videos. The config in `mediamtx/docker/` is for the separate lab Mini camera server. They look similar, but serve different deployments and have different access settings, so both are kept.
 
 ## Lab IPs
 
@@ -31,23 +29,27 @@ rtsp://10.128.93.13:8554/cam_sense
 | GPU `lnmcltappgke03` | `10.128.81.12` |
 | GPU `lnmcltappgke04` | `10.128.81.13` |
 
-Flash each board with **CameraWebServerWiFiSense** so both the picture and the mic are on:
-
-```bash
-./scripts/flash_camera_sense.sh /dev/cu.usbmodem…
-```
-
 ## Always-on server (Docker)
 
 MediaMTX runs in Docker (`bluenviron/mediamtx:1.21.0`) and stays up after a reboot. The publisher is a Mac login service: Docker Desktop on this Mini cannot open `10.128.93.x`, so the publisher runs on the Mini itself, restarts if it exits, and starts again at login. No terminal. The camera list is saved and published again when the service starts. `POST /cameras` replaces the whole list. Order picks the path: the first entry is `cam_sense`, then `cam_sense2`, and so on.
 
+From the repository root, install and start the publisher service:
+
 ```bash
-cd mediamtx/docker
-docker compose up -d
-./install_service.sh
+./mediamtx/docker/install_service.sh
 ```
 
+The installer starts the MediaMTX Docker container, creates private publisher and API passwords, copies the publisher files into macOS Application Support, and sets the publisher to start at login. The credentials are saved in `~/Library/Application Support/mediamtx-cameras/credentials.env` with owner-only permissions; do not share or commit that file. To start only MediaMTX manually, first run `./mediamtx/docker/install_service.sh`, then run `docker compose --env-file "$HOME/Library/Application Support/mediamtx-cameras/credentials.env" -f mediamtx/docker/docker-compose.yml up -d mediamtx` from the repository root.
+
 Each entry is a camera IP or a stream URL. For an IP, the Mini looks for a working picture: common RTSP paths (port 554), common HTTP picture paths, and an ESP Sense board (`:81/stream` plus `/audio`). A posted `rtsp://` or `http://` URL is used as given. `http://IP/audio` is an ESP Sense board: picture and mic. The stream is republished as H.264, with audio when the camera sends it.
+
+The publisher API needs the generated username and password. Load them in the Mini terminal before making API calls:
+
+```bash
+set -a
+source "$HOME/Library/Application Support/mediamtx-cameras/credentials.env"
+set +a
+```
 
 Path names follow the order of that POST:
 
@@ -58,14 +60,15 @@ Path names follow the order of that POST:
 | 3rd | `cam_sense3` |
 | 4th | `cam_sense4` |
 
-`POST /cameras` replaces the saved list. Adding a 4th camera means sending all 4, new one last. Sending only the new IP drops the others. The same order next time keeps the same paths. The list is saved, so a restart publishes it again with no new POST.
+`POST /cameras` replaces the saved list only when every entry is valid. If discovery fails for any bare IP, the request is rejected and the active list stays unchanged. Explicit stream URLs are used as supplied; if a camera is temporarily unreachable, its publisher retries until it returns. Adding a 4th camera means sending all 4, new one last. Sending only the new IP replaces the old list with that one camera. The same order next time keeps the same paths. The list is saved, so a restart publishes it again with no new POST. An empty list deliberately stops all publishers.
 
 An unplugged camera keeps its path. The other cameras stay up. Plug it back in and the same RTSP URL returns. No new POST. If the path stays down after the camera is reachable again, follow [If one path is down](#if-one-path-is-down).
 
 ```bash
 # ESP Sense is http://IP/audio (picture + mic). A login camera is its rtsp:// URL.
 # This replaces the whole set. Include every camera you want to keep.
-curl -s -X POST http://127.0.0.1:8090/cameras \
+curl -s -u "$MTX_API_USER:$MTX_API_PASSWORD" \
+  -X POST http://127.0.0.1:8090/cameras \
   -H 'content-type: application/json' \
   -d '{"cameras":[
     "http://10.128.93.15/audio",
@@ -78,7 +81,8 @@ curl -s -X POST http://127.0.0.1:8090/cameras \
 A camera that needs a login, or a custom path the search does not know:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8090/cameras \
+curl -s -u "$MTX_API_USER:$MTX_API_PASSWORD" \
+  -X POST http://127.0.0.1:8090/cameras \
   -H 'content-type: application/json' \
   -d '{"cameras":[
     "http://10.128.93.15/audio",
@@ -91,20 +95,28 @@ curl -s -X POST http://127.0.0.1:8090/cameras \
 
 | Port | Who calls it | What it is |
 |------|----------------|------------|
-| `8554` | GPU, VLC, laptop via tunnel | RTSP. Pull `rtsp://10.128.93.13:8554/<path>` over TCP. Open from `10.128.81.10`. |
-| `9997` | Mini | MediaMTX API. Live or dead for the paths that are publishing. `GET /v3/paths/list` is every path. `GET /v3/paths/get/<name>` is one path. |
-| `8090` | Mini localhost | Publisher. `POST /cameras` replaces the camera list. `GET /cameras` shows what was posted. |
+| `8554` | GPU, VLC, laptop via tunnel | RTSP. Clients can read streams without credentials; only the publisher has write access. Restrict network access to trusted devices. |
+| `9997` | Mini localhost | MediaMTX control API. Host port is loopback-only and API calls require the generated admin credentials. |
+| `8090` | Mini localhost | Camera publisher API. Bound to loopback and requires the generated credentials; `POST /cameras` replaces the list only after validating every entry. Status responses omit camera source URLs and credentials. |
 
-MediaMTX listens on the Mini, `10.128.93.13`. A curl to `10.128.81.10`–`.13` port `9997` fails immediately: those addresses are GPUs, and nothing is listening there. From a GPU, port `9997` on the Mini times out. Port `8554` on the Mini is open. To use the path list from a GPU, allow TCP from `10.128.81.10`–`10.128.81.13` to `10.128.93.13` port `9997`.
+MediaMTX listens on the Mini, `10.128.93.13`. The control API is intentionally not exposed to the LAN, so do not open port `9997` in the firewall. To check a path remotely, create an SSH tunnel to the Mini and use the admin credentials locally through that tunnel. RTSP port `8554` must be reachable by the GPU; restrict it to trusted GPU hosts at the firewall.
 
-`GET /v3/paths/list` is every live path (name, online, codecs). `GET /v3/paths/get/<name>` is one path. That is the same MediaMTX call as mycareapp (`http://127.0.0.1:9997/v3/paths/list` on the machine where MediaMTX runs). Adding cameras is port `8090`, Mini only.
+Load the generated API credentials in a Mini terminal before calling the MediaMTX API:
+
+```bash
+set -a
+source "$HOME/Library/Application Support/mediamtx-cameras/credentials.env"
+set +a
+```
+
+`GET /v3/paths/list` is every live path (name, online, codecs). `GET /v3/paths/get/<name>` is one path. Adding cameras uses port `8090`, which is available only on the Mini itself.
 
 On the Mini, one camera is live when the call returns `200` and `"online": true`. `404` means that path is not publishing:
 
 ```bash
-curl -s http://127.0.0.1:9997/v3/paths/get/cam_sense
-curl -s http://127.0.0.1:9997/v3/paths/list
-curl -s http://127.0.0.1:8090/cameras
+curl -s -u "$MTX_API_USER:$MTX_API_PASSWORD" http://127.0.0.1:9997/v3/paths/get/cam_sense
+curl -s -u "$MTX_API_USER:$MTX_API_PASSWORD" http://127.0.0.1:9997/v3/paths/list
+curl -s -u "$MTX_API_USER:$MTX_API_PASSWORD" http://127.0.0.1:8090/cameras
 ```
 
 From a GPU, check the stream on `8554`. A live camera prints video. A dead one returns 404:
@@ -116,7 +128,7 @@ ffprobe -rtsp_transport tcp rtsp://10.128.93.13:8554/cam_sense
 From a laptop that can SSH to the Mini:
 
 ```bash
-ssh USER@10.128.93.13 'curl -s http://127.0.0.1:9997/v3/paths/get/cam_sense'
+ssh USER@10.128.93.13 'set -a; source "$HOME/Library/Application Support/mediamtx-cameras/credentials.env"; set +a; curl -u "$MTX_API_USER:$MTX_API_PASSWORD" http://127.0.0.1:9997/v3/paths/get/cam_sense'
 ```
 
 | Camera | RTSP |
@@ -148,7 +160,7 @@ mycareapp’s file publisher uses `rtsp://127.0.0.1:8554/test/video1`. These lab
 Do not POST the camera list again. Do not stop MediaMTX. Check that one path on the Mini (`200` is live, `404` is not publishing):
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9997/v3/paths/get/PATH
+curl -s -u "$MTX_API_USER:$MTX_API_PASSWORD" -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9997/v3/paths/get/PATH
 ```
 
 `PATH` is `cam_sense`, `cam_sense2`, and so on. If it is `404`, check the camera from the Mini. An ESP Sense board is port `81`. An RTSP camera is port `554`:
@@ -182,26 +194,7 @@ kill PID
 
 Wait a few seconds and curl the path again. `200` means it is publishing. On the Mini, play `rtsp://127.0.0.1:8554/PATH`. On a laptop, play `rtsp://127.0.0.1:18554/PATH` only while the SSH tunnel is open. A GPU plays `rtsp://10.128.93.13:8554/PATH`.
 
-Stop the server: `docker compose down` from `mediamtx/docker`. Do not stop it just to add or replug a camera.
-
-## One-shot script
-
-Same ESP paths, in the foreground, without Docker. Needs `brew install mediamtx ffmpeg` on the Mini.
-
-```bash
-# both live Sense boards (audio + video)
-SENSE_AV_URLS=http://10.128.93.15,http://10.128.93.24 ./scripts/mediamtx_run.sh
-
-# one board
-SENSE_AV_URL=http://10.128.93.15 ./scripts/mediamtx_run.sh
-
-# video-only firmware (CameraWebServerWiFi, no /audio) → cam_xiao, cam_xiao2, …
-./scripts/mediamtx_run.sh http://10.128.93.25:81/stream
-```
-
-Sense paths are `cam_sense`, `cam_sense2`, …. Video-only paths are `cam_xiao`, `cam_xiao2`, …. Stop with Ctrl+C. If port 8554 is busy: `pkill -f mediamtx`.
-
-The shell publisher also tees speech PCM to `udp://127.0.0.1:19055` for Whisper. The Docker publisher does not; it only serves H.264 + AAC on RTSP. Whisper setup: [`firmware/CameraWebServerWiFiSense/README.md`](../firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini).
+Stop the server with `docker compose --env-file "$HOME/Library/Application Support/mediamtx-cameras/credentials.env" -f mediamtx/docker/docker-compose.yml down` from the repository root. Do not stop it just to add or replug a camera.
 
 ## Watch
 
@@ -211,20 +204,20 @@ Laptop: the SSH tunnel above, then `rtsp://127.0.0.1:18554/cam_sense`
 
 VLC: Open Network → that RTSP URL → **RTP over RTSP (TCP)**, and turn the audio track on. `cam_sense3` is video only.
 
-## Record
+## Record a stream
 
-While a path is publishing, save it with stream-copy (H.264, plus AAC when the camera has audio). Any machine that can open port `8554` can record. That includes the Mini and a GPU node. Ctrl-C finishes a playable MP4.
+While a path is live, save it as an MP4. The helper uses ffmpeg to copy the video and audio without re-encoding. Install ffmpeg on the machine that runs the command.
 
 On the Mini, from this repo:
 
 ```bash
-# cam_sense, 120 seconds, recordings/cam_sense-<time>.mp4
+# Save cam_sense for the default 120 seconds.
 ./mediamtx/record.sh
 
-# the README example
+# Save a named file for 120 seconds.
 ./mediamtx/record.sh cam_sense -o recordings/sense-demo.mp4 -t 120
 
-# second camera
+# Save the second camera for 60 seconds.
 ./mediamtx/record.sh cam_sense2 -t 60
 ```
 
@@ -237,13 +230,17 @@ ffmpeg -rtsp_transport tcp -i rtsp://10.128.93.13:8554/cam_sense \
 
 Use `cam_sense2` or `cam_sense3` the same way. `cam_sense3` has no audio; the optional audio map still writes a video file.
 
-## Files
+## What the scripts and configs do
 
-| File | Role |
-|------|------|
-| `mediamtx/docker/` | Always-on MediaMTX + publisher (`POST /cameras` on `:8090`) |
-| `mediamtx/docker/mediamtx.yml` | Server config (API `:9997`, RTSP `:8554`, `all_others`) |
-| `mediamtx/mediamtx.yml` | Base config for `./scripts/mediamtx_run.sh` |
-| `mediamtx/mediamtx.runtime.yml` | Generated by the script (not committed) |
-| `mediamtx/record.sh` | Record one path (video + audio) |
-| `scripts/ffmpeg_sense_av.sh` | Shell remux used by `mediamtx_run.sh` |
+| File | In simple terms |
+|------|-----------------|
+| `mediamtx/docker/app.py` | Accepts the camera list, finds stream URLs when needed, starts ffmpeg publishers, and saves the list so it can be restored after restart. |
+| `mediamtx/docker/run_publisher.sh` | Starts the camera-list service and restarts it if it stops. |
+| `mediamtx/docker/install_service.sh` | Starts MediaMTX and installs the publisher as a macOS background service that starts at login. |
+| `mediamtx/docker/Dockerfile` | Builds the optional Docker image for running the publisher inside Docker. |
+| `mediamtx/record.sh` | Saves one live RTSP stream to an MP4 file using ffmpeg. |
+| `mediamtx/docker/docker-compose.yml` | Starts the lab Mini's MediaMTX container. The optional `in-container` profile runs the publisher in Docker instead of on the Mac host. |
+| `mediamtx/docker/mediamtx.yml` | Sets the lab Mini server's RTSP and API ports and allows publishers to create camera paths. |
+| `../mediamtx.yml` | Configures the separate root Compose MediaMTX service used with local test videos. Keep this separate from the lab Mini config. |
+
+The unused one-shot and webcam configurations were removed. The root Compose test-video workflow is separate from the lab camera publisher described here.

@@ -8,12 +8,14 @@ services:
     restart: unless-stopped
     ports:
       - "8554:8554"
-      - "9997:9997"
+      - "127.0.0.1:9997:9997"
     command: ["/mediamtx.yml"]
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
     environment:
       MTX_API: "yes"
+      MTX_AUTHINTERNALUSERS_1_PASS: ${MTX_PUBLISH_PASSWORD:?Run install_service.sh to create publisher credentials}
+      MTX_AUTHINTERNALUSERS_2_PASS: ${MTX_API_PASSWORD:?Run install_service.sh to create API credentials}
 
   # Not used on the Mini. `docker compose --profile in-container up` only.
   cameras:
@@ -21,13 +23,18 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
     environment:
       MTX_HOST: mediamtx
       RTSP_PORT: "8554"
       MEDIAMTX_LAN_IP: ${MEDIAMTX_LAN_IP:-10.128.93.13}
+      API_HOST: "0.0.0.0"
       API_PORT: "8090"
       DATA_PATH: /data/cameras.json
+      MTX_API_USER: ${MTX_API_USER:-admin}
+      MTX_API_PASSWORD: ${MTX_API_PASSWORD:?Run install_service.sh to create API credentials}
+      MTX_PUBLISH_USER: ${MTX_PUBLISH_USER:-publisher}
+      MTX_PUBLISH_PASSWORD: ${MTX_PUBLISH_PASSWORD:?Run install_service.sh to create publisher credentials}
     volumes:
       - camdata:/data
     depends_on:

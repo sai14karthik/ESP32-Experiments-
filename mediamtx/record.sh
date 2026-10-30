@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Record one MediaMTX path with video and audio.
+# Save a MediaMTX stream to an MP4 file using ffmpeg.
 #
 #   ./mediamtx/record.sh
 #   ./mediamtx/record.sh cam_sense2
 #   ./mediamtx/record.sh cam_sense -o recordings/sense-demo.mp4 -t 120
 #
-# Default is cam_sense for 120 seconds. Ctrl-C finishes a playable MP4.
+# Needs ffmpeg. The default saves cam_sense for 120 seconds.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,12 +55,15 @@ elif [[ "$OUTPUT" != /* ]]; then
   OUTPUT="${ROOT}/${OUTPUT}"
 fi
 
-ARGS=(python3 "${ROOT}/scripts/record_rtsp.py" "$URL" -o "$OUTPUT")
+ARGS=(ffmpeg -hide_banner -rtsp_transport tcp -i "$URL")
 if [[ -n "$DURATION" && "$DURATION" != "0" ]]; then
   ARGS+=(-t "$DURATION")
 fi
+ARGS+=(-map 0:v:0 -map '0:a:0?' -c copy)
 if [[ ${#EXTRA[@]} -gt 0 ]]; then
   ARGS+=("${EXTRA[@]}")
 fi
+mkdir -p "$(dirname "$OUTPUT")"
+ARGS+=("$OUTPUT")
 
 exec "${ARGS[@]}"
