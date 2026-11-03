@@ -558,6 +558,8 @@ class Supervisor:
         self._generation = 0
         self._procs: dict[str, subprocess.Popen] = {}
         self._specs: list[dict] = []
+        self._fail_streak: dict[str, int] = {}
+        self._health_stop = threading.Event()
 
     def snapshot(self) -> list[dict]:
         """Return a safe copy of the currently configured cameras."""
@@ -571,6 +573,7 @@ class Supervisor:
             self._generation += 1
             gen = self._generation
             procs = self._take_procs_locked()
+            self._fail_streak.clear()
         self._wait_procs(procs)
         with self._lock:
             if gen != self._generation:
@@ -596,8 +599,41 @@ class Supervisor:
         except ValueError as exc:
             log(f"restore skipped: {exc}")
 
+    def start_health(self) -> None:
+        """Watch for dead ffmpeg processes and restart them without a manual kick."""
+        threading.Thread(target=self._health_loop, daemon=True).start()
+
+    def restart_streams(self) -> list[dict]:
+        """Kill and republish every saved camera in this same process (keeps LAN rights)."""
+        with self._lock:
+            keep = list(self._specs)
+        if not keep:
+            items = self._load()
+            if not items:
+                return []
+            cams, _skipped = self.replace(items)
+            return cams
+        with self._lock:
+            self._generation += 1
+            gen = self._generation
+            procs = self._take_procs_locked()
+            self._fail_streak.clear()
+            keep = list(self._specs)
+        self._wait_procs(procs)
+        with self._lock:
+            if gen != self._generation:
+                return [client_spec(spec) for spec in self._specs]
+            for spec in keep:
+                self._start_locked(spec, gen)
+        log(
+            "restart streams: "
+            + (", ".join(f"{redact(s['source'])}->{s['path']}" for s in keep) or "(none)")
+        )
+        return [client_spec(spec) for spec in keep]
+
     def stop(self) -> None:
         """Stop all active stream processes."""
+        self._health_stop.set()
         with self._lock:
             self._generation += 1
             procs = self._take_procs_locked()
@@ -636,6 +672,8 @@ class Supervisor:
             stderr=subprocess.PIPE,
         )
         self._procs[spec["source"]] = proc
+        # A live process resets the reconnect backoff for this camera.
+        self._fail_streak[spec["source"]] = 0
         threading.Thread(
             target=self._log_stderr, args=(spec["path"], proc), daemon=True
         ).start()
@@ -656,7 +694,16 @@ class Supervisor:
         """Restart a stream process if it exits and the camera is still active."""
         code = proc.wait()
         log(f"exit {spec['path']} code={code}")
-        time.sleep(3)
+        with self._lock:
+            if gen != self._generation:
+                return
+            if not any(s["source"] == spec["source"] for s in self._specs):
+                return
+            streak = self._fail_streak.get(spec["source"], 0) + 1
+            self._fail_streak[spec["source"]] = streak
+        # Back off on No route / refused so cameras are not hammered every 3s.
+        delay = min(60, 3 * (2 ** min(streak - 1, 4)))
+        time.sleep(delay)
         with self._lock:
             if gen != self._generation:
                 return
@@ -666,6 +713,57 @@ class Supervisor:
             if current is not None and current is not proc and current.poll() is None:
                 return
             self._start_locked(spec, gen)
+
+    def _path_online(self, path: str) -> bool | None:
+        """True if MediaMTX has this path, False if 404, None if API unreachable."""
+        if not API_USER or not API_PASSWORD:
+            return None
+        url = f"http://127.0.0.1:9997/v3/paths/get/{path}"
+        req = urllib.request.Request(url)
+        token = base64.b64encode(f"{API_USER}:{API_PASSWORD}".encode()).decode()
+        req.add_header("Authorization", f"Basic {token}")
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return 200 <= getattr(resp, "status", 200) < 300
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            return None
+        except Exception:
+            return None
+
+    def _health_loop(self) -> None:
+        """Restart dead or stuck publishers so paths do not stay 404 overnight."""
+        while not self._health_stop.wait(15):
+            with self._lock:
+                specs = list(self._specs)
+                procs = {s["source"]: self._procs.get(s["source"]) for s in specs}
+            dead: list[dict] = []
+            kill: list[subprocess.Popen] = []
+            for spec in specs:
+                proc = procs.get(spec["source"])
+                if proc is None or proc.poll() is not None:
+                    dead.append(spec)
+                    continue
+                online = self._path_online(spec["path"])
+                if online is False:
+                    log(f"health kill stuck {spec['path']}")
+                    kill.append(proc)
+            for proc in kill:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            if not dead:
+                continue
+            with self._lock:
+                gen = self._generation
+                for spec in dead:
+                    current = self._procs.get(spec["source"])
+                    if current is not None and current.poll() is None:
+                        continue
+                    log(f"health restart {spec['path']}")
+                    self._start_locked(spec, gen)
 
     def _take_procs_locked(self) -> list[subprocess.Popen]:
         """Remove and return all tracked processes while holding the lock."""
@@ -777,11 +875,21 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        """Validate a camera-list request and replace the active streams."""
+        """Replace the camera list, or republish streams without changing it."""
         if not self._authorized():
             self._unauthorized()
             return
         path = urlparse(self.path).path.rstrip("/") or "/"
+        if path == "/restart":
+            try:
+                length = int(self.headers.get("content-length", "0") or 0)
+            except ValueError:
+                length = 0
+            if length > 0:
+                self.rfile.read(min(length, 262144))
+            cams = SUPER.restart_streams()
+            self._json(200, {"ok": True, "cameras": cams})
+            return
         if path != "/cameras":
             self._json(404, {"ok": False, "error": "not found"})
             return
@@ -826,6 +934,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
     try:
         SUPER.restore()
+        SUPER.start_health()
         log(f"camera API on {API_HOST}:{API_PORT}  mediamtx rtsp://{LAN_IP}:8554")
         server.serve_forever()
     finally:

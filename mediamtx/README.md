@@ -41,6 +41,8 @@ From the repository root, install and start the publisher service:
 
 The installer starts the MediaMTX Docker container, creates private publisher and API passwords, copies the publisher files into macOS Application Support, and sets the publisher to start at login. The credentials are saved in `~/Library/Application Support/mediamtx-cameras/credentials.env` with owner-only permissions; do not share or commit that file. To start only MediaMTX manually, first run `./mediamtx/docker/install_service.sh`, then run `docker compose --env-file "$HOME/Library/Application Support/mediamtx-cameras/credentials.env" -f mediamtx/docker/docker-compose.yml up -d mediamtx` from the repository root.
 
+The publisher is `MediaMTX Cameras.app`. It needs **System Settings → Privacy & Security → Local Network → MediaMTX Cameras** on. `codesign --force` clears that grant even when the toggle still looks on. The installer only resigns when the app bundle changes; if it prints a signed message, turn Local Network off and on once for that app, then reopen it.
+
 Each entry is a camera IP or a stream URL. For an IP, the Mini looks for a working picture: common RTSP paths (port 554), common HTTP picture paths, and an ESP Sense board (`:81/stream` plus `/audio`). A posted `rtsp://` or `http://` URL is used as given. `http://IP/audio` is an ESP Sense board: picture and mic. The stream is republished as H.264, with audio when the camera sends it.
 
 The publisher API needs the generated username and password. Load them in the Mini terminal before making API calls:
