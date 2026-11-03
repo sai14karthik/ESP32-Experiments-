@@ -1,8 +1,9 @@
 #!/bin/bash
-# Mini-only: check MediaMTX paths + cameras; recover without killing a good publisher.
+# Mini-only: check MediaMTX paths + cameras; recover without manual ritual.
 # Usage:
-#   ./health_cameras.sh           # status only
-#   ./health_cameras.sh --fix     # recover (POST /restart, or start if 8090 free)
+#   ./health_cameras.sh              # status only
+#   ./health_cameras.sh --fix        # recover
+#   ./health_cameras.sh --fix-quiet  # for LaunchAgent
 set -eu
 
 DIR="${HOME}/Library/Application Support/mediamtx-cameras"
@@ -41,19 +42,48 @@ path_code() {
   printf '%s' "${out}"
 }
 
+paths_down() {
+  local p code
+  for p in cam_sense cam_sense2 cam_sense3 cam_sense4; do
+    code=$(path_code "${p}")
+    if [ "${code}" != "200" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_paths() {
+  local p
+  for p in cam_sense cam_sense2 cam_sense3 cam_sense4; do
+    echo "${p} $(path_code "${p}")"
+  done
+}
+
+hard_start_publisher() {
+  logh "hard start publisher"
+  pkill -9 -f 'run_publisher.sh' 2>/dev/null || true
+  pkill -9 -f 'Python -u app.py' 2>/dev/null || true
+  sleep 2
+  if lsof -nP -iTCP:8090 -sTCP:LISTEN >/dev/null 2>&1; then
+    kill -9 $(lsof -nP -iTCP:8090 -sTCP:LISTEN -t) 2>/dev/null || true
+    sleep 1
+  fi
+  cd "${DIR}"
+  nohup ./run_publisher.sh >>"${LOG}" 2>&1 &
+  disown || true
+  sleep 15
+}
+
 if [ "${QUIET}" -eq 0 ]; then
   echo "=== paths ==="
+  print_paths
 fi
+
 DOWN=0
-for p in cam_sense cam_sense2 cam_sense3 cam_sense4; do
-  code=$(path_code "${p}")
-  if [ "${QUIET}" -eq 0 ]; then
-    echo "${p} ${code}"
-  fi
-  if [ "${code}" != "200" ]; then
-    DOWN=1
-  fi
-done
+if paths_down; then
+  DOWN=1
+fi
 
 PID=""
 PID=$(lsof -nP -iTCP:8090 -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)
@@ -88,7 +118,7 @@ fi
 
 if [ "${FIX}" -ne 1 ]; then
   echo
-  echo "status only. To recover: $0 --fix"
+  echo "status only. To recover: \"$HOME/Library/Application Support/mediamtx-cameras/health_cameras.sh\" --fix"
   exit 0
 fi
 
@@ -97,41 +127,31 @@ if [ "${DOWN}" -eq 0 ] && [ -n "${PID}" ]; then
   exit 0
 fi
 
-echo "=== fix ==="
+if [ "${QUIET}" -eq 0 ]; then
+  echo "=== fix ==="
+fi
+
 if [ -z "${PID}" ]; then
   logh "8090 free - starting publisher"
-  cd "${DIR}"
-  nohup ./run_publisher.sh >>"${LOG}" 2>&1 &
-  disown || true
-  sleep 10
-elif [ "${DOWN}" -eq 1 ]; then
-  # Prefer in-process restart so the SSH/nohup publisher keeps its network rights.
+  hard_start_publisher
+else
+  # Soft restart first (same process / same network rights).
   logh "paths down - POST /restart pid=${PID}"
   code=$(curl -s -u "${MTX_API_USER}:${MTX_API_PASSWORD}" -o /tmp/mediamtx-restart.json -w "%{http_code}" \
     -X POST "http://127.0.0.1:8090/restart" || echo "000")
-  if [ "${code}" != "200" ]; then
-    logh "POST /restart failed http=${code} - hard restart"
-    kill -9 "${PID}" 2>/dev/null || true
-    pkill -9 -f 'run_publisher.sh' 2>/dev/null || true
-    pkill -9 -f 'Python -u app.py' 2>/dev/null || true
-    sleep 2
-    cd "${DIR}"
-    nohup ./run_publisher.sh >>"${LOG}" 2>&1 &
-    disown || true
+  sleep 15
+  if [ "${code}" != "200" ] || paths_down; then
+    logh "still down after /restart (http=${code}) - hard restart"
+    hard_start_publisher
+  else
+    logh "recovered via /restart"
   fi
-  sleep 10
-else
-  logh "ok"
-  exit 0
 fi
 
 if [ "${QUIET}" -eq 0 ]; then
   echo "=== paths after fix ==="
+  print_paths
 fi
 for p in cam_sense cam_sense2 cam_sense3 cam_sense4; do
-  code=$(path_code "${p}")
-  if [ "${QUIET}" -eq 0 ]; then
-    echo "${p} ${code}"
-  fi
-  logh "after ${p} ${code}"
+  logh "after ${p} $(path_code "${p}")"
 done

@@ -25,4 +25,5 @@ authInternalUsers:
 paths:
   all_others:
     source: publisher
-    overridePublisher: false
+    # Allow ffmpeg to reclaim a path after a drop (false left cam_sense3/4 stuck 404).
+    overridePublisher: true
