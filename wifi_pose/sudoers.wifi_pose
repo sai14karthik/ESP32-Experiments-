@@ -1,0 +1,4 @@
+# Passwordless root for wifi_pose RealSense recording only.
+# Install: ./scripts/install_nopasswd.sh
+Cmnd_Alias WIFI_POSE = /Users/saikarthik/Desktop/camera_module/wifi_pose/.venv/bin/python -m wifi_pose.record, /Users/saikarthik/Desktop/camera_module/wifi_pose/.venv/bin/python -m wifi_pose.record *
+saikarthik ALL=(root) NOPASSWD:SETENV: WIFI_POSE
