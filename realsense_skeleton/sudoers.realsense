@@ -1,0 +1,4 @@
+# Passwordless root for the RealSense live skeleton viewer only.
+# Install: ./install_nopasswd.sh
+Cmnd_Alias REALSENSE_SKELETON = /Users/saikarthik/Desktop/camera_module/realsense_skeleton/.venv/bin/python -u /Users/saikarthik/Desktop/camera_module/realsense_skeleton/live_joints.py, /Users/saikarthik/Desktop/camera_module/realsense_skeleton/.venv/bin/python -u /Users/saikarthik/Desktop/camera_module/realsense_skeleton/live_joints.py *, /Users/saikarthik/Desktop/camera_module/realsense_skeleton/.venv/bin/python3 -u /Users/saikarthik/Desktop/camera_module/realsense_skeleton/live_joints.py, /Users/saikarthik/Desktop/camera_module/realsense_skeleton/.venv/bin/python3 -u /Users/saikarthik/Desktop/camera_module/realsense_skeleton/live_joints.py *
+saikarthik ALL=(root) NOPASSWD:SETENV: REALSENSE_SKELETON
