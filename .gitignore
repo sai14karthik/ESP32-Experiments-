@@ -1,11 +1,54 @@
+# =============================================================================
+# Whitelist: only ESP-type project trees are tracked for GitHub.
+# Everything else at the repo root is ignored (local lab clutter stays local).
+# =============================================================================
+
+# Ignore all top-level entries by default
+/*
+
+# Repo meta (keep)
+!/.gitignore
+!/.gitattributes
+!/.gitmodules
+!/README.md
+
+# --- ESP-type project folders (source, examples, speaker images) ---
+!/firmware/
+!/wifi_speaker/
+!/speakers/
+!/esp-csi/
+!/esp32-camera/
+!/esp32cam-ready/
+!/esp32cam-rtsp/
+!/ESP32-CSI-Tool/
+!/ESP32-CSI-Tool-master/
+!/ESP32-RTSP/
+!/ESP32-RTSPServer/
+!/ESP32_RTSP/
+!/Micro-RTSP/
+!/SeeedStudio-XIAO-ESP32S3-Sense-camera/
+!/luma-esp32-ai-assistant/
+!/esphome-wifi-csi/
+!/espectre/
+!/espectre-sense/
+!/csi/
+!/contactless_respiration/
+
+# =============================================================================
+# Still ignore junk / secrets / build artifacts *inside* allowed trees
+# =============================================================================
+
 # OS / editor
 .DS_Store
 Thumbs.db
 .AppleDouble
 .idea/
 .cache/
+.vscode/
+.cursor/
+.agents/
 
-# Python
+# Python (host tools that may live next to firmware)
 .venv/
 **/.venv/
 **/.venv-ml/
@@ -48,7 +91,8 @@ sdkconfig.old
 compile_commands.json
 .clangd/
 
-# Firmware binaries produced by local compiles (keep source + partitions.csv)
+# Firmware binaries from local compiles (keep packaged flash images under
+# speakers/ and wifi_speaker/; ignore ad-hoc dumps at firmware/*.bin)
 *.elf
 *.map
 *.o
@@ -58,62 +102,33 @@ compile_commands.json
 *_flashed.bin
 *.ino.merged.bin
 *.ino.bin
-firmware/*.bin
+/firmware/*.bin
 
-# Logs
+# Logs / archives
 *.log
-
-# Archives (local copies / vendor dumps)
 *.zip
 
-# CatBoost / training run artifacts
-**/catboost_info/
-
-# Generated CSI exports (too large for GitHub; keep fixtures/)
-csi_pipeline_new/exports/*.csv
-csi_pipeline/exports/*.csv
-presence_detection/exports/*.csv
-presence_detection/models/*.joblib
-
-# MediaMTX generated at runtime (do not commit)
-mediamtx/mediamtx.runtime.yml
-mediamtx/run_xiao_publish.sh
-mediamtx/hanwha.url
-mediamtx/docker/data/
-
-# Local RTSP recordings (record_rtsp.py)
-/recordings/
-
-# Local reference clones (lab uses firmware/CameraRTSPWiFi/Micro-RTSP submodule)
-/ESP32-RTSP/
-/ESP32_RTSP/
-/ESP32-RTSPServer/
-/Micro-RTSP/
+# Nested local clones already covered by /* (listed for clarity if re-added)
 /whisper/
 /whisper-diarization/
 /WhisperLiveKitDiarization/
-
-# Whisper model cache / weights (never commit)
-**/.cache/whisper/
-**/whisper_models/
-*.pt
-!yolov8n.pt
-
-# Local Cursor (rules, plans — machine / session)
-.cursor/
-
-# Local unzipped reference trees (do not publish)
 /rpm-main/
 /gpu-cluster-main/
 /wifi-sensing-main/
 /wifi sensing/
 /docs_nivdia/
 /docs_nvidia/
-
-# Local reference materials (do not publish)
 /materials/
 /heartrate estimation/
 /Hands-on Wireless Sensing/
 /docs/
 /data/
-ngrok.log
+/mediamtx/
+/mediamtx-repo/
+/csi_pipeline/
+/csi_pipeline_new/
+/csi_presence_c5/
+/presence_detection/
+/healthcare_pose_activity/
+/scripts/
+/runs/
