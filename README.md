@@ -1,39 +1,48 @@
-# ESP32 toolkit
+# ESP32 Experiments
 
-| | |
+GitHub tracks **ESP-type project trees only**. Lab host tooling (CSI ingest, presence ML, MediaMTX, Whisper, RPM, docs, scripts) stays local and is ignored via `.gitignore`.
+
+## Tracked ESP folders
+
+| Folder | What it is |
 |---|---|
-| **Fresh install** (ZIP / clone) | [docs/install.md](docs/install.md) — camera + CSI |
-| **CSI methods** 4.1 / 4.2 / 4.3 | [docs/CSI_METHODS.md](docs/CSI_METHODS.md) |
-| **Presence detection** (N× C5 CSI) | [presence_detection/README.md](presence_detection/README.md) |
-| **CSI capture / Mini ingest** | [csi_pipeline_new/README.md](csi_pipeline_new/README.md) |
-| **MediaMTX** (XIAO / Sense → Mini → RTSP) | [mediamtx/README.md](mediamtx/README.md) |
-| **Record RTSP** (MP4 video+audio) | `./scripts/record_rtsp.py` — see [mediamtx/README.md](mediamtx/README.md#record-video--audio) |
-| **S3 Sense** (cam + mic + CSI) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md) |
-| **Live Whisper captions** (Sense mic → Mini) | [firmware/CameraWebServerWiFiSense/README.md](firmware/CameraWebServerWiFiSense/README.md#live-voice-recognition-whisper-on-mini) |
-| **Papers / reading** | [materials/](materials/) |
+| [`firmware/`](firmware/) | Lab camera / BLE firmwares (CameraWebServer*, CameraRTSPWiFi, apple_ble_scan) |
+| [`wifi_speaker/`](wifi_speaker/) | Waveshare ESP32-S3-AUDIO-Board → AirPlay Wi‑Fi speaker |
+| [`speakers/`](speakers/) | Same board → Katie (XiaoZhi) voice image; flash helpers |
+| [`esp-csi/`](esp-csi/) | Espressif CSI examples (incl. room presence RX/TX) |
+| [`csi/`](csi/) | CSI firmware + shared collector bits |
+| [`contactless_respiration/`](contactless_respiration/) | ESP32 CSI vitals / respiration |
+| [`esp32-camera/`](esp32-camera/) | Espressif camera driver (submodule) |
+| [`esp32cam-ready/`](esp32cam-ready/), [`esp32cam-rtsp/`](esp32cam-rtsp/) | ESP32-CAM RTSP refs (submodules) |
+| [`ESP32-CSI-Tool/`](ESP32-CSI-Tool/) | Hernandez classic ESP32 CSI kit (submodule) |
+| [`ESP32-RTSPServer/`](ESP32-RTSPServer/), [`ESP32_RTSP/`](ESP32_RTSP/), [`Micro-RTSP/`](Micro-RTSP/) | RTSP library refs |
+| [`SeeedStudio-XIAO-ESP32S3-Sense-camera/`](SeeedStudio-XIAO-ESP32S3-Sense-camera/) | XIAO Sense camera examples |
+| [`luma-esp32-ai-assistant/`](luma-esp32-ai-assistant/) | ESP32-S3 + local Whisper/Ollama ref |
+| [`esphome-wifi-csi/`](esphome-wifi-csi/), [`espectre/`](espectre/), [`espectre-sense/`](espectre-sense/) | ESPHome / ESPectre CSI refs |
 
-## Common commands
+## Quick start (speakers)
 
 ```bash
-# Presence (preferred front door on Mini)
-cd presence_detection
-./run_presence.sh clients
-./run_presence.sh capture empty_01
-./run_presence.sh train && ./run_presence.sh calibrate
-# stop ingest, then:
-./run_presence.sh live
+# AirPlay Wi‑Fi speaker (clears saved Wi‑Fi; setup hotspot comes back)
+./wifi_speaker/flash.sh
 
-# Low-level capture / CSI
-cd csi_pipeline_new && ./run_multi_ingest.sh --label empty_01
-cd csi_pipeline_new && ./count_csi_clients.sh
-
-./scripts/monitor_csi.sh          # 4.1 IDF monitor (USB debug)
-./scripts/set_csi_tcp_host.sh …   # flash C5 TCP → Mini
-
-# Sense A/V + live captions (Mini; keep CSI separate)
-uv sync --group whisper
-SENSE_AV_URL=http://10.128.93.25 ./scripts/mediamtx_run.sh   # VLC: …/cam_sense
-./scripts/sense_whisper_live.sh                              # UDP :19055, model turbo
-./scripts/record_rtsp.py rtsp://127.0.0.1:8554/cam_sense      # save MP4 (A/V); Ctrl-C to stop
-# details: firmware/CameraWebServerWiFiSense/README.md · mediamtx/README.md
+# Katie voice image (keeps saved Wi‑Fi)
+./speakers/flash.sh katie
 ```
+
+Details: [`wifi_speaker/README.md`](wifi_speaker/README.md) · [`speakers/README.md`](speakers/README.md)
+
+## Camera firmware
+
+Arduino / IDF projects under [`firmware/`](firmware/), e.g.:
+
+- `CameraWebServerWiFi` — MJPEG HTTP (`:81/stream`)
+- `CameraWebServerWiFiSense` — cam + PDM mic + CSI USB
+- `CameraRTSPWiFi` — Micro-RTSP experiments
+- `apple_ble_scan` — ESP-IDF BLE scan
+
+## Policy
+
+- **Commit / push:** only the ESP folders above (+ this README / `.gitignore` / `.gitmodules`)
+- **Do not commit:** secrets (`*.env`, keys, `sdkconfig.defaults.local`), IDF `build/` trees, or ignored host pipelines
+- **Submodules:** ESP-related only (see `.gitmodules`)
