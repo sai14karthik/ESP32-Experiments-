@@ -29,23 +29,11 @@ Saved Wi-Fi on the board is not erased. The flash stops if the USB device is not
 
 ## Wi-Fi speaker (AirPlay)
 
-This chip cannot be a normal Bluetooth speaker. It can be a Wi-Fi AirPlay speaker for iPhone / Mac.
-
-Flash (replaces Katie until you flash Katie again):
+Separate package: **`../wifi_speaker/`** (firmware, flash scripts, full instructions).
 
 ```bash
-./speakers/flash_wifi_speaker.sh
-# or
-./speakers/flash_wifi_speaker.sh /dev/cu.usbmodem1101
+./wifi_speaker/flash.sh
 ```
-
-1. Join hotspot **ESP32-AirPlay-Setup** (2.4 GHz).
-2. Open **http://192.168.4.1** and enter the same Wi-Fi your phone uses.
-3. On iPhone / Mac: Control Center → AirPlay → **ESP32-AirPlay**, then play music.
-
-Restore the voice speaker later with `./speakers/flash.sh katie`.
-
-Image: `speakers/firmware/wifi_speaker/`.
 
 ## Add another speaker
 
